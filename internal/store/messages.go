@@ -61,6 +61,16 @@ func (db *DB) InsertMessages(ctx context.Context, messages []model.Message) (int
 	return inserted, nil
 }
 
+// claimableCampaign restricts a claim to messages whose campaign is still sending. A message of a
+// paused or finished campaign stays pending until the campaign is resumed, so a paused campaign
+// does not spin: without this the batch would claim and release the same rows forever.
+const claimableCampaign = `(kind NOT IN (?, ?) OR campaign_id IN (SELECT id FROM campaigns WHERE status = ?))`
+
+// claimableArgs are the placeholders of claimableCampaign.
+func claimableArgs() []any {
+	return []any{string(model.KindCampaign), string(model.KindLastChance), string(model.CampaignSending)}
+}
+
 // ClaimMessages atomically moves up to n pending messages to claimed and returns them. The claim is
 // what makes sending at most once (D14): SES is only called after it commits. The order within a
 // batch is the database's, not the caller's.
@@ -68,22 +78,25 @@ func (db *DB) ClaimMessages(ctx context.Context, n int) ([]model.Message, error)
 	if n <= 0 {
 		return nil, nil
 	}
-	return db.claim(ctx, "SELECT id FROM messages WHERE status = ? ORDER BY created_at, id LIMIT ?",
-		string(model.MessagePending), n)
+	args := append([]any{string(model.MessagePending)}, claimableArgs()...)
+	args = append(args, n)
+	return db.claim(ctx, "SELECT id FROM messages WHERE status = ? AND "+claimableCampaign+
+		" ORDER BY created_at, id LIMIT ?", args...)
 }
 
-// ClaimMessagesByID claims exactly the messages named, skipping any that are not pending.
+// ClaimMessagesByID claims exactly the messages named, skipping any that are not pending or whose
+// campaign is not sending.
 func (db *DB) ClaimMessagesByID(ctx context.Context, ids []string) ([]model.Message, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := []any{string(model.MessagePending)}
+	args := append([]any{string(model.MessagePending)}, claimableArgs()...)
 	placeholders := make([]string, len(ids))
 	for i, id := range ids {
 		placeholders[i] = "?"
 		args = append(args, id)
 	}
-	query := "SELECT id FROM messages WHERE status = ? AND id IN (" + //nolint:gosec // G202: placeholders, not values
+	query := "SELECT id FROM messages WHERE status = ? AND " + claimableCampaign + " AND id IN (" + //nolint:gosec // G202: placeholders, not values
 		strings.Join(placeholders, ",") + ")"
 	return db.claim(ctx, query, args...)
 }

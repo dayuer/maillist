@@ -256,6 +256,35 @@ func (db *DB) CampaignCountersOf(ctx context.Context, id string) (CampaignCounte
 	return stats, lastChance, err
 }
 
+// SetCampaignStartedAt records the first time a campaign started sending; a campaign resumed or
+// sent in steps keeps the earliest (upstream $min: {startedAt}).
+func (db *DB) SetCampaignStartedAt(ctx context.Context, id string, at time.Time) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE campaigns SET started_at = ?, updated_at = ?
+            WHERE id = ? AND (started_at IS NULL OR started_at > ?)`,
+			formatTime(at), formatTime(time.Now()), id, formatTime(at))
+		return err
+	})
+}
+
+// SetCampaignAudienceLimit records the cap a stepped send uses; 0 clears it.
+func (db *DB) SetCampaignAudienceLimit(ctx context.Context, id string, limit int) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE campaigns SET audience_limit = ?, updated_at = ? WHERE id = ?",
+			limit, formatTime(time.Now()), id)
+		return err
+	})
+}
+
+// SetCampaignTestSentAt records when a test email of this campaign went out.
+func (db *DB) SetCampaignTestSentAt(ctx context.Context, id string, at time.Time) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE campaigns SET test_sent_at = ?, updated_at = ? WHERE id = ?",
+			formatTime(at), formatTime(time.Now()), id)
+		return err
+	})
+}
+
 // SetCampaignSentAt records the first send's time; a campaign sent in steps keeps the earliest.
 func (db *DB) SetCampaignSentAt(ctx context.Context, id string, at time.Time) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {

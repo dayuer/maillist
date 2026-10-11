@@ -10,15 +10,32 @@ import (
 	"mailcheap/internal/core/model"
 )
 
-func campaignMessages(t *testing.T, db *DB, campaignID string, n int) []model.Message {
+// sendingCampaign makes a campaign whose messages are claimable: a claim only takes messages of a
+// campaign that is still sending, so a paused one cannot be drained by accident.
+func sendingCampaign(t *testing.T, db *DB) model.Campaign {
 	t.Helper()
+	ctx := context.Background()
 	newsletter := seedNewsletter(t, db)
+	campaign := model.NewCampaign(newsletter.ID, "Issue", time.Now().UTC())
+	campaign.Status = model.CampaignSending
+	if err := db.CreateCampaign(ctx, campaign); err != nil {
+		t.Fatal(err)
+	}
+	return campaign
+}
+
+func campaignMessages(t *testing.T, db *DB, campaign model.Campaign, n int) []model.Message {
+	t.Helper()
+	newsletter, err := db.Newsletter(context.Background(), campaign.NewsletterID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	messages := make([]model.Message, 0, n)
 	for i := 0; i < n; i++ {
 		messages = append(messages, model.Message{
 			ID:           ids.New(),
 			Kind:         model.KindCampaign,
-			CampaignID:   campaignID,
+			CampaignID:   campaign.ID,
 			NewsletterID: newsletter.ID,
 			ContactID:    ids.New(),
 			Email:        fmt.Sprintf("reader%d@example.com", i),
@@ -34,7 +51,7 @@ func campaignMessages(t *testing.T, db *DB, campaignID string, n int) []model.Me
 func TestInsertMessagesIsChunkedAndIdempotent(t *testing.T) {
 	db := openTemp(t)
 	ctx := context.Background()
-	messages := campaignMessages(t, db, ids.New(), 10_000)
+	messages := campaignMessages(t, db, sendingCampaign(t, db), 10_000)
 
 	inserted, err := db.InsertMessages(ctx, messages)
 	if err != nil {
@@ -55,8 +72,7 @@ func TestInsertMessagesIsChunkedAndIdempotent(t *testing.T) {
 func TestClaimMovesPendingToClaimedOnce(t *testing.T) {
 	db := openTemp(t)
 	ctx := context.Background()
-	campaignID := ids.New()
-	if _, err := db.InsertMessages(ctx, campaignMessages(t, db, campaignID, 5)); err != nil {
+	if _, err := db.InsertMessages(ctx, campaignMessages(t, db, sendingCampaign(t, db), 5)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,7 +105,7 @@ func TestClaimMovesPendingToClaimedOnce(t *testing.T) {
 func TestRecoverClaimedMakesUnknownAndNeverReclaims(t *testing.T) {
 	db := openTemp(t)
 	ctx := context.Background()
-	if _, err := db.InsertMessages(ctx, campaignMessages(t, db, ids.New(), 4)); err != nil {
+	if _, err := db.InsertMessages(ctx, campaignMessages(t, db, sendingCampaign(t, db), 4)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ClaimMessages(ctx, 3); err != nil {
@@ -123,7 +139,7 @@ func TestRecoverClaimedMakesUnknownAndNeverReclaims(t *testing.T) {
 func TestMessageLifecycleWritesBack(t *testing.T) {
 	db := openTemp(t)
 	ctx := context.Background()
-	if _, err := db.InsertMessages(ctx, campaignMessages(t, db, ids.New(), 3)); err != nil {
+	if _, err := db.InsertMessages(ctx, campaignMessages(t, db, sendingCampaign(t, db), 3)); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := db.ClaimMessages(ctx, 3)
@@ -169,7 +185,7 @@ func TestMessageLifecycleWritesBack(t *testing.T) {
 func TestReleaseMessageReturnsToPending(t *testing.T) {
 	db := openTemp(t)
 	ctx := context.Background()
-	if _, err := db.InsertMessages(ctx, campaignMessages(t, db, ids.New(), 1)); err != nil {
+	if _, err := db.InsertMessages(ctx, campaignMessages(t, db, sendingCampaign(t, db), 1)); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := db.ClaimMessages(ctx, 1)
@@ -191,11 +207,11 @@ func TestReleaseMessageReturnsToPending(t *testing.T) {
 func TestCountsAndReachedContacts(t *testing.T) {
 	db := openTemp(t)
 	ctx := context.Background()
-	campaignID := ids.New()
-	messages := campaignMessages(t, db, campaignID, 4)
-	if _, err := db.InsertMessages(ctx, messages); err != nil {
+	campaign := sendingCampaign(t, db)
+	if _, err := db.InsertMessages(ctx, campaignMessages(t, db, campaign, 4)); err != nil {
 		t.Fatal(err)
 	}
+	campaignID := campaign.ID
 
 	recipients, lastChance, err := db.CountCampaignMessages(ctx, campaignID)
 	if err != nil || recipients != 4 || lastChance != 0 {
