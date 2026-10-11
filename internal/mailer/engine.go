@@ -545,34 +545,47 @@ func (e *Engine) Queue(ctx context.Context, campaignID string) (QueueResult, err
 		return QueueResult{}, errors.New(problem)
 	}
 
-	audience, err := e.store.SelectAudience(ctx, campaign.NewsletterID, campaign.AudienceLimit)
-	if err != nil {
-		return QueueResult{}, err
-	}
-	if len(audience) == 0 {
-		return QueueResult{Reason: "No active contacts to send to"}, nil
-	}
+	var recipients, lastChance int
+	if campaign.Status == model.CampaignPaused {
+		// "Draft or scheduled: selects the audience. Paused: resumes with the audience it already
+		// has." Upstream skips the walk for a paused campaign, and so must this: a contact who
+		// became active while it sat paused does not belong to an issue that is already half sent,
+		// and the budget was reserved when the audience was first chosen.
+		if recipients, lastChance, err = e.store.CountCampaignMessages(ctx, campaignID); err != nil {
+			return QueueResult{}, err
+		}
+		if recipients+lastChance == 0 {
+			return QueueResult{Reason: "No active contacts to send to"}, nil
+		}
+	} else {
+		audience, err := e.store.SelectAudience(ctx, campaign.NewsletterID, campaign.AudienceLimit)
+		if err != nil {
+			return QueueResult{}, err
+		}
+		if len(audience) == 0 {
+			return QueueResult{Reason: "No active contacts to send to"}, nil
+		}
 
-	// D15: the whole step is reserved up front, so two campaigns cannot overshoot the day together.
-	fits, err := e.store.Reserve(ctx, store.Day(time.Now()), "", len(audience),
-		e.cfg.Limits.MaxSendsPerDay, 0)
-	if err != nil {
-		return QueueResult{}, err
-	}
-	if !fits {
-		return QueueResult{Reason: fmt.Sprintf(
-			"the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", len(audience))}, nil
-	}
+		// D15: the whole step is reserved up front, so two campaigns cannot overshoot the day together.
+		fits, err := e.store.Reserve(ctx, store.Day(time.Now()), "", len(audience),
+			e.cfg.Limits.MaxSendsPerDay, 0)
+		if err != nil {
+			return QueueResult{}, err
+		}
+		if !fits {
+			return QueueResult{Reason: fmt.Sprintf(
+				"the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", len(audience))}, nil
+		}
 
-	if _, err := e.store.InsertMessages(ctx, toMessages(campaign, audience)); err != nil {
-		return QueueResult{}, err
-	}
-	recipients, lastChance, err := e.store.CountCampaignMessages(ctx, campaignID)
-	if err != nil {
-		return QueueResult{}, err
-	}
-	if recipients+lastChance == 0 {
-		return QueueResult{Reason: "No active contacts to send to"}, nil
+		if _, err := e.store.InsertMessages(ctx, toMessages(campaign, audience)); err != nil {
+			return QueueResult{}, err
+		}
+		if recipients, lastChance, err = e.store.CountCampaignMessages(ctx, campaignID); err != nil {
+			return QueueResult{}, err
+		}
+		if recipients+lastChance == 0 {
+			return QueueResult{Reason: "No active contacts to send to"}, nil
+		}
 	}
 
 	moved, err := e.store.SetCampaignStatus(ctx, campaignID,
