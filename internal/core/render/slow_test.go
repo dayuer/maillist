@@ -9,42 +9,78 @@ import (
 // The htmlToText half of tests/slow-inputs.test.mjs. It lives here rather than in the content
 // package because plain-text rendering is this package's job; the cleaning half is in
 // internal/core/content/slow_test.go.
+//
+// The spec is that the conversion stays linear in the input size, and that is what this asserts: a
+// four-times-larger input must not take more than eight times as long. A linear pass is ~4x, a
+// quadratic one ~16x, so 8x separates them with room for a noisy machine.
+//
+// It deliberately does not assert a wall-clock budget. The earlier version did — 200 ms, scaled to
+// 2 s under -race — and it flaked on CI: `unclosed <style>` took 2.123 s on a shared runner and
+// passed on a re-run of the same commit. The conversion is genuinely linear (measured ratios 3.9 to
+// 4.1 at 0.5 MB and 2 MB) but its constant is large: 500 KB of `<style>` takes ~37 ms here and ~890
+// ms under -race. Comparing sizes instead of seconds measures the property the test is named after
+// and does not care how fast the machine is.
 const (
-	slowInputSize = 500_000
-	slowInputMax  = 200 * time.Millisecond
+	smallInputSize = 125_000
+	largeInputSize = 4 * smallInputSize // upstream's 500 KB spec size: 4 x 125 KB
+	// ratioLimit sits between linear (4x) and quadratic (16x).
+	ratioLimit = 8.0
+	// tooQuickToJudge is when the smaller input is too fast for a ratio to mean anything.
+	tooQuickToJudge = 200 * time.Microsecond
 )
 
-func repetition(unit string) string {
-	return strings.Repeat(unit, slowInputSize/len(unit))
+func repetition(unit string, size int) string {
+	return strings.Repeat(unit, size/len(unit))
 }
 
-// 500 KB 的恶意形状转纯文本要线性。
+// 恶意形状在 4 倍输入下不能超过 8 倍耗时：线性 ≈4×，平方 ≈16×。
 func TestHTMLToTextIsLinearOnSlowInputs(t *testing.T) {
-	shapes := map[string]string{
-		"nested <scr<script>ipt>":   strings.Repeat("<scr", slowInputSize/8) + "<script>alert(1)</script>" + strings.Repeat("ipt>", slowInputSize/8),
-		"unclosed <script ":         repetition("<script "),
-		"unclosed <style>":          repetition("<style>"),
-		"unclosed comments":         repetition("<!-- >"),
-		"unclosed <link ":           repetition("<link "),
-		"unclosed <a ":              repetition("<a "),
-		"a run of <":                repetition("<"),
-		"unclosed <div ":            repetition("<div "),
-		"unclosed email-only parts": repetition("<a data-email-only>"),
-	}
-	for label, input := range shapes {
-		start := time.Now()
-		text := HTMLToText(input)
-		elapsed := time.Since(start)
-		t.Logf("%s: %s", label, elapsed.Round(time.Millisecond))
-		limit := slowInputMax
-		if raceEnabled {
-			limit *= 10
+	for label, shape := range slowInputShapes() {
+		small := shape(smallInputSize)
+		large := shape(largeInputSize)
+		_ = HTMLToText(small) // warm the renderer: its one-off costs do not depend on the size
+
+		smallTime := timed(t, label+" small", func() { _ = HTMLToText(small) })
+		largeTime := timed(t, label+" large", func() { _ = HTMLToText(large) })
+		if smallTime < tooQuickToJudge {
+			continue // nothing to measure against
 		}
-		if elapsed > limit {
-			t.Errorf("%s took %s, want under %s", label, elapsed, limit)
+		if ratio := float64(largeTime) / float64(smallTime); ratio > ratioLimit {
+			t.Errorf("%s: %d bytes took %.1fx the time of %d bytes, want under %.0fx",
+				label, largeInputSize, ratio, smallInputSize, ratioLimit)
 		}
-		_ = text
 	}
+}
+
+// slowInputShapes builds the adversarial inputs upstream uses, at whatever size is asked for. Each
+// one is a piece of malformed markup repeated until it fills the input.
+func slowInputShapes() map[string]func(size int) string {
+	repeat := func(unit string) func(int) string {
+		return func(size int) string { return repetition(unit, size) }
+	}
+	return map[string]func(int) string{
+		"nested <scr<script>ipt>": func(size int) string {
+			depth := size / 8
+			return strings.Repeat("<scr", depth) + "<script>alert(1)</script>" + strings.Repeat("ipt>", depth)
+		},
+		"unclosed <script ":         repeat("<script "),
+		"unclosed <style>":          repeat("<style>"),
+		"unclosed comments":         repeat("<!-- >"),
+		"unclosed <link ":           repeat("<link "),
+		"unclosed <a ":              repeat("<a "),
+		"a run of <":                repeat("<"),
+		"unclosed <div ":            repeat("<div "),
+		"unclosed email-only parts": repeat("<a data-email-only>"),
+	}
+}
+
+func timed(t *testing.T, label string, run func()) time.Duration {
+	t.Helper()
+	start := time.Now()
+	run()
+	elapsed := time.Since(start)
+	t.Logf("%s: %s", label, elapsed.Round(time.Microsecond))
+	return elapsed
 }
 
 // htmlToText 是转换器，不是清洗器：upstream 也只断言它的耗时。它的输入是已经清洗过的邮件 HTML，
