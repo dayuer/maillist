@@ -1,0 +1,21 @@
+# One site: everything a reader sees, plus the SES webhook. A newsletter with an archive of its own
+# gets a second site block for that hostname, pointing at the same upstream (design §4.2).
+#
+# The address comes from SITE_ADDRESS: `http://localhost` locally, a bare hostname in production —
+# with a real hostname caddy obtains and renews a certificate for it without further configuration.
+{$SITE_ADDRESS:http://localhost} {
+	encode zstd gzip
+
+	# The archive's own hostnames go here, each as its own site, when the operator has them.
+	reverse_proxy mailcheap:8080 {
+		# The tracking pixel and the uploads carry their own caching instructions from the app; the
+		# unsubscribe and click endpoints must never be cached by anything in between, because a
+		# cached /o/ is an open that never reaches the database.
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	log {
+		output stderr
+		format console
+	}
+}

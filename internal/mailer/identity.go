@@ -2,12 +2,10 @@ package mailer
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2/types"
 )
@@ -55,13 +53,14 @@ type SESIdentity struct {
 	expiresAt time.Time
 }
 
-// NewSESIdentity builds the production reader. It goes through the same credential chain as NewSES.
-func NewSESIdentity(ctx context.Context, region string) (*SESIdentity, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+// NewSESIdentity builds the production reader. It goes through the same credential handling and the
+// same endpoint override as NewSES.
+func NewSESIdentity(ctx context.Context, options SESOptions) (*SESIdentity, error) {
+	cfg, err := awsConfig(ctx, options)
 	if err != nil {
-		return nil, fmt.Errorf("load AWS config: %w", err)
+		return nil, err
 	}
-	return &SESIdentity{client: sesv2.NewFromConfig(cfg), region: region}, nil
+	return &SESIdentity{client: sesv2.NewFromConfig(cfg), region: options.Region}, nil
 }
 
 // Identities returns every domain identity, from cache while it is fresh.

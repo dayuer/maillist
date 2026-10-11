@@ -88,11 +88,19 @@ func newSender(ctx context.Context, cfg config.Config) (mailer.Sender, error) {
 	if cfg.FakeSESLog != "" {
 		return mailer.NewFake(mailer.WithLogFile(cfg.FakeSESLog)), nil
 	}
-	sender, err := mailer.NewSES(ctx, cfg.SESRegion, cfg.SESConfigSet, cfg.SendingOn)
+	sender, err := mailer.NewSES(ctx, sesOptions(cfg), cfg.SESConfigSet, cfg.SendingOn)
 	if err != nil {
 		return nil, fmt.Errorf("SES client: %w", err)
 	}
 	return sender, nil
+}
+
+// sesOptions is where SES is and who is asking, from the configuration.
+func sesOptions(cfg config.Config) mailer.SESOptions {
+	return mailer.SESOptions{
+		Region: cfg.SESRegion, Endpoint: cfg.SESEndpoint,
+		AccessKeyID: cfg.SESAccessKeyID, SecretKey: cfg.SESSecretAccessKey,
+	}
 }
 
 // newIdentities mirrors newSender: asking for the fake sender means there are no AWS credentials, so
@@ -102,7 +110,7 @@ func newIdentities(ctx context.Context, cfg config.Config) (mailer.IdentityReade
 	if cfg.FakeSESLog != "" {
 		return mailer.StaticIdentity{Domains: cfg.FakeSESDomains}, nil
 	}
-	identities, err := mailer.NewSESIdentity(ctx, cfg.SESRegion)
+	identities, err := mailer.NewSESIdentity(ctx, sesOptions(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("SES identity client: %w", err)
 	}

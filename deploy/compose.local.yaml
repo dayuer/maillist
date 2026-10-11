@@ -1,0 +1,37 @@
+# A local stack: the same two services, plus a fake SES to send through, and the smoke test's
+# fixtures mounted where the container can read them (the image has no shell, so nothing is piped in
+# through one).
+#
+#   docker compose -f deploy/compose.yaml -f deploy/compose.local.yaml up -d --build
+#
+# scripts/compose-smoke.sh runs exactly that. Nothing here belongs in production: the credentials
+# are the word "local".
+services:
+  mailcheap:
+    environment:
+      # The real SES client, pointed at the fake. The request is really built, really signed and
+      # really answered — it just does not leave the machine. That is what makes this more than the
+      # file-backed fake of the unit tests: mailer/ses.go's request body is under test.
+      SES_ENDPOINT: http://fakeses:8080
+      # The SDK needs something to sign with; the fake does not check it.
+      SES_ACCESS_KEY_ID: local
+      SES_SECRET_ACCESS_KEY: local
+      SES_REGION: eu-west-1
+    volumes:
+      - mailcheap-data:/data
+      # The campaign body and an image to upload. Read-only: the app never writes to them.
+      - ../testdata/smoke:/seed:ro
+
+  fakeses:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.fakeses
+    image: mailcheap-fakeses:local
+    environment:
+      # The domain the app's pre-send check reads. Without it the identity list is empty and a send
+      # refuses for the right reason.
+      FAKE_SES_DOMAINS: example.net
+    # Published only so the smoke script can read what was sent. A real SES is reached the same way
+    # the app reaches it — over the network — and nothing else here is published.
+    ports:
+      - "8081:8080"

@@ -1,0 +1,54 @@
+# The production shape: the app and the TLS terminator.
+#
+# The app publishes no port of its own — caddy reaches it over the compose network, so the only way
+# in from outside is through TLS, and the MCP listener stays inside the container (MCP_HTTP_ADDR
+# defaults to 127.0.0.1:8081, design §4.2).
+#
+#   docker compose -f deploy/compose.yaml up -d
+#
+# The settings come from deploy/.env; see deploy/.env.example for what has to be in it.
+services:
+  mailcheap:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: mailcheap:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # caddy is the only thing that can reach this container, so the address it forwards is the
+      # reader's and can be believed (stage 4's X-Forwarded-For rule). Without this every reader
+      # shares one rate-limit bucket — safe, but the per-visitor limits stop meaning anything.
+      # 172.16.0.0/12 covers docker's default bridge pool; a custom network subnet goes here.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12}
+    volumes:
+      # The database, its -wal and -shm, and the uploaded images. Back it up with
+      # `mailcheap db backup`, not with cp (design §4.3).
+      - mailcheap-data:/data
+    healthcheck:
+      test: ["CMD", "mailcheap", "health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - mailcheap
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # http://localhost locally; a real hostname in production, where caddy gets and renews a
+      # certificate for it automatically. The SNS endpoint and every link in every email have to be
+      # HTTPS, which is why caddy is not optional (design §4.2).
+      SITE_ADDRESS: ${SITE_ADDRESS:-http://localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+
+volumes:
+  mailcheap-data:
+  caddy-data:

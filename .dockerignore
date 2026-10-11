@@ -1,0 +1,14 @@
+# The build context: everything the image does not need, so `docker build` sends a few hundred
+# kilobytes rather than the whole checkout.
+.git
+.github
+bin
+third_party
+docs
+deploy
+*.md
+NOTICE
+testdata
+**/testdata
+**/*_test.go
+examples
