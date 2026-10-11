@@ -15,6 +15,7 @@ import (
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/render"
+	"mailcheap/internal/core/rules"
 	"mailcheap/internal/core/validate"
 	"mailcheap/internal/mailer"
 	"mailcheap/internal/store"
@@ -157,20 +158,22 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 		}
 		// The pre-send checks are the ones the engine enforces; running them here turns a rejected
 		// send into a readable error instead of a queued campaign that never starts.
+		verified, err := verifiedDomains(ctx, a)
+		if err != nil {
+			return err
+		}
 		report := checks.Run(checks.Input{
 			Campaign: campaign, Newsletter: newsletter,
 			Rendered: render.Email(render.EmailInput{
 				Format: campaign.Format, Body: campaign.Body, Subject: campaign.Subject,
 				PreviewText: campaign.PreviewText, Newsletter: newsletter,
 			}),
-			SendingOn: a.Config.SendingOn, Limits: a.Config.Limits,
+			SendingOn:      a.Config.SendingOn,
+			Limits:         a.Config.Limits,
+			DomainVerified: rules.VerifiedFromDomain(verified, newsletter.FromEmail),
 		})
-		if blocked, ok := blockingExceptDomain(report); ok {
+		if blocked, ok := checks.Blocked(report); ok {
 			return fmt.Errorf("%s: %s", blocked.ID, blocked.Message)
-		}
-		if !domainChecked(report) {
-			_, _ = fmt.Fprintln(cmd.ErrOrStderr(),
-				"note: the SES domain check needs `mailcheap domains` (phase 4); not verified yet")
 		}
 		if !yes && !confirm(cmd) {
 			return errors.New("aborted")
@@ -211,31 +214,9 @@ func queueCampaign(ctx context.Context, a *app.App, campaign model.Campaign, lim
 	return a.Mailer.Queue(ctx, campaign.ID)
 }
 
-// The "domain" check asks SES whether the sending domain is verified. Phase 2 has no way to ask —
-// the domains command needs the SES identity API and arrives in phase 4 — so the CLI reports the
-// row and does not let it block a send yet. Leaving the check in core untouched keeps its contract
-// exactly upstream's; the gap lives here, where it is visible, and in the plan's notes.
-const domainCheckID = "domain"
-
-func blockingExceptDomain(report []checks.Check) (checks.Check, bool) {
-	for _, check := range report {
-		if check.ID == domainCheckID || check.OK || !check.Blocking {
-			continue
-		}
-		return check, true
-	}
-	return checks.Check{}, false
-}
-
-func domainChecked(report []checks.Check) bool {
-	for _, check := range report {
-		if check.ID == domainCheckID {
-			return check.OK
-		}
-	}
-	return false
-}
-
+// The "domain" check asks SES whether the sending domain is verified. Phase 2 skipped it because
+// there was no way to ask; phase 4 wired the SES identity API (see domains.go), so the check blocks
+// again, exactly as it does upstream.
 // campaignByRef finds the campaign the operator meant: an id when one is given, otherwise the draft
 // with that subject.
 func campaignByRef(ctx context.Context, a *app.App, args []string, subject string) (model.Campaign, error) {

@@ -70,3 +70,19 @@ func TestSendingLimitsMatchUpstream(t *testing.T) {
 		t.Fatalf("limits = %+v", c.Limits)
 	}
 }
+
+// MAILCHEAP_FAKE_SES_DOMAINS is the stand-in identity list the end-to-end script drives the
+// unverified branch with; commas and blanks are the operator's, not ours.
+func TestFakeSESDomains(t *testing.T) {
+	c, err := Load(with("MAILCHEAP_FAKE_SES_DOMAINS", " example.net , other.example,"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.FakeSESDomains) != 2 || c.FakeSESDomains[0] != "example.net" || c.FakeSESDomains[1] != "other.example" {
+		t.Fatalf("FakeSESDomains = %#v", c.FakeSESDomains)
+	}
+	empty, _ := Load(strong)
+	if empty.FakeSESDomains != nil {
+		t.Fatalf("FakeSESDomains = %#v, want nil", empty.FakeSESDomains)
+	}
+}

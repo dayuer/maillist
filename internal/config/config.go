@@ -36,7 +36,10 @@ type Config struct {
 	// SES. It is how the end-to-end test observes a send; phase 5's compose stack uses a real fake
 	// endpoint instead.
 	FakeSESLog string
-	Limits     model.Limits
+	// FakeSESDomains is the stand-in identity list used alongside FakeSESLog: the domains the
+	// pre-send check and `mailcheap domains` see. Production reads SES.
+	FakeSESDomains []string
+	Limits         model.Limits
 }
 
 // Load reads env (os.Environ when nil) and returns every problem at once.
@@ -58,20 +61,21 @@ func Load(env map[string]string) (Config, error) {
 	}
 	dataDir := or(env["MAILCHEAP_DATA_DIR"], "/data")
 	return Config{
-		SessionSecret: env["SESSION_SECRET"],
-		AppURL:        strings.TrimSuffix(or(env["APP_URL"], "http://localhost:8080"), "/"),
-		DataDir:       dataDir,
-		DBPath:        or(env["MAILCHEAP_DB"], dataDir+"/mailcheap.db"),
-		SendingOn:     env["SENDING_ENABLED"] == "true",
-		SendApproval:  approval,
-		MCPHTTPAddr:   or(env["MCP_HTTP_ADDR"], "127.0.0.1:8081"),
-		SESRegion:     env["SES_REGION"],
-		SESConfigSet:  env["SES_CONFIGURATION_SET"],
-		SESTopicARN:   env["SES_SNS_TOPIC_ARN"],
-		ArchiveHosts:  env["ARCHIVE_HOSTS"],
-		AlertFrom:     env["ALERT_FROM"],
-		AdminEmail:    env["ADMIN_EMAIL"],
-		FakeSESLog:    env["MAILCHEAP_FAKE_SES_LOG"],
+		SessionSecret:  env["SESSION_SECRET"],
+		AppURL:         strings.TrimSuffix(or(env["APP_URL"], "http://localhost:8080"), "/"),
+		DataDir:        dataDir,
+		DBPath:         or(env["MAILCHEAP_DB"], dataDir+"/mailcheap.db"),
+		SendingOn:      env["SENDING_ENABLED"] == "true",
+		SendApproval:   approval,
+		MCPHTTPAddr:    or(env["MCP_HTTP_ADDR"], "127.0.0.1:8081"),
+		SESRegion:      env["SES_REGION"],
+		SESConfigSet:   env["SES_CONFIGURATION_SET"],
+		SESTopicARN:    env["SES_SNS_TOPIC_ARN"],
+		ArchiveHosts:   env["ARCHIVE_HOSTS"],
+		AlertFrom:      env["ALERT_FROM"],
+		AdminEmail:     env["ADMIN_EMAIL"],
+		FakeSESLog:     env["MAILCHEAP_FAKE_SES_LOG"],
+		FakeSESDomains: splitList(env["MAILCHEAP_FAKE_SES_DOMAINS"]),
 		Limits: model.Limits{
 			BounceRate:               0.02,
 			ComplaintRate:            0.0008,
@@ -88,6 +92,20 @@ func or(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// splitList reads a comma-separated list: blanks are dropped, so "a,,b," is two entries.
+func splitList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // intIn parses v, falling back when it isn't an integer in [lo, hi]. Stricter than upstream's

@@ -38,6 +38,9 @@ func TestScripts(t *testing.T) {
 			env.Setenv("SENDING_ENABLED", "true")
 			env.Setenv("MAILCHEAP_DB", env.WorkDir+"/mailcheap.db")
 			env.Setenv("MAILCHEAP_FAKE_SES_LOG", env.WorkDir+"/sent.jsonl")
+			// The stand-in SES identity list. example.net is verified, the way a real deployment's
+			// sending domain would be; a script that wants the unverified branch overrides this.
+			env.Setenv("MAILCHEAP_FAKE_SES_DOMAINS", "example.net")
 			return nil
 		},
 	})
