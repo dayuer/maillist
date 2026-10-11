@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"mailcheap/internal/config"
+	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/sign"
+	"mailcheap/internal/events"
 	"mailcheap/internal/store"
 )
 
@@ -62,7 +64,7 @@ func newTestServerWith(t *testing.T, tweak func(*config.Config)) *testServer {
 	tweak(&cfg)
 
 	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
-	server := New(cfg, db, signer, testLogger(t))
+	server := New(cfg, db, signer, events.New(db, testLogger(t)), testLogger(t))
 	server.now = func() time.Time { return now }
 	return &testServer{Server: server, store: db, signer: signer, now: now}
 }
@@ -92,6 +94,10 @@ func (s *testServer) request(t *testing.T, method, path, host string, form url.V
 	if host != "" {
 		request.Host = host
 	}
+	// A reader's browser: an empty User-Agent is itself a scanner signal (render.IsLikelyScanner),
+	// so the default has to look like a person.
+	request.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "+
+		"AppleWebKit/537.36 Chrome/141.0 Safari/537.36")
 	request.Header.Set("X-Forwarded-For", "203.0.113.7")
 	if form != nil {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -111,3 +117,59 @@ func body(t *testing.T, response *http.Response) string {
 	}
 	return string(content)
 }
+
+// seedNewsletter creates the newsletter the reader tests use.
+func (s *testServer) seedNewsletter(t *testing.T) model.Newsletter {
+	t.Helper()
+	newsletter := model.Newsletter{
+		ID: ids.New(), Slug: "field-notes", Name: "Field notes",
+		FromName: "Jane Doe", FromEmail: "jane@example.net", PostalAddress: "1 Main St, Paris",
+		ArchiveEnabled: true, WelcomeEnabled: true,
+		Welcome:   model.Content{Subject: "Welcome to Field notes", Markdown: "Hello"},
+		CreatedAt: s.now, UpdatedAt: s.now,
+	}
+	if err := s.store.CreateNewsletter(context.Background(), newsletter); err != nil {
+		t.Fatal(err)
+	}
+	return newsletter
+}
+
+// seedMessage is a sent campaign message for an active contact, ready to be tracked.
+func (s *testServer) seedMessage(t *testing.T) model.Message {
+	t.Helper()
+	newsletter := s.seedNewsletter(t)
+	contact := model.Contact{
+		ID: ids.New(), NewsletterID: newsletter.ID, Email: "reader@example.com",
+		Status: model.ContactActive, SubscribedAt: &s.now, CreatedAt: s.now,
+	}
+	if err := s.store.CreateContact(context.Background(), contact); err != nil {
+		t.Fatal(err)
+	}
+	campaign := model.NewCampaign(newsletter.ID, "Issue 12", s.now)
+	campaign.Status = model.CampaignSending
+	if err := s.store.CreateCampaign(context.Background(), campaign); err != nil {
+		t.Fatal(err)
+	}
+	// Sent an hour ago: a click within 30 seconds of sending counts as a scanner, so a fixture sent
+	// "now" could never record one (render.IsLikelyScanner).
+	sentAt := s.now.Add(-time.Hour)
+	message := model.Message{
+		ID: ids.New(), Kind: model.KindCampaign, CampaignID: campaign.ID,
+		NewsletterID: newsletter.ID, ContactID: contact.ID, Email: contact.Email,
+		Status: model.MessageSent, CreatedAt: sentAt,
+	}
+	if _, err := s.store.InsertMessages(context.Background(), []model.Message{message}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.MarkMessageSent(context.Background(), message.ID, "ses-"+ids.New(), sentAt); err != nil {
+		t.Fatal(err)
+	}
+	sent, err := s.store.Message(context.Background(), message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sent
+}
+
+// tokenOf is the last path segment of a signed URL.
+func tokenOf(u string) string { return u[strings.LastIndex(u, "/")+1:] }

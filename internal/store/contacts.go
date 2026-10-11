@@ -11,6 +11,7 @@ import (
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/importer"
 	"mailcheap/internal/core/model"
+	"mailcheap/internal/core/sesmap"
 )
 
 // contactColumns is the SELECT list every contact query shares, in scanContact order.
@@ -351,6 +352,121 @@ func (db *DB) ApplyImportRows(ctx context.Context, newsletterID, source string,
 		return nil
 	})
 	return created, updated, err
+}
+
+// RecordEngagement is upstream withEngagement: it advances the engagement timestamps ($max) and
+// clears ignored_issues, so the list cleanup stops counting a contact who just proved they read.
+//
+// The columns are written in SQL rather than read-modify-written, so a click arriving while another
+// event is being applied cannot lose either update.
+func (db *DB) RecordEngagement(ctx context.Context, id string, engagement *sesmap.Engagement, at time.Time) error {
+	var openAt, clickAt any
+	if engagement != nil && engagement.LastOpenAt != nil {
+		openAt = formatTime(*engagement.LastOpenAt)
+	}
+	if engagement != nil && engagement.LastClickAt != nil {
+		clickAt = formatTime(*engagement.LastClickAt)
+	}
+	stamp := formatTime(at)
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE contacts SET
+            last_open_at = CASE
+                WHEN ? IS NULL THEN last_open_at
+                WHEN last_open_at IS NULL OR last_open_at < ? THEN ?
+                ELSE last_open_at END,
+            last_click_at = CASE
+                WHEN ? IS NULL THEN last_click_at
+                WHEN last_click_at IS NULL OR last_click_at < ? THEN ?
+                ELSE last_click_at END,
+            last_engaged_at = CASE
+                WHEN last_engaged_at IS NULL OR last_engaged_at < ? THEN ?
+                ELSE last_engaged_at END,
+            ignored_issues = 0,
+            updated_at = ?
+            WHERE id = ?`,
+			openAt, openAt, openAt, clickAt, clickAt, clickAt, stamp, stamp,
+			formatTime(time.Now()), id)
+		if err != nil {
+			return err
+		}
+		return requireOneRow(result, "contact", id)
+	})
+}
+
+// SuppressContacts moves every contact with this address that is still in one of the from statuses.
+// A complaint reached this way never downgrades a contact who complained already.
+func (db *DB) SuppressContacts(ctx context.Context, email string, status model.ContactStatus,
+	from []model.ContactStatus) error {
+	placeholders := make([]string, len(from))
+	args := []any{string(status), formatTime(time.Now()), strings.ToLower(strings.TrimSpace(email))}
+	for i, allowed := range from {
+		placeholders[i] = "?"
+		args = append(args, string(allowed))
+	}
+	// The only interpolated text is a run of "?" placeholders; every value is bound.
+	query := "UPDATE contacts SET status = ?, updated_at = ? WHERE email = ? AND status IN (" + //nolint:gosec // G202: placeholders, not values
+		strings.Join(placeholders, ",") + ")"
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, query, args...)
+		return err
+	})
+}
+
+// UnsubscribeContact moves one contact of one newsletter out of the subscribed statuses, and reports
+// whether it moved. A bounce or complaint stays: those block sending already, and they are not the
+// reader's to reverse.
+func (db *DB) UnsubscribeContact(ctx context.Context, contactID, newsletterID string,
+	from []model.ContactStatus) (bool, error) {
+	placeholders := make([]string, len(from))
+	now := formatTime(time.Now())
+	args := []any{string(model.ContactUnsubscribed), now, now, contactID, newsletterID}
+	for i, allowed := range from {
+		placeholders[i] = "?"
+		args = append(args, string(allowed))
+	}
+	// The only interpolated text is a run of "?" placeholders; every value is bound.
+	query := "UPDATE contacts SET status = ?, unsubscribed_at = ?, updated_at = ? " + //nolint:gosec // G202: placeholders, not values
+		"WHERE id = ? AND newsletter_id = ? AND status IN (" + strings.Join(placeholders, ",") + ")"
+	moved := false
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		moved = false
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		moved = affected > 0
+		return nil
+	})
+	return moved, err
+}
+
+// CreditLatestCampaignUnsubscribe counts an unsubscribe against the most recent issue the contact
+// got: the link carries no campaign, so this is the best attribution available (upstream
+// creditLatestCampaign).
+func (db *DB) CreditLatestCampaignUnsubscribe(ctx context.Context, contactID, newsletterID string) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		var campaignID string
+		err := tx.QueryRowContext(ctx, `SELECT c.id FROM campaigns c
+            WHERE c.newsletter_id = ? AND c.started_at IS NOT NULL
+              AND EXISTS (SELECT 1 FROM messages m
+                          WHERE m.campaign_id = c.id AND m.contact_id = ?
+                            AND m.kind = ? AND m.sent_at IS NOT NULL)
+            ORDER BY c.started_at DESC LIMIT 1`,
+			newsletterID, contactID, string(model.KindCampaign)).Scan(&campaignID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx,
+			"UPDATE campaigns SET stats_unsubscribed = stats_unsubscribed + 1 WHERE id = ?", campaignID)
+		return err
+	})
 }
 
 func derefInt(value *int) any {

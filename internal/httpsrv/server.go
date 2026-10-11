@@ -10,6 +10,7 @@ import (
 
 	"mailcheap/internal/config"
 	"mailcheap/internal/core/sign"
+	"mailcheap/internal/events"
 	"mailcheap/internal/store"
 )
 
@@ -19,6 +20,7 @@ type Server struct {
 	Config  config.Config
 	Store   *store.DB
 	Signer  *sign.Signer
+	Events  *events.Handler
 	Limiter *MemoryLimiter
 	Log     *slog.Logger
 	now     func() time.Time
@@ -26,12 +28,13 @@ type Server struct {
 }
 
 // New builds the router over the reader surface.
-func New(cfg config.Config, db *store.DB, signer *sign.Signer, log *slog.Logger) *Server {
+func New(cfg config.Config, db *store.DB, signer *sign.Signer, handler *events.Handler,
+	log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	server := &Server{
-		Config: cfg, Store: db, Signer: signer,
+		Config: cfg, Store: db, Signer: signer, Events: handler,
 		Limiter: NewMemoryLimiter(), Log: log, now: time.Now,
 	}
 	server.handler = server.routes()
@@ -53,6 +56,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.handler.S
 // typo never lands somewhere surprising.
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /o/{token}", s.handleOpen)
+	mux.HandleFunc("GET /c/{token}", s.handleClick)
+	mux.HandleFunc("HEAD /c/{token}", s.handleClickHead)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	return s.withSecurityHeaders(s.withArchiveHost(s.withRequestLog(mux)))
 }

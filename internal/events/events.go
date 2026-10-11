@@ -1,0 +1,243 @@
+// Package events applies what SNS and the tracking endpoints report to the database. It is the port
+// of upstream's lib/ses-events.js: core/sesmap decides what an event means, this decides how to
+// write it down.
+package events
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"time"
+
+	"mailcheap/internal/core/model"
+	"mailcheap/internal/core/render"
+	"mailcheap/internal/core/rules"
+	"mailcheap/internal/core/sesmap"
+	"mailcheap/internal/store"
+)
+
+// recordedTypes are the events worth a row: every send produces a delivery, and storing those would
+// fill the database within months (upstream RECORDED_EVENT_TYPES).
+var recordedTypes = map[sesmap.EventType]bool{
+	sesmap.EventBounce: true, sesmap.EventComplaint: true, sesmap.EventReject: true,
+	sesmap.EventDeliveryDelay: true, sesmap.EventRenderingFailure: true,
+}
+
+// Handler applies events.
+type Handler struct {
+	store *store.DB
+	log   *slog.Logger
+}
+
+// New returns a Handler over db.
+func New(db *store.DB, log *slog.Logger) *Handler {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Handler{store: db, log: log}
+}
+
+// Applied is what one event did.
+type Applied struct {
+	Handled   bool
+	MessageID string
+}
+
+// ApplyEvent maps and applies one raw SES event. A malformed or unknown event is not an error: the
+// webhook answers 200 and moves on.
+func (h *Handler) ApplyEvent(ctx context.Context, raw json.RawMessage, now time.Time) (Applied, error) {
+	plan, ok := sesmap.EventPlan(raw, now)
+	if !ok {
+		return Applied{}, nil
+	}
+	message, found, err := h.findMessage(ctx, plan)
+	if err != nil {
+		return Applied{}, err
+	}
+	if found {
+		if err := h.apply(ctx, message, plan); err != nil {
+			return Applied{}, err
+		}
+	}
+	if len(plan.Suppress) > 0 {
+		if err := h.suppress(ctx, plan); err != nil {
+			return Applied{}, err
+		}
+	}
+	if recordedTypes[plan.Type] {
+		email := plan.Email
+		if email == "" && found {
+			email = message.Email
+		}
+		event := store.Event{Type: string(plan.Type), SESMessageID: plan.SESMessageID, Email: email,
+			OccurredAt: plan.OccurredAt, CreatedAt: now, Data: plan.Store}
+		if found {
+			event.MessageID, event.CampaignID = message.ID, message.CampaignID
+		}
+		if err := h.store.InsertEvent(ctx, event); err != nil {
+			return Applied{}, err
+		}
+	}
+	applied := Applied{Handled: true}
+	if found {
+		applied.MessageID = message.ID
+	}
+	return applied, nil
+}
+
+// ApplyTracking applies an open or a click from Mailcheap's own pixel and links.
+func (h *Handler) ApplyTracking(ctx context.Context, messageID string, eventType sesmap.EventType,
+	userAgent string, now time.Time) (bool, error) {
+	message, err := h.store.Message(ctx, messageID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if eventType == sesmap.EventClick && render.IsLikelyScanner(userAgent, message.SentAt, now) {
+		return false, nil
+	}
+	if err := h.apply(ctx, message, sesmap.TrackingPlan(eventType, now)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// findMessage resolves the message an event names: by SES's own id first, then by the message_id
+// tag, which covers an event that arrives before the send was written back.
+func (h *Handler) findMessage(ctx context.Context, plan sesmap.Plan) (model.Message, bool, error) {
+	if plan.SESMessageID != "" {
+		message, err := h.store.MessageBySESID(ctx, plan.SESMessageID)
+		if err == nil {
+			return message, true, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return model.Message{}, false, err
+		}
+	}
+	if plan.MessageID == "" {
+		return model.Message{}, false, nil
+	}
+	message, err := h.store.Message(ctx, plan.MessageID)
+	if errors.Is(err, store.ErrNotFound) {
+		return model.Message{}, false, nil
+	}
+	if err != nil {
+		return model.Message{}, false, err
+	}
+	// A message id and an SES id that disagree mean the event belongs to another message.
+	if message.SESMessageID != "" && plan.SESMessageID != "" && message.SESMessageID != plan.SESMessageID {
+		return model.Message{}, false, nil
+	}
+	if message.SESMessageID == "" && plan.SESMessageID != "" {
+		if err := h.store.AdoptSESMessageID(ctx, message.ID, plan.SESMessageID); err != nil {
+			return model.Message{}, false, err
+		}
+	}
+	return message, true, nil
+}
+
+// apply writes one plan's message, campaign and contact updates. Every counter moves only on the
+// first transition, so an SNS redelivery changes nothing.
+func (h *Handler) apply(ctx context.Context, message model.Message, plan sesmap.Plan) error {
+	var counters store.CampaignCounters
+	countersMoved := false
+	contactOpens, contactClicks := 0, 0
+
+	for _, first := range plan.Firsts {
+		wrote, err := h.store.FirstTimestamp(ctx, message.ID, first.Field, plan.OccurredAt)
+		if err != nil {
+			return err
+		}
+		if !wrote {
+			continue
+		}
+		switch first.Stat {
+		case "delivered":
+			counters.Delivered, countersMoved = counters.Delivered+1, true
+		case "opened":
+			counters.Opened, countersMoved = counters.Opened+1, true
+		case "clicked":
+			counters.Clicked, countersMoved = counters.Clicked+1, true
+		case "bounced":
+			counters.Bounced, countersMoved = counters.Bounced+1, true
+		case "complained":
+			counters.Complained, countersMoved = counters.Complained+1, true
+		}
+		switch first.ContactStat {
+		case "opens":
+			contactOpens++
+		case "clicks":
+			contactClicks++
+		}
+	}
+
+	if plan.NewStatus != "" {
+		moved, err := h.store.SetMessageStatusFrom(ctx, message.ID, plan.NewStatus, plan.StatusFrom)
+		if err != nil {
+			return err
+		}
+		// The stat a status bumps is the status itself (upstream's status.stat).
+		if moved {
+			switch plan.NewStatus {
+			case model.MessageDelivered:
+				counters.Delivered, countersMoved = counters.Delivered+1, true
+			case model.MessageBounced:
+				counters.Bounced, countersMoved = counters.Bounced+1, true
+			case model.MessageComplained:
+				counters.Complained, countersMoved = counters.Complained+1, true
+			case model.MessageFailed:
+				counters.Failed, countersMoved = counters.Failed+1, true
+			}
+		}
+	}
+	if plan.Error != "" {
+		if err := h.store.SetMessageError(ctx, message.ID, plan.Error); err != nil {
+			return err
+		}
+	}
+
+	if rules.IsCampaignKind(message.Kind) && message.CampaignID != "" && countersMoved {
+		if message.Kind == model.KindLastChance {
+			if err := h.store.AddLastChanceStats(ctx, message.CampaignID, store.LastChanceCounters{
+				Delivered: counters.Delivered, Bounced: counters.Bounced,
+				Complained: counters.Complained, Failed: counters.Failed,
+			}); err != nil {
+				return err
+			}
+		} else if err := h.store.AddCampaignStats(ctx, message.CampaignID, counters); err != nil {
+			return err
+		}
+	}
+
+	if message.ContactID != "" && (plan.Engagement != nil || contactOpens+contactClicks > 0) {
+		if err := h.store.RecordEngagement(ctx, message.ContactID, plan.Engagement, plan.OccurredAt); err != nil {
+			return err
+		}
+		if contactOpens+contactClicks > 0 {
+			if err := h.store.AddContactStats(ctx, message.ContactID, 0, contactOpens, contactClicks); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// suppress adds the addresses to the global suppression list and moves their contacts. A complaint
+// outranks an earlier bounce or manual entry (store.AddSuppression decides that).
+func (h *Handler) suppress(ctx context.Context, plan sesmap.Plan) error {
+	for _, email := range plan.Suppress {
+		if err := h.store.AddSuppression(ctx, email, plan.SuppressAs, plan.SuppressDetail); err != nil {
+			return err
+		}
+		if plan.ContactStatus == "" || len(plan.ContactStatusFrom) == 0 {
+			continue
+		}
+		if err := h.store.SuppressContacts(ctx, email, plan.ContactStatus, plan.ContactStatusFrom); err != nil {
+			return err
+		}
+	}
+	return nil
+}
