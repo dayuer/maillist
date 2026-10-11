@@ -217,15 +217,40 @@ func TestCountsAndReachedContacts(t *testing.T) {
 	if err != nil || recipients != 4 || lastChance != 0 {
 		t.Fatalf("counts = %d %d %v", recipients, lastChance, err)
 	}
-	pending, err := db.CountPendingCampaignMessages(ctx, campaignID)
-	if err != nil || pending != 4 {
-		t.Fatalf("pending = %d %v", pending, err)
+	unfinished, err := db.CountUnfinishedCampaignMessages(ctx, campaignID)
+	if err != nil || unfinished != 4 {
+		t.Fatalf("unfinished = %d %v", unfinished, err)
 	}
 	if _, err := db.ClaimMessages(ctx, 4); err != nil {
 		t.Fatal(err)
 	}
-	if pending, err := db.CountPendingCampaignMessages(ctx, campaignID); err != nil || pending != 0 {
-		t.Fatalf("pending after claim = %d %v", pending, err)
+	// Claimed counts as unfinished: a campaign whose messages are all in flight is not finished, or
+	// a batch that puts them back would leave them pending on a campaign nobody sends (audit C2).
+	if unfinished, err := db.CountUnfinishedCampaignMessages(ctx, campaignID); err != nil || unfinished != 4 {
+		t.Fatalf("unfinished after claim = %d %v, want 4 (claimed is not finished)", unfinished, err)
+	}
+	var ids []string
+	rows, err := db.Rows(ctx, "SELECT id FROM messages WHERE campaign_id = ? AND status = 'claimed'", campaignID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if err := db.MarkMessageSent(ctx, id, "ses-"+id, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if unfinished, err := db.CountUnfinishedCampaignMessages(ctx, campaignID); err != nil || unfinished != 0 {
+		t.Fatalf("unfinished after sending = %d %v, want 0", unfinished, err)
 	}
 
 	reached, err := db.ReachedContacts(ctx, campaignID)

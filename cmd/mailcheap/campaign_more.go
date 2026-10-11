@@ -432,18 +432,13 @@ func runCampaignResume(cmd *cobra.Command, args []string) error {
 		if !result.Queued {
 			return errors.New(result.Reason)
 		}
-		// Sending off the back of the same command keeps the CLI usable without a server; with one
-		// running, the engine is already picking these messages up.
-		for {
-			batch, err := a.Mailer.SendBatch(ctx, nil)
-			if err != nil {
+		// With a server running, its sender picks these up and this command does not: two senders
+		// would double the rate limit against SES and claim messages from under each other.
+		if running, err := a.Store.ServeIsRunning(ctx, time.Now().UTC()); err != nil {
+			return err
+		} else if !running {
+			if err := drainQueue(ctx, a); err != nil {
 				return err
-			}
-			if batch.Retry {
-				return errors.New("sending stopped early (a retryable SES error); run the command again")
-			}
-			if batch.Done() == 0 {
-				break
 			}
 		}
 		if jsonOutput(cmd) {
@@ -612,6 +607,23 @@ func printCampaignReport(cmd *cobra.Command, campaign model.Campaign, counters s
 	if remaining > 0 {
 		_, _ = fmt.Fprintf(out, "\n%s more of the most engaged have not had it: campaign send --limit %d\n",
 			stats.FormatNumber(remaining), remaining)
+	}
+}
+
+// drainQueue is the CLI's own sender: it drains queued messages until there are none left. It is
+// what a command does when no serve process holds the heartbeat.
+func drainQueue(ctx context.Context, a *app.App) error {
+	for {
+		batch, err := a.Mailer.SendBatch(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if batch.Retry {
+			return errors.New("sending stopped early (a retryable SES error); run the command again")
+		}
+		if batch.Done() == 0 {
+			return nil
+		}
 	}
 }
 
