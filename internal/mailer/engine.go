@@ -338,13 +338,13 @@ func (e *Engine) deliver(ctx context.Context, message model.Message, loaded stor
 	}
 	switch message.Kind {
 	case model.KindConfirmation:
-		token, err := e.signer.ContactToken(sign.InfoConfirm, reference, now)
+		token, err := e.signer.ContactToken(sign.KindConfirm, reference, now)
 		if err != nil {
 			return delivery{}, err
 		}
 		input.ConfirmURL = e.cfg.AppURL + "/confirm?token=" + token
 	case model.KindLastChance:
-		token, err := e.signer.ContactToken(sign.InfoKeep, reference, now)
+		token, err := e.signer.ContactToken(sign.KindKeep, reference, now)
 		if err != nil {
 			return delivery{}, err
 		}
