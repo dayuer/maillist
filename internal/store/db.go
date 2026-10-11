@@ -71,6 +71,17 @@ func (db *DB) Close() error {
 // Path is the file this DB was opened from.
 func (db *DB) Path() string { return db.path }
 
+// Rows is the read side of the connection pool, for a package that owns a table of its own
+// (internal/jobs) and must still read with the same settings the rest of the store uses.
+func (db *DB) Rows(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return db.sql.QueryContext(ctx, query, args...)
+}
+
+// Row is Rows for a single row.
+func (db *DB) Row(ctx context.Context, query string, args ...any) *sql.Row {
+	return db.sql.QueryRowContext(ctx, query, args...)
+}
+
 // formatTime encodes a time the way every TEXT column stores it.
 func formatTime(at time.Time) string { return at.UTC().Format(TimeLayout) }
 
@@ -93,6 +104,12 @@ func parseTime(value string) (time.Time, error) {
 	}
 	return parsed, nil
 }
+
+// ParseTime is parseTime for packages that read a table of their own (internal/jobs).
+func ParseTime(value string) (time.Time, error) { return parseTime(value) }
+
+// ParseTimePtr is the nullable form of ParseTime.
+func ParseTimePtr(value sql.NullString) (*time.Time, error) { return parseTimePtr(value) }
 
 // parseTimePtr reads back a nullable column.
 func parseTimePtr(value sql.NullString) (*time.Time, error) {
