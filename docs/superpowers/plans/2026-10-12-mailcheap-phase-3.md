@@ -50,7 +50,7 @@ Referrer-Policy: strict-origin-when-cross-origin
 
 - 测试：`make test`；静态检查：`make lint`
 - 端到端：`go test ./cmd/mailcheap -run TestScripts`
-- 每个 Task 结束一次提交，Conventional Commits，结尾 `Co-Authored-By: Claude Code <noreply@anthropic.com>`
+- 每个 Task 结束一次提交，Conventional Commits，不加任何 `Co-Authored-By` 署名尾注
 
 ---
 

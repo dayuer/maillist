@@ -56,7 +56,7 @@ Go `regexp` 是 RE2：**不支持** `(?=` `(?!` `(?<=` `(?<!` 环视、`\1` 反�
 
 - 测试：`make test`（= `go test -race -count=1 ./...`）
 - 静态检查：`make lint`（= `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...`，不要求本机安装）
-- 每个 Task 结束一次提交，信息用 Conventional Commits，结尾带 `Co-Authored-By` 行（见仓库提交约定）
+- 每个 Task 结束一次提交，信息用 Conventional Commits；不加任何 `Co-Authored-By` 署名尾注，作者与提交者为仓库所有者
 
 ---
 
