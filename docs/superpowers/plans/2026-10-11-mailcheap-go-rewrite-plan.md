@@ -2154,6 +2154,7 @@ func Suggestions(history, taken []time.Time, now time.Time) []Suggestion
 | 1.15 | `Merge(rows, existing) []Write` | 保持签名，但**明确收窄**：只决定"插入"与"状态前进"，不刷新既有联系人的导入互动数据 | 上游 `$set: {"imported.*"}` 会刷新既有联系人；计划的 `Write` 无此字段。阶段 2 写 store 时必须重新决定（CSV 原文手边就有） |
 | 1.16 | `Suggestions(...) []time.Time` | 返回 `[]Suggestion`（含 `Uses`/`LastUsedAt`/`IsLastIssue`） | 上游测试断言这三个字段，纯时间数组存不下 |
 | 1.8 | 未提 `BeforeLastTagEnd`/`ReplaceElements` | 从 `content` 导出 | 二者是上游 `clean-html.js` 的导出，`render` 的 `htmlToText` 要用 |
+| 1.10 | 未列 `confirmation-content.js` | `rules.ConfirmationContent` / `DefaultConfirmation` / `ConfirmationProblem` | 1.10 的测试清单要译 `confirmation.test.mjs`，其中"the confirmation email carries a clean link"等 3 条必须要有这个模块。放在 `rules` 里，与 `WelcomeContent` 并列；上游放在 `lib/confirmation-content.js`。`last-chance-content.js` 仍留阶段 7 |
 | 1.7 | 渲染器含 `WithAutoHeadingID` | 去掉 | marked 不加标题 id，goldmark 默认也不加；加了会多出 `<h1 id="…">` |
 | 1.8 | 只提 `FirstImageURL(html)` | 保持；上游 `firstImageUrl` 的 Markdown 分支**延后** | 计划签名只覆盖 HTML 分支；Markdown 缩略图属归档/导入路径（阶段 7） |
 
