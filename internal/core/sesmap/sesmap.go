@@ -5,7 +5,6 @@ package sesmap
 import (
 	"encoding/json"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -236,12 +235,18 @@ func applyEngagement(p *Plan, t EventType, at time.Time) {
 	p.Engagement = &Engagement{LastOpenAt: &opened}
 }
 
-// Upstream requires the token parameter too: /unsubscribe is also a page readers visit by hand.
-var unsubscribePathPattern = regexp.MustCompile(`^/(api/)?unsubscribe/?$`)
-
+// isUnsubscribeLink is upstream's isUnsubscribeLink: the unsubscribe path (dot segments removed, as
+// a URL parser does — see validate.UnsubscribePath) plus the token parameter, because /unsubscribe
+// is also a page readers visit by hand.
+//
+// It has to agree with render.isUnsubscribeURL: a link the renderer leaves direct arrives here as
+// /unsubscribe, and a click on it must not be counted as engagement (the phase 1-3 audit's FI-A3).
 func isUnsubscribeLink(link string) bool {
+	if !validate.UnsubscribePath(link) {
+		return false
+	}
 	u, err := url.Parse(link)
-	if err != nil || !unsubscribePathPattern.MatchString(u.Path) {
+	if err != nil {
 		return false
 	}
 	return u.Query().Has("token")

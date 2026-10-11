@@ -1,49 +1,47 @@
 package render
 
 import (
-	"net/url"
 	"regexp"
 	"time"
 
 	"mailcheap/internal/core/sign"
+	"mailcheap/internal/core/validate"
 )
 
 const pixelStyle = "display:block;width:1px;height:1px;border:0;"
 
-// Upstream LINK_PATTERN is /(<a\b[^>]*?\shref\s*=\s*)(["'])(https?:\/\/[^"'\s]+)\2/gi. RE2 has no
-// backreferences, so the "the closing quote must match the opening one" it enforced is spelled out
-// as one pattern per quote kind.
-var (
-	doubleQuotedLink = regexp.MustCompile(`(?i)(<a\b[^>]*?\shref\s*=\s*")(https?://[^"\s]+)"`)
-	singleQuotedLink = regexp.MustCompile(`(?i)(<a\b[^>]*?\shref\s*=\s*')(https?://[^'\s]+)'`)
-)
+// trackedLink is upstream LINK_PATTERN: /(<a\b[^>]*?\shref\s*=\s*)(["'])(https?:\/\/[^"'\s]+)\2/gi.
+//
+// RE2 has no backreferences, so the fourth group is matched loosely and checked in the replacement:
+// a link whose closing quote does not match its opening one is left alone, which is what \2 did.
+// The middle group excludes both quote kinds, as upstream's does.
+//
+// One pattern and one pass matter for two reasons. The replacement is never re-examined, so a
+// rewritten click URL cannot be rewritten again; and after a match the scan resumes at its end, so a
+// second href in the same tag is left alone exactly as upstream leaves it. Two passes (one per quote
+// kind) broke both: a tag with a double-quoted and a single-quoted href got both rewritten.
+var trackedLink = regexp.MustCompile(`(?i)(<a\b[^>]*?\shref\s*=\s*)(["'])(https?://[^"'\s]+)(["'])`)
 
 // Entities the address may hide behind before it is signed.
 var escapedAmpersand = regexp.MustCompile(`(?i)&amp;|&#0*38;|&#x0*26;`)
 
-// Unsubscribe links, in body and header, stay direct: inbox providers expect them that way.
-var unsubscribePathPattern = regexp.MustCompile(`^/(api/)?unsubscribe/?$`)
-
-func isUnsubscribeURL(value string) bool {
-	u, err := url.Parse(value)
-	return err == nil && unsubscribePathPattern.MatchString(u.Path)
-}
+// isUnsubscribeURL is upstream isUnsubscribeUrl, dot segments and all: see validate.UnsubscribePath.
+func isUnsubscribeURL(value string) bool { return validate.UnsubscribePath(value) }
 
 // AddTracking rewrites http(s) links (except unsubscribe links) to signed click URLs and puts the
 // open pixel first in <body>, so it still loads when Gmail clips a long email.
 func AddTracking(s *sign.Signer, html, baseURL, messageID string) string {
-	rewrite := func(re *regexp.Regexp, quote string) {
-		html = re.ReplaceAllStringFunc(html, func(match string) string {
-			m := re.FindStringSubmatch(match)
-			target := escapedAmpersand.ReplaceAllString(m[2], "&")
-			if isUnsubscribeURL(target) {
-				return match
-			}
-			return m[1] + s.ClickURL(baseURL, messageID, target) + quote
-		})
-	}
-	rewrite(doubleQuotedLink, `"`)
-	rewrite(singleQuotedLink, "'")
+	html = trackedLink.ReplaceAllStringFunc(html, func(match string) string {
+		m := trackedLink.FindStringSubmatch(match)
+		if m[2] != m[4] {
+			return match // the quotes do not pair up: not a link upstream would touch either
+		}
+		target := escapedAmpersand.ReplaceAllString(m[3], "&")
+		if isUnsubscribeURL(target) {
+			return match
+		}
+		return m[1] + m[2] + s.ClickURL(baseURL, messageID, target) + m[2]
+	})
 
 	pixel := `<img src="` + s.OpenURL(baseURL, messageID) + `" width="1" height="1" alt="" style="` + pixelStyle + `">`
 	if bodyOpenPattern.MatchString(html) {
