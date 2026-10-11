@@ -28,7 +28,7 @@ func newCampaignCmd() *cobra.Command {
 		newCampaignCreateCmd(), newCampaignListCmd(), newCampaignSendCmd(),
 		newCampaignUpdateCmd(), newCampaignShowCmd(), newCampaignPreviewCmd(),
 		newCampaignCheckCmd(), newCampaignTestCmd(), newCampaignScheduleCmd(),
-		newCampaignPauseCmd(), newCampaignResumeCmd(),
+		newCampaignPauseCmd(), newCampaignResumeCmd(), newCampaignReportCmd(),
 	)
 	return cmd
 }

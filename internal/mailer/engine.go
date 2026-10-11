@@ -12,6 +12,7 @@ import (
 
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
+	"mailcheap/internal/core/providers"
 	"mailcheap/internal/core/rules"
 	"mailcheap/internal/core/sign"
 	"mailcheap/internal/core/validate"
@@ -703,7 +704,8 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 	message := model.Message{
 		ID: ids.New(), Kind: model.KindTest, CampaignID: campaignID,
 		NewsletterID: newsletter.ID, ContactID: rules.TestContactID, Email: email,
-		Status: model.MessagePending, CreatedAt: time.Now().UTC(),
+		Provider: providers.Mailbox(email),
+		Status:   model.MessagePending, CreatedAt: time.Now().UTC(),
 	}
 	if _, err := e.store.InsertMessages(ctx, []model.Message{message}); err != nil {
 		return TestResult{}, err
@@ -944,8 +946,11 @@ func toMessages(campaign model.Campaign, contacts []model.Contact) []model.Messa
 			NewsletterID: campaign.NewsletterID,
 			ContactID:    contact.ID,
 			Email:        contact.Email,
-			Status:       model.MessagePending,
-			CreatedAt:    now,
+			// The provider is recorded now, so `campaign report` can group without re-deriving it
+			// from the address for every row (lib/sending.js toMessages).
+			Provider:  providers.Mailbox(contact.Email),
+			Status:    model.MessagePending,
+			CreatedAt: now,
 		})
 	}
 	return messages
