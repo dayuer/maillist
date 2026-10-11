@@ -111,6 +111,8 @@ func runCampaignUpdate(cmd *cobra.Command, args []string) error {
 		if err := a.Store.UpdateCampaign(ctx, campaign); err != nil {
 			return err
 		}
+		note(cmd, a, "campaign.update", campaign.ID,
+			map[string]any{"id": campaign.ID, "changed": changed})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, campaign)
 		}
@@ -293,6 +295,8 @@ func runCampaignTest(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		note(cmd, a, "campaign.test", campaign.ID,
+			map[string]any{"id": campaign.ID, "to": to, "messageId": result.MessageID})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, result)
 		}
@@ -358,6 +362,8 @@ func runCampaignSchedule(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		note(cmd, a, "campaign.schedule", campaign.ID,
+			map[string]any{"id": campaign.ID, "at": at.Format(time.RFC3339), "jobId": jobID, "held": held})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, map[string]any{"campaignId": campaign.ID, "scheduledAt": at, "jobId": jobID})
 		}
@@ -394,6 +400,7 @@ func newCampaignPauseCmd() *cobra.Command {
 				if !moved {
 					return fmt.Errorf("campaign is %s, only a sending one can be paused", campaign.Status)
 				}
+				note(cmd, a, "campaign.pause", campaign.ID, map[string]any{"id": campaign.ID})
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "paused %s\n", campaign.ID)
 				return nil
 			})
@@ -442,6 +449,8 @@ func runCampaignResume(cmd *cobra.Command, args []string) error {
 				return err
 			}
 		}
+		note(cmd, a, "campaign.resume", campaign.ID,
+			map[string]any{"id": campaign.ID, "recipients": result.Recipients})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, result)
 		}

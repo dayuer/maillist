@@ -65,6 +65,8 @@ func newSuppressionCmd() *cobra.Command {
 				if err := a.Store.AddSuppression(ctx, email, reason, detail); err != nil {
 					return err
 				}
+				note(cmd, a, "suppression.add", email,
+					map[string]any{"email": email, "reason": string(reason)})
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "suppressed %s (%s)\n", email, reason)
 				return nil
 			})
@@ -93,6 +95,7 @@ func newSuppressionCmd() *cobra.Command {
 				if !removed {
 					return fmt.Errorf("%s is not on the suppression list", email)
 				}
+				note(cmd, a, "suppression.remove", email, map[string]any{"email": email})
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "unsuppressed %s\n", email)
 				return nil
 			})

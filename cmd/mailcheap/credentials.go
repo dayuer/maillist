@@ -92,6 +92,8 @@ func newCredentialsCmd() *cobra.Command {
 				if !revoked {
 					return fmt.Errorf("%s was already revoked", credential.Name)
 				}
+				note(cmd, a, "credential.revoke", credential.Name,
+					map[string]any{"id": credential.ID, "name": credential.Name})
 				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "revoked %s (%s)\n", credential.ID, credential.Name)
 				return nil
 			})
@@ -153,6 +155,12 @@ func runCredentialsCreate(cmd *cobra.Command, _ []string) error {
 			Prefix: credential.Prefix, Scopes: credential.Scopes,
 			DailyBudget: credential.DailyBudget, Token: generated.Token,
 		}
+		// The token is deliberately not in the audit parameters: a log that holds the secret is not
+		// a log of what happened, it is a second copy of the key.
+		note(cmd, a, "credential.create", credential.Name, map[string]any{
+			"id": credential.ID, "kind": credential.Kind, "name": credential.Name,
+			"scopes": scopeList(credential.Scopes), "dailyBudget": credential.DailyBudget,
+		})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, view)
 		}
