@@ -5,6 +5,9 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -177,52 +180,85 @@ func newContactExportCmd() *cobra.Command {
 		Use:   "export",
 		Short: "Write contacts as CSV",
 		Long: "Writes to stdout, so `mailcheap contact export --newsletter notes > contacts.csv` is " +
-			"the whole story. The first six columns are the ones an import reads back, which makes the " +
-			"exported file a working backup of the engagement history.\n\n" +
+			"the whole story; --out writes the file itself for the callers that cannot redirect. The " +
+			"first six columns are the ones an import reads back, which makes the exported file a " +
+			"working backup of the engagement history.\n\n" +
 			"A `pending` contact exports as `pending`, and importing that file again lands it as " +
 			"`dormant`: upstream's STATUS_ALIASES read a file's \"pending\" that way, and this port " +
 			"keeps that rule.",
 		Args: cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			flags := cmd.Flags()
-			ref, _ := flags.GetString("newsletter")
-			status, _ := flags.GetString("status")
-			prefix, _ := flags.GetString("prefix")
-			return withApp(cmd, func(ctx context.Context, a *app.App) error {
-				// An export is the whole list by definition, so the page limit is the count: the
-				// store's own default would cut it at 100 rows.
-				filter, err := contactFilter(ctx, a, ref, status, prefix, 0, 0)
-				if err != nil {
-					return err
-				}
-				total, err := a.Store.CountContacts(ctx, filter)
-				if err != nil {
-					return err
-				}
-				filter.Limit = total
-				contacts, err := a.Store.Contacts(ctx, filter)
-				if err != nil {
-					return err
-				}
-				writer := csv.NewWriter(cmd.OutOrStdout())
-				if err := writer.Write(exportColumns); err != nil {
-					return err
-				}
-				for _, contact := range contacts {
-					if err := writer.Write(contactRow(contact)); err != nil {
-						return err
-					}
-				}
-				writer.Flush()
-				return writer.Error()
-			})
-		},
+		RunE: runContactExport,
 	}
 	flags := export.Flags()
 	flags.String("newsletter", "", "only this newsletter's contacts")
 	flags.String("status", "", "only this status")
 	flags.String("prefix", "", "email prefix search")
+	flags.String("out", "", "write to this file instead of stdout")
 	return export
+}
+
+func runContactExport(cmd *cobra.Command, _ []string) error {
+	flags := cmd.Flags()
+	ref, _ := flags.GetString("newsletter")
+	status, _ := flags.GetString("status")
+	prefix, _ := flags.GetString("prefix")
+	out, _ := flags.GetString("out")
+	return withApp(cmd, func(ctx context.Context, a *app.App) error {
+		// An export is the whole list by definition, so the page limit is the count: the store's own
+		// default would cut it at 100 rows.
+		filter, err := contactFilter(ctx, a, ref, status, prefix, 0, 0)
+		if err != nil {
+			return err
+		}
+		total, err := a.Store.CountContacts(ctx, filter)
+		if err != nil {
+			return err
+		}
+		filter.Limit = total
+		contacts, err := a.Store.Contacts(ctx, filter)
+		if err != nil {
+			return err
+		}
+
+		target := cmd.OutOrStdout()
+		if out != "" {
+			// Same discipline as an upload: write beside the destination, then move it into place, so
+			// a failed export never leaves a half-written file where a backup used to be.
+			file, err := os.CreateTemp(filepath.Dir(out), filepath.Base(out)+".*")
+			if err != nil {
+				return err
+			}
+			defer func() { _ = os.Remove(file.Name()) }()
+			target = file
+			defer func() { _ = file.Close() }()
+			if err := writeContactsCSV(target, contacts); err != nil {
+				return err
+			}
+			if err := file.Close(); err != nil {
+				return err
+			}
+			if err := os.Rename(file.Name(), out); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "exported %d contacts to %s\n", len(contacts), out)
+			return nil
+		}
+		return writeContactsCSV(target, contacts)
+	})
+}
+
+func writeContactsCSV(target io.Writer, contacts []model.Contact) error {
+	writer := csv.NewWriter(target)
+	if err := writer.Write(exportColumns); err != nil {
+		return err
+	}
+	for _, contact := range contacts {
+		if err := writer.Write(contactRow(contact)); err != nil {
+			return err
+		}
+	}
+	writer.Flush()
+	return writer.Error()
 }
 
 func contactRow(c model.Contact) []string {
