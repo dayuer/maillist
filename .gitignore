@@ -1,0 +1,7 @@
+/bin/
+/third_party/upstream/
+/data/
+*.db
+*.db-wal
+*.db-shm
+.env
