@@ -10,6 +10,7 @@ import (
 
 	"mailcheap/internal/config"
 	"mailcheap/internal/core/sign"
+	"mailcheap/internal/core/sns"
 	"mailcheap/internal/events"
 	"mailcheap/internal/store"
 )
@@ -22,20 +23,26 @@ type Server struct {
 	Signer  *sign.Signer
 	Events  *events.Handler
 	Limiter *MemoryLimiter
-	Log     *slog.Logger
-	now     func() time.Time
-	handler http.Handler
+	// Verifier checks SNS signatures. Production passes sns.NewVerifier(CertificateFetcher(nil));
+	// the tests pass one that trusts a key they generated.
+	Verifier *sns.Verifier
+	// Subscribe confirms an SNS subscription; it is a field so tests can stand in for SNS.
+	Subscribe Subscriber
+	Log       *slog.Logger
+	now       func() time.Time
+	handler   http.Handler
 }
 
 // New builds the router over the reader surface.
 func New(cfg config.Config, db *store.DB, signer *sign.Signer, handler *events.Handler,
-	log *slog.Logger) *Server {
+	verifier *sns.Verifier, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	server := &Server{
 		Config: cfg, Store: db, Signer: signer, Events: handler,
-		Limiter: NewMemoryLimiter(), Log: log, now: time.Now,
+		Limiter: NewMemoryLimiter(), Verifier: verifier, Subscribe: HTTPSubscriber(nil),
+		Log: log, now: time.Now,
 	}
 	server.handler = server.routes()
 	return server
@@ -59,6 +66,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /o/{token}", s.handleOpen)
 	mux.HandleFunc("GET /c/{token}", s.handleClick)
 	mux.HandleFunc("HEAD /c/{token}", s.handleClickHead)
+	mux.HandleFunc("POST /api/webhooks/ses", s.handleSESWebhook)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	return s.withSecurityHeaders(s.withArchiveHost(s.withRequestLog(mux)))
 }

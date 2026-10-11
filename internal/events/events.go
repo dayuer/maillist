@@ -141,10 +141,13 @@ func (h *Handler) findMessage(ctx context.Context, plan sesmap.Plan) (model.Mess
 
 // apply writes one plan's message, campaign and contact updates. Every counter moves only on the
 // first transition, so an SNS redelivery changes nothing.
+//
+// The increments are collected as a set, not a tally, exactly as upstream's campaignInc object is:
+// a hard bounce reports its timestamp and its status, and both name the same counter, which must
+// still count once.
 func (h *Handler) apply(ctx context.Context, message model.Message, plan sesmap.Plan) error {
-	var counters store.CampaignCounters
-	countersMoved := false
-	contactOpens, contactClicks := 0, 0
+	campaignInc := map[string]int{}
+	contactInc := map[string]int{}
 
 	for _, first := range plan.Firsts {
 		wrote, err := h.store.FirstTimestamp(ctx, message.ID, first.Field, plan.OccurredAt)
@@ -154,23 +157,11 @@ func (h *Handler) apply(ctx context.Context, message model.Message, plan sesmap.
 		if !wrote {
 			continue
 		}
-		switch first.Stat {
-		case "delivered":
-			counters.Delivered, countersMoved = counters.Delivered+1, true
-		case "opened":
-			counters.Opened, countersMoved = counters.Opened+1, true
-		case "clicked":
-			counters.Clicked, countersMoved = counters.Clicked+1, true
-		case "bounced":
-			counters.Bounced, countersMoved = counters.Bounced+1, true
-		case "complained":
-			counters.Complained, countersMoved = counters.Complained+1, true
+		if first.Stat != "" {
+			campaignInc[first.Stat] = 1
 		}
-		switch first.ContactStat {
-		case "opens":
-			contactOpens++
-		case "clicks":
-			contactClicks++
+		if first.ContactStat != "" {
+			contactInc[first.ContactStat] = 1
 		}
 	}
 
@@ -181,18 +172,16 @@ func (h *Handler) apply(ctx context.Context, message model.Message, plan sesmap.
 		}
 		// The stat a status bumps is the status itself (upstream's status.stat).
 		if moved {
-			switch plan.NewStatus {
-			case model.MessageDelivered:
-				counters.Delivered, countersMoved = counters.Delivered+1, true
-			case model.MessageBounced:
-				counters.Bounced, countersMoved = counters.Bounced+1, true
-			case model.MessageComplained:
-				counters.Complained, countersMoved = counters.Complained+1, true
-			case model.MessageFailed:
-				counters.Failed, countersMoved = counters.Failed+1, true
-			}
+			campaignInc[string(plan.NewStatus)] = 1
 		}
 	}
+
+	counters := store.CampaignCounters{
+		Delivered: campaignInc["delivered"], Bounced: campaignInc["bounced"],
+		Complained: campaignInc["complained"], Opened: campaignInc["opened"],
+		Clicked: campaignInc["clicked"], Failed: campaignInc["failed"],
+	}
+	countersMoved := len(campaignInc) > 0
 	if plan.Error != "" {
 		if err := h.store.SetMessageError(ctx, message.ID, plan.Error); err != nil {
 			return err
@@ -212,12 +201,13 @@ func (h *Handler) apply(ctx context.Context, message model.Message, plan sesmap.
 		}
 	}
 
-	if message.ContactID != "" && (plan.Engagement != nil || contactOpens+contactClicks > 0) {
+	if message.ContactID != "" && (plan.Engagement != nil || len(contactInc) > 0) {
 		if err := h.store.RecordEngagement(ctx, message.ContactID, plan.Engagement, plan.OccurredAt); err != nil {
 			return err
 		}
-		if contactOpens+contactClicks > 0 {
-			if err := h.store.AddContactStats(ctx, message.ContactID, 0, contactOpens, contactClicks); err != nil {
+		if len(contactInc) > 0 {
+			err := h.store.AddContactStats(ctx, message.ContactID, 0, contactInc["opens"], contactInc["clicks"])
+			if err != nil {
 				return err
 			}
 		}

@@ -64,7 +64,8 @@ func newTestServerWith(t *testing.T, tweak func(*config.Config)) *testServer {
 	tweak(&cfg)
 
 	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
-	server := New(cfg, db, signer, events.New(db, testLogger(t)), testLogger(t))
+	server := New(cfg, db, signer, events.New(db, testLogger(t)), testVerifier(t), testLogger(t))
+	server.Subscribe = func(context.Context, string) error { return nil }
 	server.now = func() time.Time { return now }
 	return &testServer{Server: server, store: db, signer: signer, now: now}
 }
