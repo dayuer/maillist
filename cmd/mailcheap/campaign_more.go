@@ -236,15 +236,16 @@ func runCampaignCheck(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		report, err := runChecks(ctx, a, campaign, newsletter)
+		report, audience, err := runChecks(ctx, a, campaign, newsletter)
 		if err != nil {
 			return err
 		}
 		if jsonOutput(cmd) {
-			if err := printJSON(cmd, report); err != nil {
+			if err := printJSON(cmd, map[string]any{"checks": report, "audience": audience}); err != nil {
 				return err
 			}
 		} else {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "audience       %s\n", stats.FormatNumber(audience))
 			for _, item := range report {
 				mark := "ok  "
 				if !item.OK {
@@ -335,7 +336,7 @@ func runCampaignSchedule(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		report, err := runChecks(ctx, a, campaign, newsletter)
+		report, _, err := runChecks(ctx, a, campaign, newsletter)
 		if err != nil {
 			return err
 		}
@@ -450,16 +451,17 @@ func runCampaignResume(cmd *cobra.Command, args []string) error {
 }
 
 // runChecks builds the pre-send checklist: the same input the send path uses, so `check` and `send`
-// can never disagree about whether a campaign is sendable.
+// can never disagree about whether a campaign is sendable. The audience comes back with it because
+// it is the number the operator sends by — "this goes to N" — and not a check of its own.
 func runChecks(ctx context.Context, a *app.App, campaign model.Campaign,
-	newsletter model.Newsletter) ([]checks.Check, error) {
+	newsletter model.Newsletter) ([]checks.Check, int, error) {
 	verified, err := verifiedDomains(ctx, a)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	audience, err := a.Store.CountActiveContacts(ctx, newsletter.ID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	return checks.Run(checks.Input{
 		Campaign: campaign, Newsletter: newsletter,
@@ -468,7 +470,7 @@ func runChecks(ctx context.Context, a *app.App, campaign model.Campaign,
 		Limits:         a.Config.Limits,
 		DomainVerified: rules.VerifiedFromDomain(verified, newsletter.FromEmail),
 		Audience:       audience,
-	}), nil
+	}), audience, nil
 }
 
 // renderEmail renders a campaign's Markdown or HTML into the email a reader would get, without a
