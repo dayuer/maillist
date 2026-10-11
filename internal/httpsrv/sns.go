@@ -46,11 +46,21 @@ func HTTPSubscriber(client *http.Client) Subscriber {
 // errSubscribeFailed is what the real Subscriber returns when SNS answers something other than 200.
 var errSubscribeFailed = errors.New("subscription confirmation failed")
 
+// sesWebhookLimit bounds one source's posts. The signature is checked after the certificate is
+// downloaded, so an unsigned flood makes the process fetch a certificate per request — the rate
+// limit is what caps that work, and it is per source rather than per process so a real SNS burst
+// from Amazon's addresses is not refused by somebody else's flood.
+var sesWebhookLimit = Limit{Name: "ses-webhook-ip", Count: 120, Window: time.Minute}
+
 // handleSESWebhook answers POST /api/webhooks/ses. It needs an SNS HTTPS subscription with raw
 // message delivery off, so the envelope is signed.
 func (s *Server) handleSESWebhook(w http.ResponseWriter, r *http.Request) {
 	if s.Config.SESTopicARN == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "SES webhook is not configured"})
+		return
+	}
+	if s.Limiter.Limited(sesWebhookLimit, s.clientIP(r), s.clock()) {
+		rateLimited(w, sesWebhookLimit)
 		return
 	}
 	content, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBody+1))

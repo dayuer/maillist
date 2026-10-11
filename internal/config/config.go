@@ -30,8 +30,12 @@ type Config struct {
 	SESConfigSet  string
 	SESTopicARN   string
 	ArchiveHosts  string
-	AlertFrom     string
-	AdminEmail    string
+	// TrustedProxies are the networks whose X-Forwarded-For may be believed (TRUSTED_PROXIES).
+	// Empty means none: the peer address is used, which is the safe default and the right one for a
+	// process serving traffic directly.
+	TrustedProxies []string
+	AlertFrom      string
+	AdminEmail     string
 	// FakeSESLog, when set, makes the CLI and server record sends to that file instead of calling
 	// SES. It is how the end-to-end test observes a send; phase 5's compose stack uses a real fake
 	// endpoint instead.
@@ -72,6 +76,7 @@ func Load(env map[string]string) (Config, error) {
 		SESConfigSet:   env["SES_CONFIGURATION_SET"],
 		SESTopicARN:    env["SES_SNS_TOPIC_ARN"],
 		ArchiveHosts:   env["ARCHIVE_HOSTS"],
+		TrustedProxies: splitList(env["TRUSTED_PROXIES"]),
 		AlertFrom:      env["ALERT_FROM"],
 		AdminEmail:     env["ADMIN_EMAIL"],
 		FakeSESLog:     env["MAILCHEAP_FAKE_SES_LOG"],

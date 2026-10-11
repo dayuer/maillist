@@ -86,7 +86,7 @@ func (s *Server) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target, http.StatusSeeOther)
 	}
 
-	if s.Limiter.Limited(unsubscribeLimit, ClientIP(r), s.clock()) {
+	if s.Limiter.Limited(unsubscribeLimit, s.clientIP(r), s.clock()) {
 		rateLimited(w, unsubscribeLimit)
 		return
 	}

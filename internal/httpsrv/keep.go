@@ -47,7 +47,7 @@ func (s *Server) handleKeepPage(w http.ResponseWriter, r *http.Request) {
 // complaint stays as it is.
 func (s *Server) handleKeep(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	if s.Limiter.Limited(keepLimit, ClientIP(r), s.clock()) {
+	if s.Limiter.Limited(keepLimit, s.clientIP(r), s.clock()) {
 		rateLimited(w, keepLimit)
 		return
 	}
