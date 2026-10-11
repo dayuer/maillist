@@ -580,19 +580,27 @@ func (e *Engine) Queue(ctx context.Context, campaignID string) (QueueResult, err
 			return QueueResult{Reason: "No active contacts to send to"}, nil
 		}
 
-		// D15: the whole step is reserved up front, so two campaigns cannot overshoot the day together.
-		fits, err := e.store.Reserve(ctx, store.Day(time.Now()), "", len(audience),
-			e.cfg.Limits.MaxSendsPerDay, 0)
+		// D15: the whole step is reserved up front, so two campaigns cannot overshoot the day
+		// together — and in the same transaction as the first chunk of messages, so a crash cannot
+		// spend the day on mail that was never written.
+		day := store.Day(time.Now())
+		messages := toMessages(campaign, audience)
+		fits, inserted, err := e.store.ReserveAndInsert(ctx, day, "", len(messages),
+			e.cfg.Limits.MaxSendsPerDay, 0, messages)
 		if err != nil {
 			return QueueResult{}, err
 		}
 		if !fits {
 			return QueueResult{Reason: fmt.Sprintf(
-				"the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", len(audience))}, nil
+				"the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", len(messages))}, nil
 		}
-
-		if _, err := e.store.InsertMessages(ctx, toMessages(campaign, audience)); err != nil {
-			return QueueResult{}, err
+		if inserted < len(messages) {
+			written, err := e.store.InsertMessages(ctx, messages[inserted:])
+			if err != nil {
+				// The rest never got written, so the day must not stay charged for it.
+				e.refund(ctx, day, len(messages)-inserted-written)
+				return QueueResult{}, err
+			}
 		}
 		if recipients, lastChance, err = e.store.CountCampaignMessages(ctx, campaignID); err != nil {
 			return QueueResult{}, err
@@ -666,16 +674,22 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 	if len(fresh) == 0 {
 		return QueueResult{Reason: "Everyone has received it already"}, nil
 	}
-	fits, err := e.store.Reserve(ctx, store.Day(time.Now()), "", len(fresh),
-		e.cfg.Limits.MaxSendsPerDay, 0)
+	day := store.Day(time.Now())
+	messages := toMessages(campaign, fresh)
+	fits, inserted, err := e.store.ReserveAndInsert(ctx, day, "", len(messages),
+		e.cfg.Limits.MaxSendsPerDay, 0, messages)
 	if err != nil {
 		return QueueResult{}, err
 	}
 	if !fits {
 		return QueueResult{Reason: "the daily send budget is spent"}, nil
 	}
-	if _, err := e.store.InsertMessages(ctx, toMessages(campaign, fresh)); err != nil {
-		return QueueResult{}, err
+	if inserted < len(messages) {
+		written, err := e.store.InsertMessages(ctx, messages[inserted:])
+		if err != nil {
+			e.refund(ctx, day, len(messages)-inserted-written)
+			return QueueResult{}, err
+		}
 	}
 	recipients, lastChance, err := e.store.CountCampaignMessages(ctx, campaignID)
 	if err != nil {
@@ -771,6 +785,18 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 // sendTimeout bounds one call to SES. The request runs detached from the batch's context (see
 // deliver), so it needs a deadline of its own or a hung connection would hold the shutdown open.
 const sendTimeout = 30 * time.Second
+
+// refund gives a day's budget back for messages that were charged for and never written. It is
+// best-effort by design: the campaign is not queued either way, and the operator's next attempt
+// reports the budget it actually finds.
+func (e *Engine) refund(ctx context.Context, day string, n int) {
+	if n <= 0 {
+		return
+	}
+	if err := e.store.Refund(ctx, day, "", n); err != nil {
+		e.log.Error("refund the day's budget", "day", day, "messages", n, "error", err)
+	}
+}
 
 // startEarly is lib/scheduling.js START_EARLY_MS: within a minute of the picked time, the scheduled
 // send starts instead of waiting again.

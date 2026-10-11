@@ -28,37 +28,86 @@ func (db *DB) InsertMessages(ctx context.Context, messages []model.Message) (int
 		end := min(start+InsertChunkSize, len(messages))
 		chunk := messages[start:end]
 		err := db.Write(ctx, func(tx *sql.Tx) error {
-			var builder strings.Builder
-			builder.WriteString(`INSERT OR IGNORE INTO messages (` + messageColumns + `) VALUES `)
-			args := make([]any, 0, len(chunk)*18)
-			for i, m := range chunk {
-				if i > 0 {
-					builder.WriteString(",")
-				}
-				builder.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-				args = append(args,
-					m.ID, string(m.Kind), m.CampaignID, m.NewsletterID, m.ContactID, m.Email,
-					m.Provider, string(m.Status), m.SESMessageID, m.Error,
-					formatTimePtr(m.ClaimedAt), formatTimePtr(m.SentAt), formatTimePtr(m.DeliveredAt),
-					formatTimePtr(m.OpenedAt), formatTimePtr(m.ClickedAt), formatTimePtr(m.BouncedAt),
-					formatTimePtr(m.ComplainedAt), formatTime(m.CreatedAt))
-			}
-			result, err := tx.ExecContext(ctx, builder.String(), args...)
-			if err != nil {
-				return err
-			}
-			affected, err := result.RowsAffected()
-			if err != nil {
-				return err
-			}
-			inserted += int(affected)
-			return nil
+			count, err := insertMessagesTx(ctx, tx, chunk)
+			inserted += count
+			return err
 		})
 		if err != nil {
 			return inserted, fmt.Errorf("insert messages %d-%d: %w", start, end, err)
 		}
 	}
 	return inserted, nil
+}
+
+// insertMessagesTx is one chunk of InsertMessages inside a caller's transaction.
+func insertMessagesTx(ctx context.Context, tx *sql.Tx, chunk []model.Message) (int, error) {
+	if len(chunk) == 0 {
+		return 0, nil
+	}
+	var builder strings.Builder
+	builder.WriteString(`INSERT OR IGNORE INTO messages (` + messageColumns + `) VALUES `)
+	args := make([]any, 0, len(chunk)*18)
+	for i, m := range chunk {
+		if i > 0 {
+			builder.WriteString(",")
+		}
+		builder.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+		args = append(args,
+			m.ID, string(m.Kind), m.CampaignID, m.NewsletterID, m.ContactID, m.Email,
+			m.Provider, string(m.Status), m.SESMessageID, m.Error,
+			formatTimePtr(m.ClaimedAt), formatTimePtr(m.SentAt), formatTimePtr(m.DeliveredAt),
+			formatTimePtr(m.OpenedAt), formatTimePtr(m.ClickedAt), formatTimePtr(m.BouncedAt),
+			formatTimePtr(m.ComplainedAt), formatTime(m.CreatedAt))
+	}
+	result, err := tx.ExecContext(ctx, builder.String(), args...)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
+// ReserveAndInsert reserves the day's budget and writes the first chunk of messages in one
+// transaction (D15).
+//
+// Reserving and writing apart is a leak: a process that reserved and then died before inserting has
+// spent the day's allowance on mail that does not exist, and nothing gives it back. Together, either
+// both happen or neither does.
+//
+// The reservation is made for the whole step — that is the check — and then corrected down to what
+// was actually new, because a row that already existed is not charged for. That correction is also
+// what makes a retry safe: a job that runs again after inserting and before moving the campaign on
+// reserves nothing the second time.
+//
+// fits=false means the budget is spent: nothing is written and nothing is reserved. The caller
+// writes the rest of messages with InsertMessages.
+func (db *DB) ReserveAndInsert(ctx context.Context, day, credentialID string, n, globalMax, credentialMax int,
+	messages []model.Message) (fits bool, inserted int, err error) {
+	if n <= 0 || len(messages) == 0 {
+		return true, 0, nil
+	}
+	chunk := messages[:min(InsertChunkSize, len(messages))]
+	err = db.Write(ctx, func(tx *sql.Tx) error {
+		fits, inserted = false, 0
+		ok, err := reserveTx(ctx, tx, day, credentialID, n, globalMax, credentialMax)
+		if err != nil || !ok {
+			return err
+		}
+		count, err := insertMessagesTx(ctx, tx, chunk)
+		if err != nil {
+			return err
+		}
+		inserted = count
+		if err := refundTx(ctx, tx, day, credentialID, n-count); err != nil {
+			return err
+		}
+		fits = true
+		return nil
+	})
+	return fits, inserted, err
 }
 
 // claimableCampaign restricts a claim to messages whose campaign is still sending. A message of a
