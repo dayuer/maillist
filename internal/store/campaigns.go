@@ -267,6 +267,33 @@ func (db *DB) SetCampaignStartedAt(ctx context.Context, id string, at time.Time)
 	})
 }
 
+// SetCampaignRecipients records how many messages the campaign's audience turned out to be.
+//
+// Upstream sets these two numbers ($set: {"stats.recipients": n, "lastChance.recipients": m}) rather
+// than incrementing them, and the difference shows on resume: a paused campaign that resumes
+// re-selects the audience and counts it again, and an increment would double it.
+func (db *DB) SetCampaignRecipients(ctx context.Context, id string, recipients, lastChance int) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE campaigns SET stats_recipients = ?,
+            last_chance_recipients = ?, updated_at = ? WHERE id = ?`,
+			recipients, lastChance, formatTime(time.Now()), id)
+		return err
+	})
+}
+
+// SetCampaignSchedule records the time a scheduled campaign goes out.
+func (db *DB) SetCampaignSchedule(ctx context.Context, id string, at *time.Time) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx,
+			"UPDATE campaigns SET scheduled_at = ?, updated_at = ? WHERE id = ?",
+			formatTimePtr(at), formatTime(time.Now()), id)
+		if err != nil {
+			return err
+		}
+		return requireOneRow(result, "campaign", id)
+	})
+}
+
 // SetCampaignAudienceLimit records the cap a stepped send uses; 0 clears it.
 func (db *DB) SetCampaignAudienceLimit(ctx context.Context, id string, limit int) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {

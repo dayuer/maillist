@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"mailcheap/internal/core/ids"
@@ -23,6 +24,9 @@ const (
 	Done    State = "done"
 	// Dead is a job whose attempts ran out. It stays for the audit trail and is never leased again.
 	Dead State = "dead"
+	// AwaitingApproval is a job a human has to release (SEND_APPROVAL=manual, design §11). Lease never
+	// picks it up; `mailcheap approve <id>` moves it back to Pending.
+	AwaitingApproval State = "awaiting_approval"
 )
 
 // LeaseDuration is how long a leased job stays invisible to other workers. A worker that dies
@@ -184,12 +188,26 @@ func (q *Queue) Get(ctx context.Context, id string) (Job, error) {
 
 // Pending lists the jobs that are still waiting, oldest first.
 func (q *Queue) Pending(ctx context.Context, limit int) ([]Job, error) {
+	return q.list(ctx, limit, string(Pending), string(Running))
+}
+
+// Awaiting lists the jobs parked for approval, oldest first.
+func (q *Queue) Awaiting(ctx context.Context, limit int) ([]Job, error) {
+	return q.list(ctx, limit, string(AwaitingApproval))
+}
+
+func (q *Queue) list(ctx context.Context, limit int, states ...string) ([]Job, error) {
 	if limit <= 0 {
 		limit = 50
 	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(states)), ",")
+	args := make([]any, 0, len(states)+1)
+	for _, state := range states {
+		args = append(args, state)
+	}
+	args = append(args, limit)
 	rows, err := q.db.Rows(ctx,
-		"SELECT "+columns+" FROM jobs WHERE state IN (?, ?) ORDER BY run_at, id LIMIT ?",
-		string(Pending), string(Running), limit)
+		"SELECT "+columns+" FROM jobs WHERE state IN ("+placeholders+") ORDER BY run_at, id LIMIT ?", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -203,6 +221,44 @@ func (q *Queue) Pending(ctx context.Context, limit int) ([]Job, error) {
 		out = append(out, job)
 	}
 	return out, rows.Err()
+}
+
+// Hold parks a pending job for approval. It is a no-op when the job is no longer pending, so a job
+// that started between the operator's command and this call is not quietly stopped.
+func (q *Queue) Hold(ctx context.Context, id string) error {
+	return q.db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, updated_at = ?
+            WHERE id = ? AND state = ?`,
+			string(AwaitingApproval), store.FormatTime(time.Now()), id, string(Pending))
+		return err
+	})
+}
+
+// Approve releases a held job to run now. ok is false when there was nothing waiting.
+func (q *Queue) Approve(ctx context.Context, id string, now time.Time) (bool, error) {
+	released := false
+	err := q.db.Write(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, run_at = ?, updated_at = ?
+            WHERE id = ? AND state = ?`,
+			string(Pending), store.FormatTime(now), store.FormatTime(now), id, string(AwaitingApproval))
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		released = affected > 0
+		return nil
+	})
+	if err != nil || !released {
+		return false, err
+	}
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+	return true, nil
 }
 
 // columns is the SELECT list every jobs query shares, in scanJob order.

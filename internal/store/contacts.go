@@ -127,7 +127,9 @@ func (db *DB) UpdateContact(ctx context.Context, c model.Contact) error {
 	})
 }
 
-// UpdateContactStatus moves one contact to status, but only from one of the from statuses.
+// UpdateContactStatus moves one contact to status, but only from one of the from statuses. An empty
+// from means "from any status" — the operator's edit in `contact update`, where they have already
+// seen the current one.
 func (db *DB) UpdateContactStatus(ctx context.Context, id string, status model.ContactStatus, from []model.ContactStatus) (bool, error) {
 	moved := false
 	err := db.Write(ctx, func(tx *sql.Tx) error {
@@ -139,9 +141,12 @@ func (db *DB) UpdateContactStatus(ctx context.Context, id string, status model.C
 			args = append(args, string(allowed))
 		}
 		args = append(args, id)
-		// The only interpolated text is a run of "?" placeholders; every value is bound.
-		query := "UPDATE contacts SET status = ?, updated_at = ? WHERE status IN (" + //nolint:gosec // G202: placeholders, not values
-			strings.Join(placeholders, ",") + ") AND id = ?"
+		guard := ""
+		if len(from) > 0 {
+			// The only interpolated text is a run of "?" placeholders; every value is bound.
+			guard = "status IN (" + strings.Join(placeholders, ",") + ") AND " //nolint:gosec // G202: placeholders, not values
+		}
+		query := "UPDATE contacts SET status = ?, updated_at = ? WHERE " + guard + "id = ?"
 		result, err := tx.ExecContext(ctx, query, args...)
 		if err != nil {
 			return err

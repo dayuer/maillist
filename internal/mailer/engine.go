@@ -582,7 +582,9 @@ func (e *Engine) Queue(ctx context.Context, campaignID string) (QueueResult, err
 	if !moved {
 		return QueueResult{}, errors.New("the campaign changed, refresh and try again")
 	}
-	if err := e.store.AddCampaignStats(ctx, campaignID, store.CampaignCounters{Recipients: recipients}); err != nil {
+	// Upstream sets the recipient counts rather than incrementing them: a paused campaign that
+	// resumes re-selects the audience, and an increment would count it twice.
+	if err := e.store.SetCampaignRecipients(ctx, campaignID, recipients, lastChance); err != nil {
 		return QueueResult{}, err
 	}
 	if err := e.store.SetCampaignStartedAt(ctx, campaignID, time.Now().UTC()); err != nil {
@@ -660,8 +662,8 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 	if !moved {
 		return QueueResult{}, errors.New("the campaign changed, refresh and try again")
 	}
-	if err := e.store.AddCampaignStats(ctx, campaignID,
-		store.CampaignCounters{Recipients: recipients - sentSoFar}); err != nil {
+	// Also a set, for the same reason as Queue: recipients is the campaign's total, not this step's.
+	if err := e.store.SetCampaignRecipients(ctx, campaignID, recipients, lastChance); err != nil {
 		return QueueResult{}, err
 	}
 	if limit > 0 {
@@ -737,6 +739,10 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 	return TestResult{MessageID: message.ID, SESMessageID: sent.sesMessageID, SentAt: sent.sentAt}, nil
 }
 
+// startEarly is lib/scheduling.js START_EARLY_MS: within a minute of the picked time, the scheduled
+// send starts instead of waiting again.
+const startEarly = time.Minute
+
 // RunJob is the scheduler's handler: it turns one due job into work. An error sends the job back to
 // the queue with its backoff.
 func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
@@ -746,6 +752,10 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 			CampaignID string `json:"campaignId"`
 			// Additional turns the job into the next step of a send in steps.
 			Additional int `json:"additional"`
+			// ScheduledAt is set only by `campaign schedule`: the time the operator picked. The job
+			// does nothing when the campaign is no longer scheduled for it (lib/scheduling.js
+			// runScheduledSend), which is how unscheduling, rescheduling or an earlier step wins.
+			ScheduledAt string `json:"scheduledAt"`
 		}
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return fmt.Errorf("send_campaign payload: %w", err)
@@ -755,6 +765,9 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 		}
 		if payload.Additional > 0 {
 			_, err := e.QueueStep(ctx, payload.CampaignID, payload.Additional)
+			return err
+		}
+		if skip, err := e.scheduledSendIsStale(ctx, payload.CampaignID, payload.ScheduledAt); err != nil || skip {
 			return err
 		}
 		_, err := e.Queue(ctx, payload.CampaignID)
@@ -780,6 +793,33 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 	default:
 		return fmt.Errorf("unknown job kind %q", job.Kind)
 	}
+}
+
+// scheduledSendIsStale reports whether a scheduled send's wake-up has been overtaken by events: the
+// campaign was unscheduled, rescheduled, already started or discarded since the job was queued. A
+// job with no scheduledAt is a direct send (the operator or `approve`), and is never stale here.
+func (e *Engine) scheduledSendIsStale(ctx context.Context, campaignID, scheduledAt string) (bool, error) {
+	if scheduledAt == "" {
+		return false, nil
+	}
+	wanted, err := time.Parse(time.RFC3339, scheduledAt)
+	if err != nil {
+		// A malformed payload is the job's problem, not the campaign's: report it so the scheduler
+		// retries and eventually dead-letters it, rather than silently dropping a send.
+		return true, fmt.Errorf("send_campaign job has a bad scheduledAt %q: %w", scheduledAt, err)
+	}
+	campaign, err := e.store.Campaign(ctx, campaignID)
+	if err != nil {
+		return true, err
+	}
+	if campaign.Status != model.CampaignScheduled || campaign.ScheduledAt == nil ||
+		!campaign.ScheduledAt.Equal(wanted) {
+		e.log.Info("scheduled send skipped", "campaign", campaignID, "status", campaign.Status)
+		return true, nil
+	}
+	// The scheduler only leases a job once its run_at has passed, so this is belt and braces for a
+	// clock that moved or a job requeued early.
+	return campaign.ScheduledAt.After(time.Now().UTC().Add(startEarly)), nil
 }
 
 // SignupResult is what queueing a welcome or confirmation email did; Skipped says why it didn't go.

@@ -185,3 +185,66 @@ func TestPendingListsWaitingJobs(t *testing.T) {
 		t.Fatalf("pending is not oldest first: %+v", pending)
 	}
 }
+
+// A job held for approval is not leased, is listed as awaiting, and runs once released — the manual
+// gate of design §11.
+func TestHoldAndApprove(t *testing.T) {
+	queue := newQueue(t)
+	ctx := context.Background()
+	id, err := queue.Enqueue(ctx, KindSendCampaign, map[string]string{"campaignId": "x"}, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Hold(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+
+	// Due, but held: Lease must not take it.
+	if job, ok, err := queue.Lease(ctx, testNow.Add(time.Hour)); err != nil || ok {
+		t.Fatalf("a held job was leased: %+v %v", job, err)
+	}
+	awaiting, err := queue.Awaiting(ctx, 0)
+	if err != nil || len(awaiting) != 1 || awaiting[0].ID != id {
+		t.Fatalf("Awaiting = %+v %v", awaiting, err)
+	}
+
+	// Approving twice is not an error, but only the first does anything.
+	released, err := queue.Approve(ctx, id, testNow.Add(2*time.Hour))
+	if err != nil || !released {
+		t.Fatalf("approve = %v %v", released, err)
+	}
+	if again, err := queue.Approve(ctx, id, testNow.Add(2*time.Hour)); err != nil || again {
+		t.Fatalf("second approve = %v %v, want false and no error", again, err)
+	}
+	job, ok, err := queue.Lease(ctx, testNow.Add(3*time.Hour))
+	if err != nil || !ok || job.ID != id {
+		t.Fatalf("lease after approval = %+v %v %v", job, ok, err)
+	}
+}
+
+// Holding a job that is not pending (already running, done or dead) changes nothing: a send that
+// started between the operator's command and the hold must not be quietly stopped.
+func TestHoldIgnoresANonPendingJob(t *testing.T) {
+	queue := newQueue(t)
+	ctx := context.Background()
+	id, err := queue.Enqueue(ctx, KindSendCampaign, nil, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := queue.Lease(ctx, testNow); err != nil || !ok {
+		t.Fatalf("lease = %v %v", ok, err)
+	}
+	if err := queue.Hold(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	job, err := queue.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State != Running {
+		t.Fatalf("state = %s, want running", job.State)
+	}
+	if awaiting, err := queue.Awaiting(ctx, 0); err != nil || len(awaiting) != 0 {
+		t.Fatalf("Awaiting = %+v %v", awaiting, err)
+	}
+}

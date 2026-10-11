@@ -31,7 +31,8 @@ func newContactCmd() *cobra.Command {
 	if err := add.MarkFlagRequired("newsletter"); err != nil {
 		panic(err)
 	}
-	cmd.AddCommand(add)
+	cmd.AddCommand(add, newContactListCmd(), newContactShowCmd(),
+		newContactUpdateCmd(), newContactExportCmd())
 	return cmd
 }
 
