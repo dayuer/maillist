@@ -28,8 +28,16 @@ type Config struct {
 	MCPHTTPAddr   string
 	SESRegion     string
 	SESConfigSet  string
-	SESTopicARN   string
-	ArchiveHosts  string
+	// SESEndpoint replaces the SES service address (SES_ENDPOINT). The compose smoke stack points it
+	// at a fake SES; empty means the real one for the region.
+	SESEndpoint string
+	// SESAccessKeyID and SESSecretAccessKey are the credentials this project's documentation names
+	// (SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY). Empty means the SDK's own chain — an instance or
+	// task role — which is the better answer on AWS.
+	SESAccessKeyID     string
+	SESSecretAccessKey string
+	SESTopicARN        string
+	ArchiveHosts       string
 	// TrustedProxies are the networks whose X-Forwarded-For may be believed (TRUSTED_PROXIES).
 	// Empty means none: the peer address is used, which is the safe default and the right one for a
 	// process serving traffic directly.
@@ -112,27 +120,40 @@ func Load(env map[string]string) (Config, error) {
 	if approval != "auto" && approval != "manual" {
 		problems = append(problems, `SEND_APPROVAL must be "auto" or "manual".`)
 	}
+	// Sending on, but nowhere to send: the default path used to build a real SES client and let the
+	// first send fail on missing credentials, which reads as a bug in the sender rather than as a
+	// deployment that was never finished. SENDING_ENABLED is false by default, so a fresh deployment
+	// still starts; it is only the half-configured one that is refused, and it is refused at startup.
+	if env["SENDING_ENABLED"] == "true" &&
+		env["SES_REGION"] == "" && env["SES_ENDPOINT"] == "" && env["MAILCHEAP_FAKE_SES_LOG"] == "" {
+		problems = append(problems, "SENDING_ENABLED=true, but there is no SES to send through: set "+
+			"SES_REGION (and SES_ACCESS_KEY_ID/SES_SECRET_ACCESS_KEY, or an instance role), or point "+
+			"SES_ENDPOINT at a local fake SES, or set MAILCHEAP_FAKE_SES_LOG to write sends to a file.")
+	}
 	if len(problems) > 0 {
 		return Config{}, errors.New("mailcheap can't start. " + strings.Join(problems, " "))
 	}
 	dataDir := or(env["MAILCHEAP_DATA_DIR"], "/data")
 	return Config{
-		SessionSecret:  env["SESSION_SECRET"],
-		AppURL:         strings.TrimSuffix(or(env["APP_URL"], "http://localhost:8080"), "/"),
-		DataDir:        dataDir,
-		DBPath:         or(env["MAILCHEAP_DB"], dataDir+"/mailcheap.db"),
-		SendingOn:      env["SENDING_ENABLED"] == "true",
-		SendApproval:   approval,
-		MCPHTTPAddr:    or(env["MCP_HTTP_ADDR"], "127.0.0.1:8081"),
-		SESRegion:      env["SES_REGION"],
-		SESConfigSet:   env["SES_CONFIGURATION_SET"],
-		SESTopicARN:    env["SES_SNS_TOPIC_ARN"],
-		ArchiveHosts:   env["ARCHIVE_HOSTS"],
-		TrustedProxies: splitList(env["TRUSTED_PROXIES"]),
-		AlertFrom:      env["ALERT_FROM"],
-		AdminEmail:     env["ADMIN_EMAIL"],
-		FakeSESLog:     env["MAILCHEAP_FAKE_SES_LOG"],
-		FakeSESDomains: splitList(env["MAILCHEAP_FAKE_SES_DOMAINS"]),
+		SessionSecret:      env["SESSION_SECRET"],
+		AppURL:             strings.TrimSuffix(or(env["APP_URL"], "http://localhost:8080"), "/"),
+		DataDir:            dataDir,
+		DBPath:             or(env["MAILCHEAP_DB"], dataDir+"/mailcheap.db"),
+		SendingOn:          env["SENDING_ENABLED"] == "true",
+		SendApproval:       approval,
+		MCPHTTPAddr:        or(env["MCP_HTTP_ADDR"], "127.0.0.1:8081"),
+		SESRegion:          env["SES_REGION"],
+		SESConfigSet:       env["SES_CONFIGURATION_SET"],
+		SESEndpoint:        env["SES_ENDPOINT"],
+		SESAccessKeyID:     env["SES_ACCESS_KEY_ID"],
+		SESSecretAccessKey: env["SES_SECRET_ACCESS_KEY"],
+		SESTopicARN:        env["SES_SNS_TOPIC_ARN"],
+		ArchiveHosts:       env["ARCHIVE_HOSTS"],
+		TrustedProxies:     splitList(env["TRUSTED_PROXIES"]),
+		AlertFrom:          env["ALERT_FROM"],
+		AdminEmail:         env["ADMIN_EMAIL"],
+		FakeSESLog:         env["MAILCHEAP_FAKE_SES_LOG"],
+		FakeSESDomains:     splitList(env["MAILCHEAP_FAKE_SES_DOMAINS"]),
 		Limits: model.Limits{
 			BounceRate:               0.02,
 			ComplaintRate:            0.0008,

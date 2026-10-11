@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2/types"
 
@@ -20,14 +22,50 @@ type SESSender struct {
 	sendingOn bool
 }
 
-// NewSES builds the production Sender from the standard AWS credential chain (SES_ACCESS_KEY_ID and
-// SES_SECRET_ACCESS_KEY are picked up by the SDK's own environment provider).
-func NewSES(ctx context.Context, region, configSet string, sendingOn bool) (*SESSender, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+// SESOptions is where SES is and who is asking.
+type SESOptions struct {
+	Region string
+	// Endpoint replaces the service address (SES_ENDPOINT). The compose smoke stack points it at a
+	// fake SES, so the request this code builds is the request under test: real signing, real
+	// serialisation, no AWS.
+	Endpoint string
+	// AccessKeyID and SecretKey are SES_ACCESS_KEY_ID and SES_SECRET_ACCESS_KEY, the variables this
+	// project documents. Empty means the SDK's own chain — an instance role, a task role, or the
+	// shared config file — which is what a deployment on AWS should use.
+	//
+	// They are passed explicitly because the SDK's environment provider reads AWS_ACCESS_KEY_ID, not
+	// SES_ACCESS_KEY_ID: leaving it to the chain meant these variables were ignored and the chain
+	// went looking for an instance role that is not there — which shows up as a five-second
+	// credential timeout on the first request, not as a missing setting.
+	AccessKeyID string
+	SecretKey   string
+}
+
+// NewSES builds the production Sender.
+func NewSES(ctx context.Context, options SESOptions, configSet string, sendingOn bool) (*SESSender, error) {
+	cfg, err := awsConfig(ctx, options)
 	if err != nil {
-		return nil, fmt.Errorf("load AWS config: %w", err)
+		return nil, err
 	}
 	return &SESSender{client: sesv2.NewFromConfig(cfg), configSet: configSet, sendingOn: sendingOn}, nil
+}
+
+// awsConfig is the one place a client is built, so neither the endpoint override nor the credentials
+// can be forgotten in one of the two constructors.
+func awsConfig(ctx context.Context, options SESOptions) (aws.Config, error) {
+	loaders := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(options.Region)}
+	if options.Endpoint != "" {
+		loaders = append(loaders, awsconfig.WithBaseEndpoint(options.Endpoint))
+	}
+	if options.AccessKeyID != "" && options.SecretKey != "" {
+		loaders = append(loaders, awsconfig.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(options.AccessKeyID, options.SecretKey, "")))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, loaders...)
+	if err != nil {
+		return aws.Config{}, fmt.Errorf("load AWS config: %w", err)
+	}
+	return cfg, nil
 }
 
 // Send is upstream sendSesEmail: the whole email goes as Simple content, the list headers travel as

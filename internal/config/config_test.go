@@ -71,6 +71,28 @@ func TestSendingLimitsMatchUpstream(t *testing.T) {
 	}
 }
 
+// 发送开着却没有去处，启动就拒绝：默认路径不该悄悄构造真实 SES 客户端、把失败推到第一封信。
+//
+// A half-configured deployment is the one that reads as a bug later. SENDING_ENABLED=false (the
+// default) starts whatever else is missing, so a fresh deployment is unaffected.
+func TestSendingOnNeedsSomewhereToSend(t *testing.T) {
+	env := with("SENDING_ENABLED", "true")
+	if _, err := Load(env); err == nil {
+		t.Fatal("SENDING_ENABLED=true with no SES_REGION, endpoint or fake was accepted")
+	}
+	for _, key := range []string{"SES_REGION", "SES_ENDPOINT", "MAILCHEAP_FAKE_SES_LOG"} {
+		env := with("SENDING_ENABLED", "true")
+		env[key] = "something"
+		if _, err := Load(env); err != nil {
+			t.Errorf("%s set is not enough: %v", key, err)
+		}
+	}
+	// Sending off: the same env is fine.
+	if _, err := Load(strong); err != nil {
+		t.Fatalf("sending off was refused: %v", err)
+	}
+}
+
 // MAILCHEAP_FAKE_SES_DOMAINS is the stand-in identity list the end-to-end script drives the
 // unverified branch with; commas and blanks are the operator's, not ours.
 func TestFakeSESDomains(t *testing.T) {
