@@ -265,8 +265,12 @@ func runNewsletterCreate(cmd *cobra.Command, _ []string) error {
 	archive, _ := flags.GetBool("archive-enabled")
 	confirmation, _ := flags.GetBool("require-confirmation")
 
-	if fromEmail = strings.ToLower(strings.TrimSpace(fromEmail)); fromEmail == "" {
-		return fmt.Errorf("--from-email is required")
+	// The address SES sees on the wire goes through the same normalization as every other address
+	// the operator types: a From: header with a trailing dot or a doubled @ is a send failure waiting
+	// for the first issue (the phase 1-3 audit's Minor pool).
+	fromEmail = validate.NormalizeEmail(fromEmail)
+	if fromEmail == "" {
+		return fmt.Errorf("--from-email is required, and must be an address SES can send from")
 	}
 	now := time.Now().UTC()
 	newsletter := model.Newsletter{

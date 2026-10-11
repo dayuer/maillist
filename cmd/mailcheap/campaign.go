@@ -161,7 +161,7 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 		}
 		// The pre-send checks are the ones the engine enforces; running them here turns a rejected
 		// send into a readable error instead of a queued campaign that never starts.
-		report, err := runChecks(ctx, a, campaign, newsletter)
+		report, _, err := runChecks(ctx, a, campaign, newsletter)
 		if err != nil {
 			return err
 		}
