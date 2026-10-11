@@ -1,0 +1,27 @@
+version: "2"
+linters:
+  enable:
+    - depguard
+    - errorlint
+    - gosec
+    - misspell
+  settings:
+    depguard:
+      rules:
+        core-is-pure:
+          files:
+            - "**/internal/core/**"
+          deny:
+            - pkg: "mailcheap/internal/store"
+              desc: "core is pure logic; adapters call store"
+            - pkg: "mailcheap/internal/mailer"
+              desc: "core is pure logic; adapters call mailer"
+            - pkg: "database/sql"
+              desc: "core does no I/O"
+            - pkg: "net/http"
+              desc: "core does no I/O"
+            - pkg: "os"
+              desc: "core does no I/O; pass values in"
+formatters:
+  enable:
+    - gofmt
