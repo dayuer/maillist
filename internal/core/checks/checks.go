@@ -1,0 +1,70 @@
+// Package checks holds the pre-send checklist of a campaign.
+package checks
+
+import (
+	"strings"
+	"unicode/utf8"
+
+	"mailcheap/internal/core/model"
+	"mailcheap/internal/core/render"
+)
+
+// Check is one row of the pre-send checklist.
+type Check struct {
+	// Upstream ids in order: subject, subject-length, preview, content, unsubscribe, size, address,
+	// domain, test, sending. subject-length, preview and test are warnings; the other 7 block.
+	ID       string
+	OK       bool
+	Blocking bool
+	Message  string
+}
+
+// Input is everything the checklist looks at. DomainVerified is whether SES has verified the
+// sending domain; Audience is how many contacts the campaign would reach.
+type Input struct {
+	Campaign       model.Campaign
+	Newsletter     model.Newsletter
+	Rendered       render.Rendered
+	SendingOn      bool
+	DomainVerified bool
+	Audience       int
+	Limits         model.Limits
+}
+
+// Run returns the checklist in a fixed order, whether or not each row passes.
+func Run(in Input) []Check {
+	subject := strings.TrimSpace(in.Campaign.Subject)
+	// Upstream measures subject.length in UTF-16 units; runes are the closest Go equivalent.
+	subjectLength := utf8.RuneCountInString(subject)
+	return []Check{
+		{ID: "subject", OK: subject != "", Blocking: true, Message: "Add a subject"},
+		{ID: "subject-length", OK: subjectLength <= 70},
+		{ID: "preview", OK: strings.TrimSpace(in.Campaign.PreviewText) != ""},
+		{ID: "content", OK: render.HasContent(in.Campaign.Body), Blocking: true, Message: "Add content"},
+		{
+			ID: "unsubscribe", OK: strings.Contains(in.Rendered.HTML, render.UnsubscribePlaceholder),
+			Blocking: true, Message: "Add " + render.UnsubscribePlaceholder + " to the HTML",
+		},
+		{
+			ID: "size", OK: in.Rendered.Bytes <= in.Limits.MaxEmailBytes,
+			Blocking: true, Message: "Gmail clips emails over 100 KB",
+		},
+		{
+			ID: "address", OK: strings.TrimSpace(in.Newsletter.PostalAddress) != "",
+			Blocking: true, Message: "Add a postal address to the newsletter",
+		},
+		{ID: "domain", OK: in.DomainVerified, Blocking: true, Message: "Verify the sending domain in SES"},
+		{ID: "test", OK: in.Campaign.TestSentAt != nil},
+		{ID: "sending", OK: in.SendingOn, Blocking: true, Message: "Sending is off"},
+	}
+}
+
+// Blocked returns the first failing blocking check.
+func Blocked(cs []Check) (Check, bool) {
+	for _, c := range cs {
+		if !c.OK && c.Blocking {
+			return c, true
+		}
+	}
+	return Check{}, false
+}
