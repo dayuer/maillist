@@ -71,7 +71,7 @@ func TestLeaseExpires(t *testing.T) {
 	}
 }
 
-// The fifth failure is final: 1s, 5s, 30s, 2min, then dead.
+// The sixth failure is final: 1s, 5s, 30s, 2min, 10min, then dead.
 func TestRetryBackoffEndsDead(t *testing.T) {
 	queue := newQueue(t)
 	ctx := context.Background()
@@ -79,7 +79,9 @@ func TestRetryBackoffEndsDead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for attempt, delay := range []time.Duration{time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute} {
+	for attempt, delay := range []time.Duration{
+		time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute,
+	} {
 		at := testNow.Add(time.Duration(attempt) * time.Hour)
 		job, ok, err := queue.Lease(ctx, at)
 		if err != nil || !ok {
@@ -102,10 +104,10 @@ func TestRetryBackoffEndsDead(t *testing.T) {
 			t.Fatalf("attempt %d: lastError = %q", attempt, got.LastError)
 		}
 	}
-	at := testNow.Add(4 * time.Hour)
+	at := testNow.Add(5 * time.Hour)
 	job, ok, err := queue.Lease(ctx, at)
 	if err != nil || !ok {
-		t.Fatalf("fifth lease = %v %v", ok, err)
+		t.Fatalf("last lease = %v %v", ok, err)
 	}
 	if err := queue.Fail(ctx, job.ID, errors.New("boom"), at); err != nil {
 		t.Fatal(err)
@@ -114,8 +116,8 @@ func TestRetryBackoffEndsDead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != Dead || got.Attempts != 5 {
-		t.Fatalf("state = %s, attempts = %d, want dead after 5", got.State, got.Attempts)
+	if got.State != Dead || got.Attempts != len(backoff)+1 {
+		t.Fatalf("state = %s, attempts = %d, want dead after %d", got.State, got.Attempts, len(backoff)+1)
 	}
 	if _, ok, err := queue.Lease(ctx, at.Add(24*time.Hour)); err != nil || ok {
 		t.Fatalf("a dead job was leased: %v %v", ok, err)

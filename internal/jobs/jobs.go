@@ -42,8 +42,12 @@ const (
 )
 
 // backoff is the wait before each retry; running out of entries means the job is dead.
+//
+// The plan says 1s / 5s / 30s / 2m / 10m (ST-I5 from the phase 1-3 audit). The last step matters: a
+// send that failed because SES was briefly unavailable should be tried again after a wait, not
+// abandoned a minute or two later.
 var backoff = []time.Duration{
-	time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute,
+	time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute,
 }
 
 // Job is one row of the queue.
