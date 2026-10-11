@@ -283,10 +283,17 @@ func TestAClickAlsoCountsAsAnOpen(t *testing.T) {
 }
 
 // tests/ses-events.test.mjs "clicks on unsubscribe links are not engagement".
+//
+// The dot-segment link is the phase 1-3 audit's FI-A3: a URL parser removes the dot segments, so it
+// is the unsubscribe page upstream and must not count as engagement. It is also the shape the render
+// side has to leave direct (validate.UnsubscribePath) — the two have to agree, or the link is
+// rewritten through the click redirect and then counted as a click.
 func TestClicksOnUnsubscribeLinksAreNotEngagement(t *testing.T) {
 	for _, link := range []string{
 		"https://mail.example.com/unsubscribe?token=abc.def",
 		"https://mail.example.com/api/unsubscribe?token=abc.def",
+		"https://mail.example.com/anything/../unsubscribe?token=abc.def",
+		"https://mail.example.com/unsubscribe/?token=abc.def",
 	} {
 		plan := planOf(t, sesEvent(t, "Click", `{"link": `+quote(link)+`}`))
 		if len(plan.Firsts) != 0 || plan.Engagement != nil {
