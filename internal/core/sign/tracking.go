@@ -19,7 +19,7 @@ var (
 const maxClickTargetChars = 4000
 
 func (s *Signer) trackingSig(value string) string {
-	return base64.RawURLEncoding.EncodeToString(s.mac(InfoTracking, value))[:signatureLength]
+	return base64.RawURLEncoding.EncodeToString(s.mac(KindTracking, value))[:signatureLength]
 }
 
 func (s *Signer) trackingSigned(value, signature string) bool {

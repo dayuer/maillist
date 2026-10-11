@@ -24,7 +24,7 @@ var keepLimit = Limit{Name: "keep-ip", Count: 20, Window: 10 * time.Minute}
 // page still changes nothing.
 func (s *Server) handleKeepPage(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	reference, ok := s.Signer.VerifyContactToken(sign.InfoKeep, token, KeepMaxAge, s.clock())
+	reference, ok := s.Signer.VerifyContactToken(sign.KindKeep, token, KeepMaxAge, s.clock())
 	if !ok {
 		notice(w, http.StatusNotFound, "This link doesn't work",
 			"It may be older than 90 days. Sign up again to keep getting the newsletter.")
@@ -51,7 +51,7 @@ func (s *Server) handleKeep(w http.ResponseWriter, r *http.Request) {
 		rateLimited(w, keepLimit)
 		return
 	}
-	reference, ok := s.Signer.VerifyContactToken(sign.InfoKeep, token, KeepMaxAge, s.clock())
+	reference, ok := s.Signer.VerifyContactToken(sign.KindKeep, token, KeepMaxAge, s.clock())
 	if !ok {
 		notice(w, http.StatusNotFound, "This link doesn't work",
 			"It may be older than 90 days. Sign up again to keep getting the newsletter.")

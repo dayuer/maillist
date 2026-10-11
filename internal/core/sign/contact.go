@@ -35,19 +35,19 @@ func normalizeRef(r Ref) (Ref, error) {
 	return r, nil
 }
 
-func (s *Signer) seal(info string, p payload) string {
+func (s *Signer) seal(kind Kind, p payload) string {
 	b, _ := json.Marshal(p)
 	body := base64.RawURLEncoding.EncodeToString(b)
-	return body + "." + base64.RawURLEncoding.EncodeToString(s.mac(info, body))
+	return body + "." + base64.RawURLEncoding.EncodeToString(s.mac(kind, body))
 }
 
 // open checks the shape and signature of a token and decodes its payload.
-func (s *Signer) open(info, token string) (payload, Ref, bool) {
+func (s *Signer) open(kind Kind, token string) (payload, Ref, bool) {
 	if !contactTokenPattern.MatchString(token) {
 		return payload{}, Ref{}, false
 	}
 	body, sig, _ := strings.Cut(token, ".")
-	want := base64.RawURLEncoding.EncodeToString(s.mac(info, body))
+	want := base64.RawURLEncoding.EncodeToString(s.mac(kind, body))
 	if subtle.ConstantTimeCompare([]byte(want), []byte(sig)) != 1 {
 		return payload{}, Ref{}, false
 	}
@@ -71,28 +71,28 @@ func (s *Signer) UnsubscribeToken(r Ref) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return s.seal(InfoUnsubscribe, payload{C: &r.ContactID, N: &r.NewsletterID}), nil
+	return s.seal(KindUnsubscribe, payload{C: &r.ContactID, N: &r.NewsletterID}), nil
 }
 
 // VerifyUnsubscribe returns the reference of a valid unsubscribe token.
 func (s *Signer) VerifyUnsubscribe(token string) (Ref, bool) {
-	_, r, ok := s.open(InfoUnsubscribe, token)
+	_, r, ok := s.open(KindUnsubscribe, token)
 	return r, ok
 }
 
-// ContactToken is an expiring link for one contact (confirm, keep), signed with info's key.
-func (s *Signer) ContactToken(info string, r Ref, now time.Time) (string, error) {
+// ContactToken is an expiring link for one contact (confirm, keep), signed with kind's key.
+func (s *Signer) ContactToken(kind Kind, r Ref, now time.Time) (string, error) {
 	r, err := normalizeRef(r)
 	if err != nil {
 		return "", err
 	}
 	t := float64(now.Unix())
-	return s.seal(info, payload{C: &r.ContactID, N: &r.NewsletterID, T: &t}), nil
+	return s.seal(kind, payload{C: &r.ContactID, N: &r.NewsletterID, T: &t}), nil
 }
 
 // VerifyContactToken returns the reference of a valid token issued less than maxAge before now.
-func (s *Signer) VerifyContactToken(info, token string, maxAge time.Duration, now time.Time) (Ref, bool) {
-	p, r, ok := s.open(info, token)
+func (s *Signer) VerifyContactToken(kind Kind, token string, maxAge time.Duration, now time.Time) (Ref, bool) {
+	p, r, ok := s.open(kind, token)
 	if !ok || p.T == nil || *p.T != math.Trunc(*p.T) {
 		return Ref{}, false
 	}

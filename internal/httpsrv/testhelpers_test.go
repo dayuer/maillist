@@ -203,7 +203,7 @@ func (s *testServer) postFormFrom(t *testing.T, path string, form url.Values, ip
 // confirmToken signs a confirmation link for a contact.
 func (s *testServer) confirmToken(t *testing.T, contact model.Contact) string {
 	t.Helper()
-	token, err := s.signer.ContactToken(sign.InfoConfirm,
+	token, err := s.signer.ContactToken(sign.KindConfirm,
 		sign.Ref{ContactID: contact.ID, NewsletterID: contact.NewsletterID}, s.now)
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +214,7 @@ func (s *testServer) confirmToken(t *testing.T, contact model.Contact) string {
 // keepToken signs a last-chance "keep sending it" link for a contact.
 func (s *testServer) keepToken(t *testing.T, contact model.Contact) string {
 	t.Helper()
-	token, err := s.signer.ContactToken(sign.InfoKeep,
+	token, err := s.signer.ContactToken(sign.KindKeep,
 		sign.Ref{ContactID: contact.ID, NewsletterID: contact.NewsletterID}, s.now)
 	if err != nil {
 		t.Fatal(err)

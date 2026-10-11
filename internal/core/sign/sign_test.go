@@ -60,6 +60,20 @@ func TestNewRejectsEmptySecret(t *testing.T) {
 	}
 }
 
+// 短密钥同样拒绝：一个 3 字符的 secret 签出来的链接，谁都能伪造。
+//
+// S-M3 from the phase 1-3 audit. config enforces SESSION_SECRET's 32-character floor at startup;
+// this is the same rule where the key is actually derived, so a caller that builds a Signer directly
+// cannot end up with a forgeable one.
+func TestNewRejectsAShortSecret(t *testing.T) {
+	if _, err := New(strings.Repeat("s", MinSecretLength-1)); !errors.Is(err, ErrNoSecret) {
+		t.Fatalf("err = %v, want ErrNoSecret", err)
+	}
+	if _, err := New(strings.Repeat("s", MinSecretLength)); err != nil {
+		t.Fatalf("a secret of exactly MinSecretLength was refused: %v", err)
+	}
+}
+
 func TestOpenAndClickCannotBeForged(t *testing.T) {
 	s := mustSigner(t, secret)
 	open := tokenOf(s.OpenURL(base, messageID))

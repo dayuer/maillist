@@ -11,7 +11,7 @@ import (
 // and the link is a form the reader submits — a scanner that opens the page confirms nothing.
 func (s *Server) handleConfirmPage(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	reference, ok := s.Signer.VerifyContactToken(sign.InfoConfirm, token, sign.ConfirmMaxAge, s.clock())
+	reference, ok := s.Signer.VerifyContactToken(sign.KindConfirm, token, sign.ConfirmMaxAge, s.clock())
 	if !ok {
 		notice(w, http.StatusNotFound, "This link doesn't work",
 			"It may be older than 30 days. Sign up again and use the newest confirmation email.")
@@ -34,7 +34,7 @@ func (s *Server) handleConfirmPage(w http.ResponseWriter, r *http.Request) {
 // sends the welcome email the newsletter would otherwise have sent at signup.
 func (s *Server) handleConfirm(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	reference, ok := s.Signer.VerifyContactToken(sign.InfoConfirm, token, sign.ConfirmMaxAge, s.clock())
+	reference, ok := s.Signer.VerifyContactToken(sign.KindConfirm, token, sign.ConfirmMaxAge, s.clock())
 	if !ok {
 		notice(w, http.StatusNotFound, "This link doesn't work",
 			"It may be older than 30 days. Sign up again and use the newest confirmation email.")
