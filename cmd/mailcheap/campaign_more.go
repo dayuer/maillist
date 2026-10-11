@@ -13,10 +13,13 @@ import (
 	"mailcheap/internal/app"
 	"mailcheap/internal/core/checks"
 	"mailcheap/internal/core/model"
+	"mailcheap/internal/core/providers"
 	"mailcheap/internal/core/render"
 	"mailcheap/internal/core/rules"
 	"mailcheap/internal/core/schedule"
+	"mailcheap/internal/core/stats"
 	"mailcheap/internal/jobs"
+	"mailcheap/internal/store"
 )
 
 // campaignRefFlags are the two ways an operator names a campaign: its id, or the subject of the
@@ -497,6 +500,119 @@ func parseWhen(value string, now time.Time) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("--at: %q is not an RFC3339 time or 'in <duration>'", value)
 	}
 	return at.UTC(), nil
+}
+
+func newCampaignReportCmd() *cobra.Command {
+	report := &cobra.Command{
+		Use:   "report [campaign-id]",
+		Short: "Show how an issue did",
+		Long: "The issue's own counters, the same figures split by mailbox provider, and — for a send " +
+			"that was capped to the most engaged — how many contacts are still waiting. Test copies " +
+			"are not in any of these numbers: they are sent under a sentinel contact and a kind of " +
+			"their own (design §6.2).",
+		Args: cobra.MaximumNArgs(1),
+		RunE: runCampaignReport,
+	}
+	campaignRefFlags(report)
+	return report
+}
+
+func runCampaignReport(cmd *cobra.Command, args []string) error {
+	subjectFlag, _ := cmd.Flags().GetString("subject")
+	return withApp(cmd, func(ctx context.Context, a *app.App) error {
+		campaign, err := campaignByRef(ctx, a, args, subjectFlag)
+		if err != nil {
+			return err
+		}
+		counters, lastChance, err := a.Store.CampaignCountersOf(ctx, campaign.ID)
+		if err != nil {
+			return err
+		}
+		providers, err := a.Store.ProviderBreakdown(ctx, campaign.ID)
+		if err != nil {
+			return err
+		}
+		remaining, err := remainingContacts(ctx, a, campaign, counters, lastChance)
+		if err != nil {
+			return err
+		}
+		if jsonOutput(cmd) {
+			return printJSON(cmd, map[string]any{
+				"campaign": campaign, "stats": counters, "lastChance": lastChance,
+				"providers": providers, "remaining": remaining,
+			})
+		}
+		printCampaignReport(cmd, campaign, counters, lastChance, providers, remaining)
+		return nil
+	})
+}
+
+// remainingContacts is upstream countRemaining: only a send capped to the most engaged has a next
+// step to offer, and the count is how many of the active contacts have not had this issue.
+func remainingContacts(ctx context.Context, a *app.App, campaign model.Campaign,
+	counters store.CampaignCounters, lastChance store.LastChanceCounters) (int, error) {
+	if campaign.Status != model.CampaignSent || campaign.AudienceLimit == 0 {
+		return 0, nil
+	}
+	active, err := a.Store.CountActiveContacts(ctx, campaign.NewsletterID)
+	if err != nil {
+		return 0, err
+	}
+	reached := counters.Recipients + lastChance.Recipients
+	if active <= reached {
+		return 0, nil
+	}
+	return active - reached, nil
+}
+
+func printCampaignReport(cmd *cobra.Command, campaign model.Campaign, counters store.CampaignCounters,
+	lastChance store.LastChanceCounters, providerRows []store.ProviderRow, remaining int) {
+	out := cmd.OutOrStdout()
+	_, _ = fmt.Fprintf(out, "%s  (%s)\n", campaign.Subject, campaign.Status)
+	if campaign.SentAt != nil {
+		_, _ = fmt.Fprintf(out, "sent %s\n", campaign.SentAt.UTC().Format(time.RFC3339))
+	}
+	if campaign.AudienceLimit > 0 {
+		_, _ = fmt.Fprintf(out, "capped at %d contacts\n", campaign.AudienceLimit)
+	}
+	_, _ = fmt.Fprintln(out)
+
+	_, _ = fmt.Fprintf(out, "%-12s %9s %9s\n", "", "issue", "last-chance")
+	pair := func(label string, issue, chance int) {
+		_, _ = fmt.Fprintf(out, "%-12s %9s %9s\n", label, stats.FormatNumber(issue), stats.FormatNumber(chance))
+	}
+	pair("recipients", counters.Recipients, lastChance.Recipients)
+	pair("sent", counters.Sent, lastChance.Sent)
+	pair("delivered", counters.Delivered, lastChance.Delivered)
+	pair("bounced", counters.Bounced, lastChance.Bounced)
+	pair("complained", counters.Complained, lastChance.Complained)
+	pair("failed", counters.Failed, lastChance.Failed)
+
+	_, _ = fmt.Fprintf(out, "\nopened       %s  (%s of sent)\n",
+		stats.FormatNumber(counters.Opened), stats.FormatRate(counters.Opened, counters.Sent, 1))
+	_, _ = fmt.Fprintf(out, "clicked      %s  (%s of sent)\n",
+		stats.FormatNumber(counters.Clicked), stats.FormatRate(counters.Clicked, counters.Sent, 1))
+	_, _ = fmt.Fprintf(out, "unsubscribed %s  (%s of sent)\n",
+		stats.FormatNumber(counters.Unsubscribed), stats.FormatRate(counters.Unsubscribed, counters.Sent, 1))
+	if lastChance.Dormant > 0 {
+		_, _ = fmt.Fprintf(out, "dormant      %s  (dropped by the list cleanup)\n", stats.FormatNumber(lastChance.Dormant))
+	}
+
+	if len(providerRows) > 0 {
+		_, _ = fmt.Fprintf(out, "\n%-10s %8s %9s %8s %8s %8s %8s\n",
+			"provider", "sent", "delivered", "opened", "clicked", "bounced", "complained")
+		for _, row := range providerRows {
+			_, _ = fmt.Fprintf(out, "%-10s %8s %9s %8s %8s %8s %8s\n",
+				providers.Name(row.Provider),
+				stats.FormatNumber(row.Sent), stats.FormatNumber(row.Delivered),
+				stats.FormatNumber(row.Opened), stats.FormatNumber(row.Clicked),
+				stats.FormatNumber(row.Bounced), stats.FormatNumber(row.Complained))
+		}
+	}
+	if remaining > 0 {
+		_, _ = fmt.Fprintf(out, "\n%s more of the most engaged have not had it: campaign send --limit %d\n",
+			stats.FormatNumber(remaining), remaining)
+	}
 }
 
 // queueOrHold is the manual-approval gate on a direct send: with SEND_APPROVAL=manual the campaign
