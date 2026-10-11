@@ -46,6 +46,58 @@ type Config struct {
 	Limits         model.Limits
 }
 
+// LoadFile reads a KEY=VALUE file, which is how `--config` works: the file is the deployment's
+// settings and the environment still wins, so a one-off `MAX_SENDS_PER_DAY=10 mailcheap campaign
+// send` overrides it without editing it. Within the file, the last mention of a key wins.
+//
+// The format is the one every container stack already uses: one KEY=VALUE per line, blank lines and
+// #-comments ignored, an optional "export " prefix, and single or double quotes around a value that
+// has spaces. A line that is neither gets the file's name and the line number in the error, because
+// a settings file that silently ignores a line is how a deployment ends up missing its secret.
+func LoadFile(path string, base map[string]string) (map[string]string, error) {
+	if base == nil {
+		base = environ()
+	}
+	content, err := os.ReadFile(path) //nolint:gosec // G304: the operator names the file on the command line
+	if err != nil {
+		return nil, err
+	}
+	fromFile := make(map[string]string, 16)
+	for i, raw := range strings.Split(string(content), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("%s:%d: %q is not KEY=VALUE", path, i+1, raw)
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return nil, fmt.Errorf("%s:%d: the key is empty", path, i+1)
+		}
+		fromFile[key] = unquote(strings.TrimSpace(value))
+	}
+	// The environment is applied last, so it wins: a one-line override on the command line is worth
+	// more than editing the deployment's file, and that is the precedence an operator expects.
+	for key, value := range base {
+		fromFile[key] = value
+	}
+	return fromFile, nil
+}
+
+// unquote removes one layer of matching quotes from a value.
+func unquote(value string) string {
+	if len(value) >= 2 {
+		first, last := value[0], value[len(value)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+			return value[1 : len(value)-1]
+		}
+	}
+	return value
+}
+
 // Load reads env (os.Environ when nil) and returns every problem at once.
 func Load(env map[string]string) (Config, error) {
 	if env == nil {

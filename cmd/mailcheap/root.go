@@ -29,6 +29,8 @@ func newRootCmd() *cobra.Command {
 	root.PersistentFlags().Bool("yes", false, "skip confirmation prompts")
 	root.PersistentFlags().String("db", "", "path to the SQLite database (overrides MAILCHEAP_DB)")
 	root.PersistentFlags().String("data-dir", "", "directory holding the database (overrides MAILCHEAP_DATA_DIR)")
+	root.PersistentFlags().String("config", "", "KEY=VALUE file of settings (the environment still wins)")
+	root.PersistentFlags().BoolP("verbose", "v", false, "log what the command is doing")
 	root.AddCommand(
 		versionCmd(),
 		newInitCmd(),
@@ -62,7 +64,12 @@ func withApp(cmd *cobra.Command, run func(ctx context.Context, a *app.App) error
 	if err != nil {
 		return err
 	}
-	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), &slog.HandlerOptions{Level: slog.LevelWarn}))
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	level := slog.LevelWarn
+	if verbose {
+		level = slog.LevelInfo
+	}
+	log := slog.New(slog.NewTextHandler(cmd.ErrOrStderr(), &slog.HandlerOptions{Level: level}))
 	a, err := app.New(cmd.Context(), cfg, log)
 	if err != nil {
 		return err
@@ -71,9 +78,18 @@ func withApp(cmd *cobra.Command, run func(ctx context.Context, a *app.App) error
 	return run(cmd.Context(), a)
 }
 
-// configFromFlags is config.Load with the --db and --data-dir overrides applied.
+// configFromFlags is config.Load with --config read first and the --db and --data-dir overrides
+// applied on top. The environment still wins over the file, so a one-off
+// `MAX_SENDS_PER_DAY=10 mailcheap campaign send` works without editing it.
 func configFromFlags(cmd *cobra.Command) (config.Config, error) {
-	cfg, err := config.Load(nil)
+	env := (map[string]string)(nil)
+	if path, _ := cmd.Flags().GetString("config"); path != "" {
+		var err error
+		if env, err = config.LoadFile(path, nil); err != nil {
+			return config.Config{}, err
+		}
+	}
+	cfg, err := config.Load(env)
 	if err != nil {
 		return config.Config{}, err
 	}

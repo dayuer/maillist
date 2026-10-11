@@ -139,6 +139,7 @@ func newCampaignSendCmd() *cobra.Command {
 	}
 	send.Flags().Int("limit", 0, "send only the next N contacts (a stepped send)")
 	send.Flags().String("subject", "", "pick the draft by subject instead of by id")
+	send.Flags().Bool("dry-run", false, "report what would go out, and write nothing")
 	return send
 }
 
@@ -146,6 +147,7 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	subjectFlag, _ := cmd.Flags().GetString("subject")
 	yes, _ := cmd.Flags().GetBool("yes")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 	return withApp(cmd, func(ctx context.Context, a *app.App) error {
 		if !a.Config.SendingOn {
@@ -158,6 +160,11 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 		newsletter, err := a.Store.Newsletter(ctx, campaign.NewsletterID)
 		if err != nil {
 			return err
+		}
+		if dryRun {
+			// The same checklist and the same audience, and nothing written: the point is to answer
+			// "what would this do" before it does it.
+			return reportDryRun(ctx, a, cmd, campaign, newsletter, limit)
 		}
 		// The pre-send checks are the ones the engine enforces; running them here turns a rejected
 		// send into a readable error instead of a queued campaign that never starts.
