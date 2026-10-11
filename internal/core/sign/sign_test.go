@@ -177,6 +177,27 @@ func TestConfirmExpiresAfter30Days(t *testing.T) {
 	}
 }
 
+// tests/confirmation.test.mjs "a confirmation link names one contact and stops working after 30
+// days", second half: a signature issued for one contact can't be reused for another.
+func TestConfirmTokensCannotBeReusedForAnotherContact(t *testing.T) {
+	s := mustSigner(t, secret)
+	now := time.UnixMilli(1791000000000)
+	tok, _ := s.ContactToken(InfoConfirm, ref, now)
+	payload, signature, _ := strings.Cut(tok, ".")
+
+	other := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"c":"` + otherID + `","n":"` + nlID + `","t":1791000000}`))
+	if _, ok := s.VerifyContactToken(InfoConfirm, other+"."+signature, ConfirmMaxAge, now); ok {
+		t.Error("another contact must not reuse the signature")
+	}
+	if _, ok := s.VerifyContactToken(InfoConfirm, payload+"."+signature[1:]+"x", ConfirmMaxAge, now); ok {
+		t.Error("a shifted signature must not verify")
+	}
+	if _, ok := s.VerifyContactToken(InfoConfirm, "not-a-token", ConfirmMaxAge, now); ok {
+		t.Error("garbage must not verify")
+	}
+}
+
 func TestLinkKindsCannotStandInForEachOther(t *testing.T) {
 	s := mustSigner(t, secret)
 	now := time.Now()
