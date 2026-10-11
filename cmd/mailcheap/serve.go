@@ -54,13 +54,19 @@ func runServe(cmd *cobra.Command, _ []string) error {
 		runner := scheduler.New(a.Jobs, a.Mailer.RunJob, 250*time.Millisecond, a.Log)
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "listening on "+addr)
 
+		// The three components share one context, and a failure in any of them cancels it: a server
+		// that has lost its sender, or its listener, is not a healthy server. Waiting for all three
+		// to stop on their own would leave exactly that running — and healthz answering 200.
+		runCtx, stopEverything := context.WithCancel(ctx)
+		defer stopEverything()
+
 		// Sending converges on this process while it runs: the CLI asks the heartbeat before it
 		// drains anything itself (design §5.2). It is cleared on the way out so the next CLI command
 		// does not wait for the window to lapse.
 		beatDone := make(chan struct{})
 		go func() {
 			defer close(beatDone)
-			stampServeHeartbeat(ctx, a)
+			stampServeHeartbeat(runCtx, a)
 		}()
 		defer func() {
 			<-beatDone
@@ -74,16 +80,19 @@ func runServe(cmd *cobra.Command, _ []string) error {
 		errs := make(chan error, 3)
 		var wg sync.WaitGroup
 		for name, run := range map[string]func() error{
-			"sender":    func() error { return a.Mailer.Run(ctx) },
-			"scheduler": func() error { return runner.Run(ctx) },
-			"http":      func() error { return a.HTTP.Run(ctx, addr, shutdownTimeout) },
+			"sender":    func() error { return a.Mailer.Run(runCtx) },
+			"scheduler": func() error { return runner.Run(runCtx) },
+			"http":      func() error { return a.HTTP.Run(runCtx, addr, shutdownTimeout) },
 		} {
 			wg.Add(1)
 			go func(name string, run func() error) {
 				defer wg.Done()
-				if err := run(); err != nil && !errors.Is(err, context.Canceled) {
-					errs <- err
+				err := run()
+				if err == nil || errors.Is(err, context.Canceled) {
+					return
 				}
+				errs <- fmt.Errorf("%s: %w", name, err)
+				stopEverything()
 			}(name, run)
 		}
 		wg.Wait()
