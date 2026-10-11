@@ -32,7 +32,11 @@ type Config struct {
 	ArchiveHosts  string
 	AlertFrom     string
 	AdminEmail    string
-	Limits        model.Limits
+	// FakeSESLog, when set, makes the CLI and server record sends to that file instead of calling
+	// SES. It is how the end-to-end test observes a send; phase 5's compose stack uses a real fake
+	// endpoint instead.
+	FakeSESLog string
+	Limits     model.Limits
 }
 
 // Load reads env (os.Environ when nil) and returns every problem at once.
@@ -67,6 +71,7 @@ func Load(env map[string]string) (Config, error) {
 		ArchiveHosts:  env["ARCHIVE_HOSTS"],
 		AlertFrom:     env["ALERT_FROM"],
 		AdminEmail:    env["ADMIN_EMAIL"],
+		FakeSESLog:    env["MAILCHEAP_FAKE_SES_LOG"],
 		Limits: model.Limits{
 			BounceRate:               0.02,
 			ComplaintRate:            0.0008,
