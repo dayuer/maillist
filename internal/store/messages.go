@@ -323,6 +323,57 @@ func (db *DB) CountUnfinishedCampaignMessages(ctx context.Context, campaignID st
 	return unfinished, err
 }
 
+// InsertSignupMessage writes one welcome or confirmation message if the newsletter is still under
+// its cap, and reports whether it did.
+//
+// The count and the insert are one statement, so two signups arriving together cannot both read a
+// count below the cap and both write: a check-then-insert lets a burst through exactly when the cap
+// matters most (the phase 1-3 audit's ST-I6).
+func (db *DB) InsertSignupMessage(ctx context.Context, message model.Message, newsletterID string,
+	kinds []model.MessageKind, since time.Time, cap int) (bool, error) {
+	inserted := false
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		inserted = false
+		args := []any{
+			message.ID, string(message.Kind), message.CampaignID, message.NewsletterID, message.ContactID,
+			message.Email, message.Provider, string(message.Status), message.SESMessageID, message.Error,
+			formatTimePtr(message.ClaimedAt), formatTimePtr(message.SentAt), formatTimePtr(message.DeliveredAt),
+			formatTimePtr(message.OpenedAt), formatTimePtr(message.ClickedAt), formatTimePtr(message.BouncedAt),
+			formatTimePtr(message.ComplainedAt), formatTime(message.CreatedAt),
+			newsletterID, formatTime(since),
+		}
+		for _, kind := range kinds {
+			args = append(args, string(kind))
+		}
+		args = append(args, cap)
+
+		// The SELECT provides the row only when the count allows it, and the count is part of the
+		// same statement: it sees every row committed before this transaction, and no other.
+		result, err := tx.ExecContext(ctx, insertSignupQuery(len(kinds)), args...)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		inserted = affected > 0
+		return nil
+	})
+	return inserted, err
+}
+
+// insertSignupQuery is the statement InsertSignupMessage runs, with one placeholder per kind.
+//
+//nolint:gosec // G202: the only interpolated text is a run of "?" placeholders, one per kind.
+func insertSignupQuery(kinds int) string {
+	return `INSERT OR IGNORE INTO messages (` + messageColumns + `)
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+        WHERE (SELECT count(*) FROM messages
+               WHERE newsletter_id = ? AND created_at >= ? AND kind IN (` +
+		strings.TrimSuffix(strings.Repeat("?,", kinds), ",") + `)) < ?`
+}
+
 // ReachedContacts is who this campaign already has a message for, so a stepped send skips them.
 func (db *DB) ReachedContacts(ctx context.Context, campaignID string) (map[string]model.MessageKind, error) {
 	rows, err := db.sql.QueryContext(ctx,

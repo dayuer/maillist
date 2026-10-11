@@ -963,24 +963,23 @@ func (e *Engine) queueSignup(ctx context.Context, newsletter model.Newsletter, c
 	}
 
 	// Welcome and confirmation emails share one cap per newsletter, so a signup flood cannot burn
-	// the sending domain's reputation, and one newsletter's flood doesn't hold up another's.
-	recent, err := e.store.CountMessagesSince(ctx, newsletter.ID,
-		[]model.MessageKind{model.KindWelcome, model.KindConfirmation}, window)
-	if err != nil {
-		return SignupResult{}, err
-	}
-	if recent >= e.cfg.Limits.WelcomeEmailsPer10Minute {
-		e.log.Warn("signup emails capped", "newsletter", newsletter.Slug,
-			"limit", e.cfg.Limits.WelcomeEmailsPer10Minute)
-		return SignupResult{Skipped: "rate limited"}, nil
-	}
-
+	// the sending domain's reputation, and one newsletter's flood doesn't hold up another's. The cap
+	// is applied by the insert itself: two signups arriving together must not both read a count below
+	// it and both write (the phase 1-3 audit's ST-I6).
 	message := model.Message{
 		ID: ids.New(), Kind: kind, NewsletterID: newsletter.ID, ContactID: contact.ID,
 		Email: contact.Email, Status: model.MessagePending, CreatedAt: time.Now().UTC(),
 	}
-	if _, err := e.store.InsertMessages(ctx, []model.Message{message}); err != nil {
+	inserted, err := e.store.InsertSignupMessage(ctx, message, newsletter.ID,
+		[]model.MessageKind{model.KindWelcome, model.KindConfirmation}, window,
+		e.cfg.Limits.WelcomeEmailsPer10Minute)
+	if err != nil {
 		return SignupResult{}, err
+	}
+	if !inserted {
+		e.log.Warn("signup emails capped", "newsletter", newsletter.Slug,
+			"limit", e.cfg.Limits.WelcomeEmailsPer10Minute)
+		return SignupResult{Skipped: "rate limited"}, nil
 	}
 	if _, err := e.SendBatch(ctx, []string{message.ID}); err != nil {
 		return SignupResult{}, err
