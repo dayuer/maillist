@@ -167,6 +167,8 @@ func runContactUpdate(cmd *cobra.Command, args []string) error {
 		if err := a.Store.UpdateContact(ctx, contact); err != nil {
 			return err
 		}
+		note(cmd, a, "contact.update", contact.Email,
+			map[string]any{"id": contact.ID, "changed": changed})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, contact)
 		}

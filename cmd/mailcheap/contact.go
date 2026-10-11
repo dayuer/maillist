@@ -76,6 +76,9 @@ func runContactAdd(cmd *cobra.Command, args []string) error {
 		if err := a.Store.CreateContact(ctx, contact); err != nil {
 			return err
 		}
+		note(cmd, a, "contact.add", contact.Email, map[string]any{
+			"id": contact.ID, "newsletter": newsletter.Slug, "email": contact.Email, "source": source,
+		})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, contact)
 		}

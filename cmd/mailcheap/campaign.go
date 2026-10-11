@@ -87,6 +87,8 @@ func runCampaignCreate(cmd *cobra.Command, _ []string) error {
 		if err := a.Store.CreateCampaign(ctx, campaign); err != nil {
 			return err
 		}
+		note(cmd, a, "campaign.create", campaign.Subject,
+			map[string]any{"id": campaign.ID, "subject": campaign.Subject, "format": string(campaign.Format)})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, campaign)
 		}
@@ -210,6 +212,10 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 				return err
 			}
 		}
+		note(cmd, a, "campaign.send", campaign.ID, map[string]any{
+			"id": campaign.ID, "subject": campaign.Subject,
+			"recipients": queued.Recipients, "limit": limit, "sentByServer": serverIsSending,
+		})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, map[string]any{
 				"recipients": queued.Recipients, "sentByServer": serverIsSending,

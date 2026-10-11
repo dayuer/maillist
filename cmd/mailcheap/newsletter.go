@@ -230,6 +230,8 @@ func runNewsletterUpdate(cmd *cobra.Command, args []string) error {
 		if err := a.Store.UpdateNewsletter(ctx, newsletter); err != nil {
 			return err
 		}
+		note(cmd, a, "newsletter.update", newsletter.Slug,
+			map[string]any{"id": newsletter.ID, "changed": changed})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, newsletter)
 		}
@@ -284,6 +286,8 @@ func runNewsletterCreate(cmd *cobra.Command, _ []string) error {
 		if err := a.Store.CreateNewsletter(ctx, newsletter); err != nil {
 			return err
 		}
+		note(cmd, a, "newsletter.create", newsletter.Slug,
+			map[string]any{"id": newsletter.ID, "slug": newsletter.Slug, "name": newsletter.Name})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, newsletter)
 		}

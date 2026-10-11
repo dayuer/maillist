@@ -102,6 +102,11 @@ func runContactImport(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		note(cmd, a, "contact.import", args[0], map[string]any{
+			"file": args[0], "newsletter": newsletter.Slug, "source": source,
+			"created": result.Created, "updated": result.Updated, "suppressed": result.Suppressed,
+			"dryRun": result.DryRun,
+		})
 		if jsonOutput(cmd) {
 			return printJSON(cmd, result)
 		}
