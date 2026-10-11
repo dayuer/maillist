@@ -14,3 +14,40 @@ jobs:
       - run: make test
       - run: make lint
       - run: make build
+
+  # The image is a deliverable of its own: it has to build, it has to run, and it has to stay under
+  # the size budget (the plan's 25 MB ceiling; the design estimated 15-20 MB).
+  #
+  # The size is measured by exporting the image and counting the bytes, which is the only portable
+  # way to get the uncompressed figure: `docker history` prints human-readable sizes, `docker images`
+  # counts build-cache layers as well, and `docker image inspect` reports compressed blobs.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/Dockerfile --build-arg VERSION=ci -t mailcheap:ci .
+      - name: it runs
+        run: docker run --rm mailcheap:ci version
+      - name: it is under 25 MB
+        run: |
+          id=$(docker create mailcheap:ci)
+          bytes=$(docker export "$id" | wc -c)
+          docker rm "$id" >/dev/null
+          mb=$((bytes / 1024 / 1024))
+          echo "the image is ${mb} MB uncompressed"
+          test "$mb" -lt 25
+
+  # The same script a developer runs: the stack comes up with a fake SES and one issue goes out, is
+  # opened, is clicked and is unsubscribed from. No AWS credentials are involved.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # KEEP=1 so a failure leaves the stack up for the log step below; the runner is torn down after.
+      - run: KEEP=1 scripts/compose-smoke.sh
+      - name: the logs, when it fails
+        if: failure()
+        run: docker compose -f deploy/compose.yaml -f deploy/compose.local.yaml logs
+      - name: clean up
+        if: always()
+        run: docker compose -f deploy/compose.yaml -f deploy/compose.local.yaml down -v
