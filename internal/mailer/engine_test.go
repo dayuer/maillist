@@ -32,6 +32,13 @@ type fixture struct {
 
 func newFixture(t *testing.T, contacts int) *fixture {
 	t.Helper()
+	return newFixtureWith(t, contacts)
+}
+
+// newFixtureWith is newFixture with options for the fake, for the tests that need it to behave in a
+// particular way (see WithContextCancellation).
+func newFixtureWith(t *testing.T, contacts int, options ...FakeOption) *fixture {
+	t.Helper()
 	ctx := context.Background()
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "mailcheap.db"))
 	if err != nil {
@@ -73,7 +80,7 @@ func newFixture(t *testing.T, contacts int) *fixture {
 		t.Fatal(err)
 	}
 
-	fake := NewFake()
+	fake := NewFake(options...)
 	engine := NewEngine(db, fake, signer, Config{
 		AppURL: testAppURL, SendingOn: true, SendRatePerSec: 1000,
 		Limits: model.Limits{MaxEmailBytes: 100_000, BounceRate: 0.02, ComplaintRate: 0.0008,

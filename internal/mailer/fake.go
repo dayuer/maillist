@@ -26,6 +26,9 @@ type Fake struct {
 	sent     []SentEmail
 	failures map[string]APIError
 	logPath  string
+	// cancelOnContext makes Send report the context's error after recording the send; see
+	// WithContextCancellation.
+	cancelOnContext bool
 	// OnSend, when set, is called with the count of sends so far as each send arrives. It is what
 	// lets a test cancel a context mid-batch.
 	OnSend func(sent int)
@@ -38,6 +41,14 @@ type FakeOption func(*Fake)
 // that a message really went out.
 func WithLogFile(path string) FakeOption {
 	return func(f *Fake) { f.logPath = path }
+}
+
+// WithContextCancellation makes Send behave like a real HTTP client: the request is recorded as
+// accepted and *then* the context's error is reported. That is the failure this exists to test — the
+// mail reached SES, and the caller stopped waiting for the answer — and it is the one a fake that
+// ignores its context can never produce.
+func WithContextCancellation() FakeOption {
+	return func(f *Fake) { f.cancelOnContext = true }
 }
 
 // NewFake returns an empty Fake.
@@ -78,7 +89,7 @@ func (f *Fake) SentCount() int {
 }
 
 // Send records the email, unless that address was told to fail.
-func (f *Fake) Send(_ context.Context, email rules.RecipientEmail, tags map[string]string) (string, error) {
+func (f *Fake) Send(ctx context.Context, email rules.RecipientEmail, tags map[string]string) (string, error) {
 	f.mu.Lock()
 	onSend, seen := f.OnSend, len(f.sent)
 	f.mu.Unlock()
@@ -92,6 +103,7 @@ func (f *Fake) Send(_ context.Context, email rules.RecipientEmail, tags map[stri
 		return "", &failure
 	}
 	f.sent = append(f.sent, SentEmail{Email: email, Tags: tags})
+	cancelled := f.cancelOnContext && ctx.Err() != nil
 	if f.logPath != "" {
 		line, err := json.Marshal(map[string]string{
 			"to": email.To, "from": email.From, "subject": email.Subject,
@@ -108,6 +120,11 @@ func (f *Fake) Send(_ context.Context, email rules.RecipientEmail, tags map[stri
 		if _, err := handle.Write(append(line, '\n')); err != nil {
 			return "", fmt.Errorf("append send log: %w", err)
 		}
+	}
+	if cancelled {
+		// Recorded, then reported as unknown: the caller cannot tell this apart from a send SES
+		// accepted and answered too late.
+		return "", ctx.Err()
 	}
 	return "fake-" + ids.New(), nil
 }

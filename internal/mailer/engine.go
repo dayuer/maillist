@@ -193,6 +193,11 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		if err != nil {
 			// A cancelled context means we are stopping, not that the message is bad: it never
 			// reached SES, so it goes back to the queue instead of being marked failed.
+			//
+			// Releasing the current message is safe only because deliver cannot report a
+			// cancellation once it has called SES: the call runs on a detached context (see
+			// deliver), so the only cancellation it can surface is the send slot's, from before the
+			// request was made.
 			if ctx.Err() != nil {
 				e.releaseAll(ctx, messages[i:])
 				result.Retry = true
@@ -360,7 +365,16 @@ func (e *Engine) deliver(ctx context.Context, message model.Message, loaded stor
 	if err := e.bucket.Take(ctx); err != nil {
 		return delivery{}, err
 	}
-	sesMessageID, err := e.sender.Send(ctx, email, tags)
+	// The send itself runs on a context detached from the batch's, with its own deadline.
+	//
+	// A shutdown stops the engine claiming new messages; it does not abandon a request that is
+	// already in flight. Abandoning it would leave a message SES may have accepted looking unsent,
+	// and the restart would send it again — the one failure D14 exists to prevent. So the request
+	// finishes and is written back. If the process is killed outright, the message stays claimed:
+	// RecoverClaimed turns that into unknown, which is "we do not know" and never "send it again".
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
+	defer cancel()
+	sesMessageID, err := e.sender.Send(sendCtx, email, tags)
 	if err != nil {
 		return delivery{}, err
 	}
@@ -753,6 +767,10 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 	}
 	return TestResult{MessageID: message.ID, SESMessageID: sent.sesMessageID, SentAt: sent.sentAt}, nil
 }
+
+// sendTimeout bounds one call to SES. The request runs detached from the batch's context (see
+// deliver), so it needs a deadline of its own or a hung connection would hold the shutdown open.
+const sendTimeout = 30 * time.Second
 
 // startEarly is lib/scheduling.js START_EARLY_MS: within a minute of the picked time, the scheduled
 // send starts instead of waiting again.
