@@ -1,8 +1,8 @@
 # Mailcheap Go 重写设计
 
 日期：2026-10-11
-状态：已评审，待实现
-被重写的对象：本仓库的 Next.js 版 mailcheap（248 个 JS/JSX 文件，17,826 行）
+状态：已评审，待实现（2026-10-11 第二轮修订，见第 18 节）
+被重写的对象：Next.js 版 mailcheap，上游 `marclou/mailcheap`（MIT）commit `67d13b0`（248 个 JS/JSX 文件，17,826 行）。本仓库不含上游源码，移植时按 `scripts/fetch-upstream.sh` 拉到被 git 忽略的 `third_party/upstream/`
 
 ---
 
@@ -42,6 +42,9 @@
 | D10 | 删除类操作不进 MCP tool 面 | agent 能写信能发信，但删不掉东西 |
 | D11 | 阅读数改为归档页服务端计数 | 前端废弃后 `sendBeacon` + `localStorage` 那套反而更不准，服务端计数更简单也更准 |
 | D12 | 归档页 issue HTML 继续走允许列表清洗 + sandboxed iframe | 沿用现有安全模型（见 12 节） |
+| D13 | 所有主键为 24 位小写十六进制随机 ID（TEXT） | 与上游 ObjectId 同形，签名链接格式与上游测试数据可原样搬运。**不**为了让旧邮件链接继续可用——不迁数据，旧 ID 在新库不存在 |
+| D14 | 发送为至多一次（at-most-once）：调 SES 前把 message 置 `claimed`，重启时遗留 `claimed` 一律转 `unknown` 不重发 | 进程在"SES 已接收、库未写回"之间崩溃无法避免；宁丢一封不重发 |
+| D15 | 日预算在发送开始时一次性预留到 `send_ledger`，再分块建 messages | 分块逐块查额度会让并发 campaign 一起超额 |
 
 ---
 
@@ -58,13 +61,15 @@ mailcheap serve
 
 - 模板与静态资源用 `embed.FS` 打进二进制
 - 优雅关停：SIGTERM → 停止领新批次 → 等在途 SES 请求收尾 → 写回消息状态。**不允许**出现"已寄出但库里仍是 pending"
-- 崩溃重启不丢在途状态：所有状态都在 `jobs` + `messages` 表
+- 崩溃重启：所有状态都在 `jobs` + `messages` 表。优雅关停保证不出现"已寄出但仍是 pending"；硬崩溃时按 D14 处理，遗留的 `claimed` 转 `unknown`，计入报告但不重发
 
 ### 3.2 包结构
 
 ```
 cmd/mailcheap/            入口，cobra 子命令树
-internal/core/            纯逻辑，零 I/O
+internal/core/            纯逻辑，零 I/O（golangci depguard 强制）
+    ids/                  24 位十六进制 ID（D13）
+    validate/             邮箱规范化、正文大小上限
     render/               邮件 HTML 渲染、Markdown、纯文本版、链接转写
     content/              允许列表清洗、callout 扩展、缩略图提取
     audience/             受众计算、抑制过滤、最活跃优先排序
@@ -168,13 +173,14 @@ services:
 | `newsletters` | `slug` 唯一；from_name/from_email/reply_to/postal_address；archive_enabled；cleanup 策略字段 |
 | `contacts` | **唯一索引 `(newsletter_id, email)`**；status；source；signup_ip；last_open_at / last_click_at |
 | `campaigns` | status；format(`markdown`/`html`)；body；archive_slug；scheduled_at；test_sent_at；web_views |
-| `messages` | **热表**，每个读者一行。唯一索引 `(campaign_id, contact_id)`；kind；ses_message_id；status；sent_at；error |
+| `messages` | **热表**，每个读者一行。唯一索引 `(campaign_id, contact_id)`；kind；ses_message_id；status（`pending`→`claimed`→`sent`/`failed`/`unknown`）；claimed_at；sent_at；error |
 | `events` | 送达/打开/点击/退信/投诉；来自 SNS 与 `/o` `/c` |
 | `suppressions` | 全局共享（跨 newsletter）；email 唯一；reason |
 | `credentials` | kind(`api`/`mcp`)；name；token_hash；scopes；daily_budget |
 | `audit_log` | actor_kind / actor_name / action / params_digest / result / created_at |
 | `jobs` | kind；payload(JSON)；run_at；state；attempts；locked_at |
 | `alerts` | 告警记录 |
+| `send_ledger` | 主键 `(day, credential_id)`，`reserved` 计数；`credential_id` 为空串表示 CLI。全局与凭据级日预算都在同一事务里对它检查并预留（D15） |
 
 `campaigns.status` 状态机：`draft → scheduled → sending → sent`，加 `paused` 与 `failed` 旁支。**只有 `draft`/`scheduled`/`paused` 可进入发送**（D7 闸门之一）。
 
@@ -222,10 +228,14 @@ services:
 
 1. 受众计算：active contacts，排除 suppression（退订/退信/投诉），**最活跃优先**排序
 2. 分块建 `messages`（1000/事务），状态 `pending`
-3. sender worker 按令牌桶速率领取（`SEND_RATE_PER_SECOND`，1–14，默认 10），逐封调 SES v2
+3. sender worker 按令牌桶速率领取（`SEND_RATE_PER_SECOND`，1–14，默认 10），领取即置 `claimed`（D14），再逐封调 SES v2
 4. 每封写入 `ses_message_id` 与 `tags`（`message_id`、`kind`），供 SNS 事件回查
 5. 周期性检查暂停条件：`MIN_SENT_BEFORE_PAUSE = 100` 之后，退信率 > 2% 或投诉率 > 0.08% 即暂停 campaign 并发告警
 6. 分步发送：`getNextStepLimit` 语义保留，"发给最活跃的一批"由 `--limit` 表达
+
+**日预算**：步骤 2 之前，在一个事务里计算本次人数 N，检查 `send_ledger` 当日全局与凭据级余量，足够则一次性预留 N，不足则整体拒绝（不做部分发送）（D15）。
+
+**上游行为必须保留**（`lib/sending.js` / `lib/sending-rules.js`）：确认信与 last-chance 信不加追踪（`UNTRACKED_KINDS`）；每个联系人最多 3 封确认信（`MAX_CONFIRMATIONS_PER_CONTACT`）；欢迎信只发给 10 分钟内注册的人，且每 10 分钟最多 100 封；SES 错误分三类——`TooManyRequestsException`/`ThrottlingException`/`Throttling` 重试，`PAUSE_ERRORS` 集合暂停 campaign，其余记失败。
 
 **测试发送的哨兵 ID**：原实现用 `TEST_CONTACT_ID`（全零的假 ObjectId）承载测试邮件，使其不计入 campaign 统计。SQLite 版需要一个等价的哨兵行/哨兵值，且所有统计查询都要显式排除它。漏掉这一点会让"发测试"污染真实报表——这正是原实现专门防的事。
 
@@ -246,7 +256,7 @@ HTML 文件 ────────────────┘
 ```
 
 1. **Markdown 优先**。`goldmark` + 自定义 callout 扩展（现有 `lib/callouts.js` / `editor-callout.js` 的 callout 语法原样保留）——这是原 TipTap 富文本编辑器里唯一有信息量的部分
-2. **允许列表清洗**。现有 `lib/clean-html.js` + `sanitize-html` → `bluemonday`。HTML 格式的 campaign 与 API 传入的 HTML 一律过清洗
+2. **允许列表清洗**。现有 `lib/clean-html.js` → `bluemonday`，策略按上游 `CONTENT_TAGS` / `KEPT_ATTRIBUTES` 配置。**只清洗 Markdown 渲染结果**。`html` 格式（含 API/MCP 传入的整封 HTML）沿用上游语义：邮件里**保留其自身设计不清洗**，只追加 footer、preheader 与 Read online 链接；归档页对它只做 `keepSafeUrls` 并放进 sandboxed iframe。上游的第三种格式 `rich`（TipTap 编辑器产物）随编辑器一起删除
 3. **注入邮件专用内容**（`lib/render-email.js` 的逻辑）：
    - `{{unsubscribe_url}}` 占位符替换，且缺失即发送前检查失败
    - 链接转写：`<a href="https://...">` → `/c/<token>` 签名跳转
@@ -316,9 +326,9 @@ mailcheap
 保留 4 个模板 + 协议端点：
 
 ```
-GET  /unsubscribe/{token}        POST /api/unsubscribe     ← RFC 8058 一键退订
-GET  /confirm/{token}            确认页
-GET  /keep/{token}               last-chance 页
+GET  /unsubscribe?token=…        POST /api/unsubscribe?token=…   ← RFC 8058 一键退订
+GET  /confirm?token=…            确认页
+GET  /keep?token=…               last-chance 页
 GET  /subscribe/{slug}           公开订阅表单
 GET  /archive/{slug}             /archive/{slug}/p/{post}   /archive/{slug}/authors/{author}
 GET  /archive/{slug}/sitemap.xml /robots.txt
@@ -378,7 +388,7 @@ GET  /healthz
 | `write` | newsletter、campaign 草稿、联系人、suppression、cleanup、upload |
 | `send` | test / send / schedule / pause / resume / import（能触发批量邮件） |
 
-- token 形如 `mc_live_ab12…`，**明文只在创建时显示一次**，库里只存 SHA-256
+- token 形如 `mc_` + 43 位 base64url（32 随机字节，沿用上游 API key 格式），**明文只在创建时显示一次**，库里只存 SHA-256；`last_used_at` 每分钟最多写一次
 - token 不做自包含 JWT，**每次请求查 DB 比对 hash**（D8），因此删行即失效
 - `daily_budget` 为凭据级，在全局 `MAX_SENDS_PER_DAY` 之下再收一层。给 agent 一个 `read+write+send` 但日上限 2000 的 token，即"发信全权但有额度"
 
@@ -404,7 +414,7 @@ SEND_APPROVAL=manual   # send/schedule 落成 pending job，需 mailcheap approv
 | 现在 | 之后 |
 |---|---|
 | SNS 验签（`lib/sns.js`） | `crypto/rsa` + `x509`，标准库。保留"只接受 `sns.<region>.amazonaws.com` + `SimpleNotificationService-*.pem`"的严格校验 |
-| 链接签名（HKDF + HMAC-SHA256，22 字符 base64url） | `crypto/hkdf` + `crypto/hmac`，**格式与密钥派生标签保持不变**，使已发出邮件里的链接在切换后仍可用（若共用同一 `SESSION_SECRET`） |
+| 链接签名（HKDF-SHA256 空 salt，按用途分 info 标签：`mailcheap-tracking-v1` / `-unsubscribe-v1` / `-confirm-v1` / `-keep-v1`；追踪签名截 22 字符，联系人链接签名 43 字符） | `crypto/hkdf` + `crypto/hmac`，与上游**逐字节一致**（golden vector 测试锁定）。目的是复用上游测试与防伪语义，**不**承诺旧邮件链接可用（D13） |
 | 点击追踪防开放重定向 | 保留：只跳转签名过的目标；未签名链接给中断页 |
 | 链接扫描器过滤（30 秒窗口 + UA 模式） | 原样保留 |
 | issue HTML 清洗 + sandboxed iframe | `bluemonday` + 同样的 iframe sandbox |
@@ -422,7 +432,7 @@ SEND_APPROVAL=manual   # send/schedule 落成 pending job，需 mailcheap approv
 | 现有功能 | 之后 |
 |---|---|
 | 多 newsletter，各自 from/reply-to/postal | 保留 |
-| 发送前检查（10 项，2 项 warning 不阻塞） | `core/checks`，其中 8 项阻塞，`send_campaign` 内部强制 |
+| 发送前检查（10 项，3 项 warning 不阻塞：subject-length、preview、test） | `core/checks`，其中 7 项阻塞，`send_campaign` 内部强制 |
 | 测试邮件 | `campaign test` |
 | 定时发送 | `campaign schedule`，jobs 表 `run_at` |
 | 按速率批量发送 | sender worker + 令牌桶 |
@@ -502,6 +512,25 @@ SEND_APPROVAL=manual   # send/schedule 落成 pending job，需 mailcheap approv
 - Web dashboard（任何形式）
 - 多用户、权限组、团队协作
 - 邮件模板设计器
+
+---
+
+## 18. 第二轮评审修订（2026-10-11）
+
+对照上游源码核对后的修正，均已并入上文：
+
+1. **旧链接不可用**：不迁数据即旧 ID 不存在，删除"切换后旧链接仍可用"的说法；主键改为 24 位十六进制（D13）
+2. **签名长度**：追踪 22 字符、退订/确认/keep 43 字符，原文"统一 22 字符"有误
+3. **读者链接用查询参数** `?token=`，不是路径段
+4. **至多一次发送**：`claimed`/`unknown` 状态（D14）
+5. **日预算预留**：`send_ledger`（D15）
+6. **漏写的上游规则**：不追踪的邮件种类、确认信上限、欢迎信窗口、SES 错误三分类（见 6.2）
+7. **凭据格式**沿用上游 `mc_` + 43 字符，去掉 `mc_live_` 前缀
+8. **RE2 限制**：Go `regexp` 不支持环视、反向引用、超过 1000 的重复次数。上游 `clean-html.js`（环视）与 `render-email.js`（后行断言）必须改写算法而非直译正则；`tracking.js` 的 `{4,4000}` 改为模式加长度检查
+9. **HTML 格式不清洗**：原文第 7 节"HTML 一律过清洗"与上游不符，会毁掉整封 HTML 邮件的设计；已改为只清洗 Markdown 渲染结果，`rich` 格式删除
+10. **发送前检查**：10 项中 3 项为 warning（subject-length、preview、test），7 项阻塞；原文"2 项 warning、8 项阻塞"有误
+
+实施计划：`docs/superpowers/plans/2026-10-11-mailcheap-go-rewrite-plan.md`。
 
 ---
 
