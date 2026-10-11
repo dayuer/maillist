@@ -3,7 +3,7 @@ package checks
 
 import (
 	"strings"
-	"unicode/utf8"
+	"unicode/utf16"
 
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/render"
@@ -34,8 +34,10 @@ type Input struct {
 // Run returns the checklist in a fixed order, whether or not each row passes.
 func Run(in Input) []Check {
 	subject := strings.TrimSpace(in.Campaign.Subject)
-	// Upstream measures subject.length in UTF-16 units; runes are the closest Go equivalent.
-	subjectLength := utf8.RuneCountInString(subject)
+	// Upstream measures subject.length in UTF-16 code units, which is what a JavaScript string
+	// length is: an emoji outside the BMP counts as two. Counting runes made a 36-emoji subject look
+	// like 36 characters instead of 72, so the warning never fired (the phase 1-3 audit's FI-A4).
+	subjectLength := len(utf16.Encode([]rune(subject)))
 	return []Check{
 		{ID: "subject", OK: subject != "", Blocking: true, Message: "Add a subject"},
 		{ID: "subject-length", OK: subjectLength <= 70},
