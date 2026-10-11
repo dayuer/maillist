@@ -33,7 +33,7 @@
 - 测试：`make test`（= `go test -race -count=1 ./...`）
 - 静态检查：`make lint`
 - 迁移文件改动后本地重跑：`go test ./internal/store -run TestMigrate -count=1`
-- 每个 Task 结束一次提交，Conventional Commits，结尾 `Co-Authored-By: Claude Code <noreply@anthropic.com>`
+- 每个 Task 结束一次提交，Conventional Commits，不加任何 `Co-Authored-By` 署名尾注
 
 ### 0.5 上游对照表（本阶段相关）
 
