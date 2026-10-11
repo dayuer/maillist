@@ -43,6 +43,10 @@ func TestOpenConfiguresSQLite(t *testing.T) {
 	}
 }
 
+// migrationsAtThisRevision is how many files internal/store/migrations holds. It is spelled out so
+// that adding a migration is a deliberate edit here too, rather than a test that quietly follows.
+const migrationsAtThisRevision = 2
+
 // Opening twice must not re-apply a migration: 0001 creates tables without IF NOT EXISTS, so a
 // second run would fail loudly.
 func TestMigrateIsIdempotent(t *testing.T) {
@@ -56,8 +60,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := first.sql.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied != 1 {
-		t.Fatalf("applied = %d, want 1", applied)
+	if applied != migrationsAtThisRevision {
+		t.Fatalf("applied = %d, want %d", applied, migrationsAtThisRevision)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
@@ -72,8 +76,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := second.sql.QueryRow("SELECT count(*) FROM schema_migrations").Scan(&after); err != nil {
 		t.Fatal(err)
 	}
-	if after != 1 {
-		t.Fatalf("applied after reopening = %d, want 1", after)
+	if after != migrationsAtThisRevision {
+		t.Fatalf("applied after reopening = %d, want %d", after, migrationsAtThisRevision)
 	}
 }
 

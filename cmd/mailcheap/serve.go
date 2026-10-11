@@ -14,6 +14,7 @@ import (
 
 	"mailcheap/internal/app"
 	"mailcheap/internal/scheduler"
+	"mailcheap/internal/store"
 )
 
 // shutdownTimeout is how long the HTTP server may take to finish the requests in flight.
@@ -52,6 +53,24 @@ func runServe(cmd *cobra.Command, _ []string) error {
 
 		runner := scheduler.New(a.Jobs, a.Mailer.RunJob, 250*time.Millisecond, a.Log)
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "listening on "+addr)
+
+		// Sending converges on this process while it runs: the CLI asks the heartbeat before it
+		// drains anything itself (design §5.2). It is cleared on the way out so the next CLI command
+		// does not wait for the window to lapse.
+		beatDone := make(chan struct{})
+		go func() {
+			defer close(beatDone)
+			stampServeHeartbeat(ctx, a)
+		}()
+		defer func() {
+			<-beatDone
+			clearCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			if err := a.Store.ClearHeartbeat(clearCtx, store.ServeHeartbeat); err != nil {
+				a.Log.Warn("could not clear the serve heartbeat", "error", err)
+			}
+		}()
+
 		errs := make(chan error, 3)
 		var wg sync.WaitGroup
 		for name, run := range map[string]func() error{
@@ -74,4 +93,27 @@ func runServe(cmd *cobra.Command, _ []string) error {
 		}
 		return nil
 	})
+}
+
+// stampServeHeartbeat keeps the liveness stamp fresh until ctx ends. A failed write is not fatal —
+// the stamp going stale only means another process may start sending too, and the store's own
+// busy-retry already covers a contended database.
+func stampServeHeartbeat(ctx context.Context, a *app.App) {
+	touch := func() {
+		if err := a.Store.TouchHeartbeat(ctx, store.ServeHeartbeat, time.Now().UTC()); err != nil &&
+			ctx.Err() == nil {
+			a.Log.Warn("could not stamp the serve heartbeat", "error", err)
+		}
+	}
+	touch()
+	ticker := time.NewTicker(store.HeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			touch()
+		}
+	}
 }

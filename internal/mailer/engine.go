@@ -495,8 +495,8 @@ func (e *Engine) settle(ctx context.Context, campaignID string) error {
 	if paused, err := e.pauseIfUnhealthy(ctx, campaignID); err != nil || paused {
 		return err
 	}
-	pending, err := e.store.CountPendingCampaignMessages(ctx, campaignID)
-	if err != nil || pending > 0 {
+	unfinished, err := e.store.CountUnfinishedCampaignMessages(ctx, campaignID)
+	if err != nil || unfinished > 0 {
 		return err
 	}
 	moved, err := e.store.SetCampaignStatus(ctx, campaignID,

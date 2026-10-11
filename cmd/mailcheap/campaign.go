@@ -182,6 +182,10 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 			return errors.New("aborted")
 		}
 
+		serverIsSending, err := a.Store.ServeIsRunning(ctx, time.Now().UTC())
+		if err != nil {
+			return err
+		}
 		queued, err := queueCampaign(ctx, a, campaign, limit)
 		if err != nil {
 			return err
@@ -189,21 +193,21 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 		if !queued.Queued {
 			return errors.New(queued.Reason)
 		}
-		// The CLI drains its own queue: there is no serve process to do it.
-		for {
-			result, err := a.Mailer.SendBatch(ctx, nil)
-			if err != nil {
+		if !serverIsSending {
+			// Nothing else is sending, so the command drains its own queue.
+			if err := drainQueue(ctx, a); err != nil {
 				return err
-			}
-			if result.Retry {
-				return errors.New("sending stopped early (a retryable SES error); run the command again")
-			}
-			if result.Done() == 0 {
-				break
 			}
 		}
 		if jsonOutput(cmd) {
-			return printJSON(cmd, queued)
+			return printJSON(cmd, map[string]any{
+				"recipients": queued.Recipients, "sentByServer": serverIsSending,
+			})
+		}
+		if serverIsSending {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(),
+				"queued %d recipients; the running server is sending them\n", queued.Recipients)
+			return nil
 		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "queued %d recipients\n", queued.Recipients)
 		return nil

@@ -248,7 +248,7 @@ func TestSendBatchPausesAboveTheBounceLimit(t *testing.T) {
 	if err != nil || recipients != 10 {
 		t.Fatalf("recipients = %d %v", recipients, err)
 	}
-	pending, err := f.db.CountPendingCampaignMessages(ctx, f.campaign.ID)
+	pending, err := f.db.CountUnfinishedCampaignMessages(ctx, f.campaign.ID)
 	if err != nil || pending != 10 {
 		t.Fatalf("pending = %d %v, want all 10", pending, err)
 	}
@@ -428,7 +428,7 @@ func TestPausedCampaignIsNotSent(t *testing.T) {
 	if f.fake.SentCount() != 0 {
 		t.Fatal("a paused campaign was sent")
 	}
-	if pending, err := f.db.CountPendingCampaignMessages(ctx, f.campaign.ID); err != nil || pending != 3 {
+	if pending, err := f.db.CountUnfinishedCampaignMessages(ctx, f.campaign.ID); err != nil || pending != 3 {
 		t.Fatalf("pending = %d %v", pending, err)
 	}
 
@@ -462,7 +462,7 @@ func TestSESErrorsAreClassified(t *testing.T) {
 	if result.Sent != 0 || result.Failed != 0 || !result.Retry {
 		t.Fatalf("throttled batch = %+v", result)
 	}
-	if pending, err := f.db.CountPendingCampaignMessages(ctx, f.campaign.ID); err != nil || pending != 2 {
+	if pending, err := f.db.CountUnfinishedCampaignMessages(ctx, f.campaign.ID); err != nil || pending != 2 {
 		t.Fatalf("pending = %d %v, want both back in the queue", pending, err)
 	}
 

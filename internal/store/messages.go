@@ -259,14 +259,19 @@ func (db *DB) CountCampaignMessages(ctx context.Context, campaignID string) (rec
 	return recipients, lastChance, err
 }
 
-// CountPendingCampaignMessages is how many of a campaign's messages are still waiting to go out.
-func (db *DB) CountPendingCampaignMessages(ctx context.Context, campaignID string) (int, error) {
-	var pending int
+// CountUnfinishedCampaignMessages is how many of a campaign's messages have not reached a final
+// state: waiting, or claimed by a sender that has not finished with them.
+//
+// Claimed counts. A campaign is only finished when nothing is in flight, because a message another
+// process released after this one settled would be pending on a campaign that is no longer sending —
+// nobody claims it, and the report says the issue went out (the phase 1-3 audit's C2).
+func (db *DB) CountUnfinishedCampaignMessages(ctx context.Context, campaignID string) (int, error) {
+	var unfinished int
 	err := db.sql.QueryRowContext(ctx, `SELECT count(*) FROM messages
-        WHERE campaign_id = ? AND kind IN (?, ?) AND status = ?`,
+        WHERE campaign_id = ? AND kind IN (?, ?) AND status IN (?, ?)`,
 		campaignID, string(model.KindCampaign), string(model.KindLastChance),
-		string(model.MessagePending)).Scan(&pending)
-	return pending, err
+		string(model.MessagePending), string(model.MessageClaimed)).Scan(&unfinished)
+	return unfinished, err
 }
 
 // ReachedContacts is who this campaign already has a message for, so a stepped send skips them.
