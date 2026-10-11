@@ -53,7 +53,8 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	}
 	// The writer must be running before Migrate, which goes through it — migrations run at open
 	// time, and the phase 4 `db migrate` command needs the same path while a server is up.
-	go db.writer()
+	// It outlives every request, so it deliberately runs on a background context.
+	go db.writer() //nolint:gosec // G118: the writer lives as long as the database, not as long as a request
 	if err := db.Migrate(ctx); err != nil {
 		db.closeOnce()
 		return nil, err
