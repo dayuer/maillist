@@ -165,6 +165,28 @@ func (db *DB) AddContactStats(ctx context.Context, id string, sent, opens, click
 	})
 }
 
+// RecordContactSend stamps a send on the contact: last_sent_at, the sent counter, and — for an
+// issue — one more ignored issue for the list cleanup (upstream recordSent). A last-chance email
+// also stamps last_chance_at.
+func (db *DB) RecordContactSend(ctx context.Context, id string, at time.Time, kind model.MessageKind) error {
+	isIssue := kind == model.KindCampaign
+	isLastChance := kind == model.KindLastChance
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE contacts SET
+            last_sent_at = ?,
+            last_chance_at = CASE WHEN ? THEN ? ELSE last_chance_at END,
+            sent = sent + 1,
+            ignored_issues = ignored_issues + CASE WHEN ? THEN 1 ELSE 0 END,
+            updated_at = ?
+            WHERE id = ?`,
+			formatTime(at), isLastChance, formatTime(at), isIssue, formatTime(time.Now()), id)
+		if err != nil {
+			return err
+		}
+		return requireOneRow(result, "contact", id)
+	})
+}
+
 // MarkContactEngaged records a sign of life: last_engaged_at, and ignored_issues back to 0 so the
 // list cleanup stops counting them toward a last-chance email.
 func (db *DB) MarkContactEngaged(ctx context.Context, id string, at time.Time) error {

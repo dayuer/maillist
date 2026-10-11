@@ -1,0 +1,716 @@
+package mailer
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/aws/smithy-go"
+
+	"mailcheap/internal/core/ids"
+	"mailcheap/internal/core/model"
+	"mailcheap/internal/core/rules"
+	"mailcheap/internal/core/sign"
+	"mailcheap/internal/core/validate"
+	"mailcheap/internal/store"
+)
+
+// Config is what the engine needs from internal/config.
+type Config struct {
+	AppURL         string
+	SendingOn      bool
+	SendRatePerSec int
+	Limits         model.Limits
+	// PollInterval is how often Run looks for work.
+	PollInterval time.Duration
+}
+
+// BatchResult is what one batch did (upstream sendMessageBatch's result).
+type BatchResult struct {
+	Sent       int
+	Failed     int
+	Suppressed int
+	Skipped    int
+	// Retry is set when sending stopped for a reason the next run can fix.
+	Retry bool
+}
+
+// Done is how many messages the batch disposed of, one way or another.
+func (r BatchResult) Done() int { return r.Sent + r.Failed + r.Suppressed + r.Skipped }
+
+// QueueResult is what Queue and QueueStep report back.
+type QueueResult struct {
+	Recipients int
+	LastChance int
+	Added      int
+	// Queued is false when the campaign could not start; Reason says why.
+	Queued bool
+	Reason string
+}
+
+// TestResult is one test email.
+type TestResult struct {
+	MessageID    string
+	SESMessageID string
+	SentAt       time.Time
+}
+
+// Engine sends queued messages through a Sender.
+type Engine struct {
+	store  *store.DB
+	sender Sender
+	signer *sign.Signer
+	bucket *Bucket
+	cfg    Config
+	log    *slog.Logger
+}
+
+// NewEngine builds an engine. The bucket is shared by every caller, so the rate is a process-wide
+// cap rather than a per-batch one.
+func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log *slog.Logger) *Engine {
+	if cfg.PollInterval <= 0 {
+		cfg.PollInterval = 250 * time.Millisecond
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Engine{
+		store: db, sender: sender, signer: signer,
+		bucket: NewBucket(cfg.SendRatePerSec), cfg: cfg, log: log,
+	}
+}
+
+// Close stops the rate limiter.
+func (e *Engine) Close() { e.bucket.Close() }
+
+// SendBatch sends one batch. With no ids it claims up to rules.SendBatchSize messages itself, which
+// is what Run uses; with ids it sends exactly those (the CLI's path).
+func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResult, error) {
+	result := BatchResult{}
+	if !e.cfg.SendingOn {
+		result.Retry = true
+		return result, errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
+	}
+
+	var messages []model.Message
+	if len(messageIDs) == 0 {
+		claimed, err := e.store.ClaimMessages(ctx, rules.SendBatchSize)
+		if err != nil {
+			return result, err
+		}
+		messages = claimed
+	} else {
+		claimed, err := e.store.ClaimMessagesByID(ctx, messageIDs)
+		if err != nil {
+			return result, err
+		}
+		messages = claimed
+		result.Skipped = len(messageIDs) - len(claimed)
+	}
+	if len(messages) == 0 {
+		return result, nil
+	}
+
+	suppressed, err := e.store.SuppressedEmails(ctx)
+	if err != nil {
+		return result, err
+	}
+	suppressedSet := make(map[string]bool, len(suppressed))
+	for _, email := range suppressed {
+		suppressedSet[email] = true
+	}
+
+	// A campaign that is already over its bounce or complaint limit pauses before anything else goes
+	// out, as upstream does at the top of sendMessageBatch.
+	campaigns := map[string]bool{}
+	for _, message := range messages {
+		if message.CampaignID == "" {
+			continue
+		}
+		if _, seen := campaigns[message.CampaignID]; seen {
+			continue
+		}
+		campaigns[message.CampaignID] = true
+		if _, err := e.pauseIfUnhealthy(ctx, message.CampaignID); err != nil {
+			return result, err
+		}
+	}
+
+	consecutiveFailures := 0
+	for i, message := range messages {
+		// Whatever stops the batch, the messages it did not reach go back to the queue: left
+		// claimed they would be recovered as unknown on the next start, which means silently
+		// dropping a send (D14).
+		if ctx.Err() != nil {
+			result.Retry = true
+			e.releaseAll(ctx, messages[i:])
+			break
+		}
+		loaded, err := e.store.LoadMessageContext(ctx, message)
+		if err != nil {
+			e.releaseAll(ctx, messages[i:])
+			return result, fmt.Errorf("load message %s: %w", message.ID, err)
+		}
+		// The campaign may have been paused or finished since the audience was chosen.
+		if rules.IsCampaignKind(message.Kind) &&
+			(loaded.Campaign == nil || loaded.Campaign.Status != model.CampaignSending) {
+			result.Skipped++
+			if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
+				return result, err
+			}
+			continue
+		}
+
+		required := model.ContactActive
+		if message.Kind == model.KindConfirmation {
+			required = model.ContactPending
+		}
+		if loaded.Contact.Status != required || suppressedSet[message.Email] {
+			if err := e.store.MarkMessageSuppressed(ctx, message.ID); err != nil {
+				return result, err
+			}
+			result.Suppressed++
+			continue
+		}
+
+		delivery, err := e.deliver(ctx, message, loaded, nil)
+		if err != nil {
+			outcome, stop := e.handleSendError(ctx, message, loaded, err)
+			result.Failed += outcome.failed
+			result.Retry = result.Retry || outcome.retry
+			if stop {
+				e.releaseAll(ctx, messages[i+1:])
+				break
+			}
+			consecutiveFailures += outcome.failed
+			if outcome.failed > 0 && message.CampaignID != "" &&
+				consecutiveFailures >= rules.MaxConsecutiveFailures {
+				if err := e.pause(ctx, message.CampaignID,
+					fmt.Sprintf("%d sends failed in a row", consecutiveFailures)); err != nil {
+					return result, err
+				}
+				e.releaseAll(ctx, messages[i+1:])
+				break
+			}
+			continue
+		}
+		if err := e.recordSent(ctx, message, loaded, delivery); err != nil {
+			return result, err
+		}
+		result.Sent++
+		consecutiveFailures = 0
+	}
+
+	for campaignID := range campaigns {
+		if err := e.settle(ctx, campaignID); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+// releaseAll puts claimed messages the batch never reached back in the queue. A failure here is
+// logged and not fatal: the rows stay claimed until a restart recovers them as unknown.
+func (e *Engine) releaseAll(ctx context.Context, messages []model.Message) {
+	for _, message := range messages {
+		if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
+			e.log.Error("release", "message", message.ID, "error", err)
+		}
+	}
+}
+
+// errorOutcome is what one failed send asks for: whether to stop the batch, and how to count it.
+type errorOutcome struct {
+	failed int
+	retry  bool
+}
+
+// handleSendError classifies a failed send the way upstream does, from both the error code and the
+// message (rules.SendErrorAction needs both).
+func (e *Engine) handleSendError(ctx context.Context, message model.Message, loaded store.MessageContext,
+	cause error) (outcome errorOutcome, stop bool) {
+	action := rules.ErrorFail
+	if message.CampaignID != "" {
+		action = rules.SendErrorAction(errorCode(cause), cause.Error())
+	}
+	switch action {
+	case rules.ErrorFail:
+		if err := e.store.MarkMessageFailed(ctx, message.ID, cause.Error()); err != nil {
+			e.log.Error("mark failed", "message", message.ID, "error", err)
+		}
+		if err := e.addFailedStats(ctx, message, loaded); err != nil {
+			e.log.Error("failed stats", "message", message.ID, "error", err)
+		}
+		return errorOutcome{failed: 1}, false
+	case rules.ErrorPause:
+		if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
+			e.log.Error("release", "message", message.ID, "error", err)
+		}
+		if err := e.pause(ctx, message.CampaignID, cause.Error()); err != nil {
+			e.log.Error("pause", "campaign", message.CampaignID, "error", err)
+		}
+		return errorOutcome{}, true
+	default: // retry
+		if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
+			e.log.Error("release", "message", message.ID, "error", err)
+		}
+		return errorOutcome{retry: true}, true
+	}
+}
+
+// delivery is what a successful send produced.
+type delivery struct {
+	sesMessageID string
+	sentAt       time.Time
+}
+
+// deliver renders and sends one message. content overrides the campaign body for test sends.
+func (e *Engine) deliver(ctx context.Context, message model.Message, loaded store.MessageContext,
+	contentOverride *model.Campaign) (delivery, error) {
+	content, err := e.contentFor(message, loaded, contentOverride)
+	if err != nil {
+		return delivery{}, err
+	}
+
+	now := time.Now().UTC()
+	reference := sign.Ref{ContactID: loaded.Contact.ID, NewsletterID: loaded.Newsletter.ID}
+	input := rules.RecipientInput{
+		AppURL:     e.cfg.AppURL,
+		Campaign:   content,
+		Newsletter: loaded.Newsletter,
+		Contact:    loaded.Contact,
+		MessageID:  message.ID,
+		Kind:       message.Kind,
+	}
+	// Confirmation and last-chance links have to work, so those emails go out untracked.
+	if rules.Untracked(message.Kind) {
+		input.MessageID = ""
+	}
+	switch message.Kind {
+	case model.KindConfirmation:
+		token, err := e.signer.ContactToken(sign.InfoConfirm, reference, now)
+		if err != nil {
+			return delivery{}, err
+		}
+		input.ConfirmURL = e.cfg.AppURL + "/confirm?token=" + token
+	case model.KindLastChance:
+		token, err := e.signer.ContactToken(sign.InfoKeep, reference, now)
+		if err != nil {
+			return delivery{}, err
+		}
+		input.KeepURL = e.cfg.AppURL + "/keep?token=" + token
+	}
+
+	email, err := rules.BuildRecipientEmail(e.signer, input)
+	if err != nil {
+		return delivery{}, err
+	}
+	email.Headers["Feedback-ID"] = rules.FeedbackID(message.CampaignID, message.Kind, loaded.Newsletter.Slug)
+
+	tags := map[string]string{"message_id": message.ID, "kind": string(message.Kind)}
+	if message.CampaignID != "" {
+		tags["campaign_id"] = message.CampaignID
+	}
+
+	if err := e.bucket.Take(ctx); err != nil {
+		return delivery{}, err
+	}
+	sesMessageID, err := e.sender.Send(ctx, email, tags)
+	if err != nil {
+		return delivery{}, err
+	}
+	return delivery{sesMessageID: sesMessageID, sentAt: now}, nil
+}
+
+// contentFor picks the body of a message: the campaign, or the newsletter's welcome or confirmation
+// email.
+func (e *Engine) contentFor(message model.Message, loaded store.MessageContext,
+	override *model.Campaign) (model.Campaign, error) {
+	if override != nil {
+		return *override, nil
+	}
+	switch message.Kind {
+	case model.KindWelcome:
+		welcome, ok := rules.WelcomeContent(loaded.Newsletter)
+		if !ok {
+			return model.Campaign{}, errors.New("the welcome email is off or incomplete")
+		}
+		return model.Campaign{
+			Format: model.FormatMarkdown, Subject: welcome.Subject,
+			PreviewText: welcome.PreviewText, Body: welcome.Markdown,
+		}, nil
+	case model.KindConfirmation:
+		confirmation := rules.ConfirmationContent(loaded.Newsletter)
+		return model.Campaign{
+			Format: model.FormatMarkdown, Subject: confirmation.Subject,
+			PreviewText: confirmation.PreviewText, Body: confirmation.Markdown,
+		}, nil
+	case model.KindLastChance:
+		// The last-chance email belongs to the list cleanup, which arrives in phase 7.
+		return model.Campaign{}, errors.New("last-chance emails are not implemented yet")
+	default:
+		if loaded.Campaign == nil {
+			return model.Campaign{}, fmt.Errorf("message %s has no campaign", message.ID)
+		}
+		return *loaded.Campaign, nil
+	}
+}
+
+// recordSent writes back a message SES accepted, and moves the counters that follow from it.
+func (e *Engine) recordSent(ctx context.Context, message model.Message, loaded store.MessageContext,
+	sent delivery) error {
+	if err := e.store.MarkMessageSent(ctx, message.ID, sent.sesMessageID, sent.sentAt); err != nil {
+		return err
+	}
+	if loaded.Campaign != nil {
+		if err := e.addSentStats(ctx, message, loaded.Campaign.ID); err != nil {
+			return err
+		}
+	}
+	// The sentinel test contact is not a real contact, so nothing is recorded for it. This is what
+	// keeps a test send out of the campaign report (design §6.2).
+	if message.ContactID != "" && message.ContactID != rules.TestContactID {
+		if err := e.store.RecordContactSend(ctx, message.ContactID, sent.sentAt, message.Kind); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (e *Engine) addSentStats(ctx context.Context, message model.Message, campaignID string) error {
+	if message.Kind == model.KindLastChance {
+		return e.store.AddLastChanceStats(ctx, campaignID, store.LastChanceCounters{Sent: 1})
+	}
+	return e.store.AddCampaignStats(ctx, campaignID, store.CampaignCounters{Sent: 1})
+}
+
+func (e *Engine) addFailedStats(ctx context.Context, message model.Message, loaded store.MessageContext) error {
+	if loaded.Campaign == nil {
+		return nil
+	}
+	if message.Kind == model.KindLastChance {
+		return e.store.AddLastChanceStats(ctx, loaded.Campaign.ID, store.LastChanceCounters{Failed: 1})
+	}
+	return e.store.AddCampaignStats(ctx, loaded.Campaign.ID, store.CampaignCounters{Failed: 1})
+}
+
+// pause stops a campaign, but only one that is still sending: a campaign the operator already
+// paused or a send that just finished keeps its status.
+func (e *Engine) pause(ctx context.Context, campaignID, reason string) error {
+	moved, err := e.store.SetCampaignStatus(ctx, campaignID,
+		[]model.CampaignStatus{model.CampaignSending}, model.CampaignPaused)
+	if err != nil {
+		return err
+	}
+	if moved {
+		e.log.Warn("campaign paused", "campaign", campaignID, "reason", reason)
+	}
+	return nil
+}
+
+// pauseIfUnhealthy checks the bounce and complaint limits and pauses the campaign when they are
+// exceeded (upstream pauseIfUnhealthy).
+func (e *Engine) pauseIfUnhealthy(ctx context.Context, campaignID string) (bool, error) {
+	campaign, err := e.store.Campaign(ctx, campaignID)
+	if err != nil {
+		return false, err
+	}
+	if campaign.Status != model.CampaignSending {
+		return false, nil
+	}
+	stats, lastChance, err := e.store.CampaignCountersOf(ctx, campaignID)
+	if err != nil {
+		return false, err
+	}
+	reason := rules.CampaignPauseReason(stats.PauseStats(lastChance), e.cfg.Limits)
+	if reason == "" {
+		return false, nil
+	}
+	return true, e.pause(ctx, campaignID, string(reason)+" is over the limit")
+}
+
+// settle finishes a campaign whose messages have all been disposed of (upstream settleCampaign).
+func (e *Engine) settle(ctx context.Context, campaignID string) error {
+	if paused, err := e.pauseIfUnhealthy(ctx, campaignID); err != nil || paused {
+		return err
+	}
+	pending, err := e.store.CountPendingCampaignMessages(ctx, campaignID)
+	if err != nil || pending > 0 {
+		return err
+	}
+	moved, err := e.store.SetCampaignStatus(ctx, campaignID,
+		[]model.CampaignStatus{model.CampaignSending}, model.CampaignSent)
+	if err != nil || !moved {
+		return err
+	}
+	return e.store.SetCampaignSentAt(ctx, campaignID, time.Now().UTC())
+}
+
+// Run sends batches until ctx is cancelled. It never starts a batch after cancellation, and a batch
+// already in flight finishes its writes, so a graceful shutdown cannot leave a message sent in SES
+// but still claimed here without a status (design §3.1).
+func (e *Engine) Run(ctx context.Context) error {
+	ticker := time.NewTicker(e.cfg.PollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+		for {
+			result, err := e.SendBatch(ctx, nil)
+			if err != nil {
+				return err
+			}
+			if result.Done() == 0 || result.Retry {
+				break
+			}
+		}
+	}
+}
+
+// Queue is upstream queueCampaign: check the campaign, choose the audience, reserve the day's
+// budget, create the messages, and move the campaign to sending.
+func (e *Engine) Queue(ctx context.Context, campaignID string) (QueueResult, error) {
+	if !e.cfg.SendingOn {
+		return QueueResult{}, errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
+	}
+	campaign, err := e.store.Campaign(ctx, campaignID)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if !campaign.Status.Queueable() {
+		return QueueResult{}, fmt.Errorf("campaign is already %s", campaign.Status)
+	}
+	newsletter, err := e.store.Newsletter(ctx, campaign.NewsletterID)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if problem := rules.SendProblem(e.signer, e.cfg.AppURL, campaign, &newsletter,
+		e.cfg.Limits.MaxEmailBytes); problem != "" {
+		return QueueResult{}, errors.New(problem)
+	}
+
+	audience, err := e.store.SelectAudience(ctx, campaign.NewsletterID, campaign.AudienceLimit)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if len(audience) == 0 {
+		return QueueResult{Reason: "No active contacts to send to"}, nil
+	}
+
+	// D15: the whole step is reserved up front, so two campaigns cannot overshoot the day together.
+	fits, err := e.store.Reserve(ctx, store.Day(time.Now()), "", len(audience),
+		e.cfg.Limits.MaxSendsPerDay, 0)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if !fits {
+		return QueueResult{Reason: fmt.Sprintf(
+			"the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", len(audience))}, nil
+	}
+
+	if _, err := e.store.InsertMessages(ctx, toMessages(campaign, audience)); err != nil {
+		return QueueResult{}, err
+	}
+	recipients, lastChance, err := e.store.CountCampaignMessages(ctx, campaignID)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if recipients+lastChance == 0 {
+		return QueueResult{Reason: "No active contacts to send to"}, nil
+	}
+
+	moved, err := e.store.SetCampaignStatus(ctx, campaignID,
+		[]model.CampaignStatus{campaign.Status}, model.CampaignSending)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if !moved {
+		return QueueResult{}, errors.New("the campaign changed, refresh and try again")
+	}
+	if err := e.store.AddCampaignStats(ctx, campaignID, store.CampaignCounters{Recipients: recipients}); err != nil {
+		return QueueResult{}, err
+	}
+	if err := e.store.SetCampaignStartedAt(ctx, campaignID, time.Now().UTC()); err != nil {
+		return QueueResult{}, err
+	}
+	return QueueResult{Recipients: recipients, LastChance: lastChance, Queued: true}, nil
+}
+
+// QueueStep is upstream sendToMoreContacts: a sent campaign goes to the next most engaged slice. It
+// takes the top of the audience again and the one-message-per-contact index skips whoever already
+// received it.
+func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional int) (QueueResult, error) {
+	if !e.cfg.SendingOn {
+		return QueueResult{}, errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
+	}
+	campaign, err := e.store.Campaign(ctx, campaignID)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if campaign.Status != model.CampaignSent {
+		return QueueResult{}, errors.New("wait until the current step has gone out")
+	}
+	newsletter, err := e.store.Newsletter(ctx, campaign.NewsletterID)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if problem := rules.SendProblem(e.signer, e.cfg.AppURL, campaign, &newsletter,
+		e.cfg.Limits.MaxEmailBytes); problem != "" {
+		return QueueResult{}, errors.New(problem)
+	}
+
+	sentSoFar, _, err := e.store.CountCampaignMessages(ctx, campaignID)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	limit := rules.NextStepLimit(sentSoFar, additional)
+	audience, err := e.store.SelectAudience(ctx, campaign.NewsletterID, limit)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	reached, err := e.store.ReachedContacts(ctx, campaignID)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	fresh := make([]model.Contact, 0, len(audience))
+	for _, contact := range audience {
+		if _, already := reached[contact.ID]; !already {
+			fresh = append(fresh, contact)
+		}
+	}
+	if len(fresh) == 0 {
+		return QueueResult{Reason: "Everyone has received it already"}, nil
+	}
+	fits, err := e.store.Reserve(ctx, store.Day(time.Now()), "", len(fresh),
+		e.cfg.Limits.MaxSendsPerDay, 0)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if !fits {
+		return QueueResult{Reason: "the daily send budget is spent"}, nil
+	}
+	if _, err := e.store.InsertMessages(ctx, toMessages(campaign, fresh)); err != nil {
+		return QueueResult{}, err
+	}
+	recipients, lastChance, err := e.store.CountCampaignMessages(ctx, campaignID)
+	if err != nil {
+		return QueueResult{}, err
+	}
+
+	moved, err := e.store.SetCampaignStatus(ctx, campaignID,
+		[]model.CampaignStatus{model.CampaignSent}, model.CampaignSending)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if !moved {
+		return QueueResult{}, errors.New("the campaign changed, refresh and try again")
+	}
+	if err := e.store.AddCampaignStats(ctx, campaignID,
+		store.CampaignCounters{Recipients: recipients - sentSoFar}); err != nil {
+		return QueueResult{}, err
+	}
+	if limit > 0 {
+		if err := e.store.SetCampaignAudienceLimit(ctx, campaignID, limit); err != nil {
+			return QueueResult{}, err
+		}
+	}
+	return QueueResult{
+		Recipients: recipients, LastChance: lastChance,
+		Added: recipients - sentSoFar, Queued: true,
+	}, nil
+}
+
+// Test is upstream sendTestEmail: one message to one address, under the sentinel contact id so it
+// stays out of every report.
+func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, error) {
+	if !e.cfg.SendingOn {
+		return TestResult{}, errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
+	}
+	campaign, err := e.store.Campaign(ctx, campaignID)
+	if err != nil {
+		return TestResult{}, err
+	}
+	newsletter, err := e.store.Newsletter(ctx, campaign.NewsletterID)
+	if err != nil {
+		return TestResult{}, err
+	}
+	email := validate.NormalizeEmail(to)
+	if email == "" {
+		return TestResult{}, errors.New("the test email address is invalid")
+	}
+	if problem := rules.SendProblem(e.signer, e.cfg.AppURL, campaign, &newsletter,
+		e.cfg.Limits.MaxEmailBytes); problem != "" {
+		return TestResult{}, errors.New(problem)
+	}
+
+	message := model.Message{
+		ID: ids.New(), Kind: model.KindTest, CampaignID: campaignID,
+		NewsletterID: newsletter.ID, ContactID: rules.TestContactID, Email: email,
+		Status: model.MessagePending, CreatedAt: time.Now().UTC(),
+	}
+	if _, err := e.store.InsertMessages(ctx, []model.Message{message}); err != nil {
+		return TestResult{}, err
+	}
+	claimed, err := e.store.ClaimMessagesByID(ctx, []string{message.ID})
+	if err != nil || len(claimed) != 1 {
+		return TestResult{}, fmt.Errorf("claim test message: %w", err)
+	}
+	// The sentinel contact has no row, so the lookup goes without it and the stand-in is set below.
+	loaded, err := e.store.LoadMessageContext(ctx, model.Message{
+		CampaignID: message.CampaignID, NewsletterID: message.NewsletterID,
+	})
+	if err != nil {
+		return TestResult{}, err
+	}
+	loaded.Contact = model.Contact{ID: rules.TestContactID, Email: email, Status: model.ContactActive}
+
+	subject := campaign
+	subject.Subject = "[Test] " + campaign.Subject
+	sent, err := e.deliver(ctx, message, loaded, &subject)
+	if err != nil {
+		if markErr := e.store.MarkMessageFailed(ctx, message.ID, err.Error()); markErr != nil {
+			e.log.Error("mark failed", "message", message.ID, "error", markErr)
+		}
+		return TestResult{}, err
+	}
+	if err := e.store.MarkMessageSent(ctx, message.ID, sent.sesMessageID, sent.sentAt); err != nil {
+		return TestResult{}, err
+	}
+	if err := e.store.SetCampaignTestSentAt(ctx, campaignID, sent.sentAt); err != nil {
+		return TestResult{}, err
+	}
+	return TestResult{MessageID: message.ID, SESMessageID: sent.sesMessageID, SentAt: sent.sentAt}, nil
+}
+
+// toMessages turns an audience into pending campaign messages.
+func toMessages(campaign model.Campaign, contacts []model.Contact) []model.Message {
+	now := time.Now().UTC()
+	messages := make([]model.Message, 0, len(contacts))
+	for _, contact := range contacts {
+		messages = append(messages, model.Message{
+			ID:           ids.New(),
+			Kind:         model.KindCampaign,
+			CampaignID:   campaign.ID,
+			NewsletterID: campaign.NewsletterID,
+			ContactID:    contact.ID,
+			Email:        contact.Email,
+			Status:       model.MessagePending,
+			CreatedAt:    now,
+		})
+	}
+	return messages
+}
+
+// errorCode is the SES error code, or "" for an error that never reached SES.
+func errorCode(err error) string {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode()
+	}
+	return ""
+}
