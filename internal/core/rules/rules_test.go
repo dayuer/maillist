@@ -368,13 +368,13 @@ func TestFeedbackIDIdentifiesTheSender(t *testing.T) {
 }
 
 func TestSlugifyFoldsAccents(t *testing.T) {
-	if got := slugify("Issue 12: L'équipe", 80); got != "issue-12-l-equipe" {
+	if got := Slugify("Issue 12: L'équipe", 80); got != "issue-12-l-equipe" {
 		t.Errorf("got %q", got)
 	}
-	if got := slugify(strings.Repeat("a", 100), 80); got != strings.Repeat("a", 80) {
+	if got := Slugify(strings.Repeat("a", 100), 80); got != strings.Repeat("a", 80) {
 		t.Errorf("got %q", got)
 	}
-	if got := slugify("Hello --- ", 80); got != "hello" {
+	if got := Slugify("Hello --- ", 80); got != "hello" {
 		t.Errorf("got %q", got)
 	}
 }

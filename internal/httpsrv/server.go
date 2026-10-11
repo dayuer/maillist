@@ -98,6 +98,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /keep", s.handleKeepPage)
 	mux.HandleFunc("POST /keep", s.handleKeep)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /uploads/{name}", s.handleUpload)
 	return s.withSecurityHeaders(s.withArchiveHost(s.withRequestLog(mux)))
 }
 
