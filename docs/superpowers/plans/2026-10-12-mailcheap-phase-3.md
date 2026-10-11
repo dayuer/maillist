@@ -2114,6 +2114,21 @@ git commit -m "feat(cli): serve the reader surface with a scheduler and graceful
 | `tests/confirmation.test.mjs` | 剩余用例（确认链接、3 封上限、欢迎信窗口）在本阶段补 |
 | `tests/slow-inputs.test.mjs` | 本阶段补：恶意慢输入（超大 body、超长 header、慢速上传）不拖垮 handler |
 
+### 阶段 3 执行记录（开工后发现的偏离）
+
+| Task | 计划原样 | 实际落地 | 理由 |
+|---|---|---|---|
+| 3.7 | 未提"提前停止要用分离的 context" | `writeBack`：批次停止后的所有回写（释放回 pending、标记 sent 与计数、settle）都跑在 `context.WithoutCancel` 上 | **这是执行中发现的真 bug**：SIGTERM 取消 ctx 之后，释放与回写都带上已取消的 context，写入直接失败——已领取的行留在 `claimed`，下次启动变成 `unknown`，等于把一封**已寄出**的信记成"不确定"。正是 D14 要防的事，也被 3.7 的 SIGTERM 测试当场抓到 |
+| 3.7 | 未提 | ctx 取消导致的发送失败按"释放 + 重试"处理，不走 `SendErrorAction` 的失败分支 | 否则关停会把一条**从未发出**的消息标成 `failed`，污染报表 |
+| 收尾表 | `tests/slow-inputs.test.mjs` 归阶段 3，描述为"超大 body、超长 header、慢速上传" | 译进 `internal/core/content/slow_test.go` 与 `internal/core/render/slow_test.go` | 这份上游测试**完全**是清洗器与 Markdown 解析器的线性时间规格（`cleanRichHtml`/`htmlToText`/`firstImageUrl`），与 HTTP 无关；`renderIssueBody` 那一半属阶段 7 |
+| 收尾表 | 同上 | 断言"清洗后不含任何 `<`"而不是上游的"结果为空" | 上游的正则清洗器会把从第一个被切开的 `<script` 到最近 `</script>` 的整段丢掉（depth 8 时丢光）；bluemonday 是解析式的：畸形 `<scr` 当未知标签丢掉、script 元素的内容随之丢掉，剩下的是**纯文本** `alert(1)ipt&gt;…`。可执行性上等价（一个标签都开不出来），可见文本不同，已在测试注释里写明上游原值 |
+| 3.6 | "每页 200 且含 CSP nonce 一致" | 断言"CSP 与上游逐字节一致 + 页面里没有 `<script`" | 上游的 CSP 根本没有 `script-src`（`next.config.mjs` 的注释解释了原因），本移植的读者页也不含任何 JavaScript，没有 nonce 可授权 |
+| 3.5 | 未提 | keep 页是**一个按钮**，不是自动提交 | 上游用 React 的 `useEffect` 在浏览器里自动 `requestSubmit()`；本移植的 CSP 不含 `script-src`，页面不带 JS，所以由读者点。比自动提交更保守：扫描器只打开页面时什么都不会发生 |
+| 3.3 | 未提校验位置 | `ValidSubscribeURL` 在 **handler** 里查，注入的 `Subscriber` 只管发 GET | 与上游 `confirmSubscription` 一致；否则每个注入实现都要自己重复这条规则 |
+| 3.2 | 追踪的回写在响应之后（上游 `after()`） | 同步写在响应之前 | 一次本地 SQLite 语句（亚毫秒），同步换来测试确定性与"没有 goroutine 活过关停" |
+| 3.2 | `Plan.Firsts` 的 stat 我一开始按计数累加 | 改成上游那样的**集合**（`campaignInc[key] = 1`） | 硬退信同时报时间戳与状态，两者指向同一个计数器，累加会重复计一次。测试 `TestWebhookAppliesAHardBounce` 抓到 |
+| 3.2 | 未提 | `store.Event` 的字段与 `EventsFor` 读取 | 阶段 3 的 webhook 要写 events 表；读取供测试与阶段 4 的报告用 |
+
 ### 留给后续
 
 - `/api/v1/*`、`/mcp` 在归档域名上返回 404 已由 middleware 保证，但这两组路由本身是阶段 4、6。
