@@ -121,6 +121,8 @@ type Campaign struct {
 	TestSentAt    *time.Time
 	ArchiveSlug   string
 	ThumbnailURL  string
+	// ArchiveListed follows the upstream schema default of true: the store must write true on
+	// insert, because the Go zero value reads as "not listed" (upstream checks `=== false`).
 	ArchiveListed bool
 	ArchivePinned bool
 	WebViews      int
