@@ -13,6 +13,26 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
+// AppliedMigrations lists the versions this database has run, in order. It is what `db migrate`
+// reports: the file says which migrations it knows, and this says which of them this database has.
+func (db *DB) AppliedMigrations(ctx context.Context) ([]string, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		"SELECT version FROM schema_migrations ORDER BY version")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return nil, err
+		}
+		out = append(out, version)
+	}
+	return out, rows.Err()
+}
+
 // Migrate applies every migration that has not run yet, in filename order. Each one runs inside the
 // writer's transaction, so a migration is either fully applied or not recorded.
 func (db *DB) Migrate(ctx context.Context) error {
