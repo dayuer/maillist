@@ -135,6 +135,60 @@ func (s *testServer) seedNewsletter(t *testing.T) model.Newsletter {
 	return newsletter
 }
 
+// seedSubscribedContact is an active contact of the seeded newsletter.
+func (s *testServer) seedSubscribedContact(t *testing.T) model.Contact {
+	t.Helper()
+	newsletter := s.seedNewsletter(t)
+	contact := model.Contact{
+		ID: ids.New(), NewsletterID: newsletter.ID, Email: "reader@example.com",
+		Status: model.ContactActive, SubscribedAt: &s.now, CreatedAt: s.now,
+	}
+	if err := s.store.CreateContact(context.Background(), contact); err != nil {
+		t.Fatal(err)
+	}
+	return contact
+}
+
+// unsubscribeToken signs the footer link for a contact.
+func (s *testServer) unsubscribeToken(t *testing.T, contact model.Contact) string {
+	t.Helper()
+	token, err := s.signer.UnsubscribeToken(sign.Ref{ContactID: contact.ID, NewsletterID: contact.NewsletterID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+// post posts an empty body, as the RFC 8058 one-click endpoints expect.
+func (s *testServer) post(t *testing.T, path string) *http.Response {
+	t.Helper()
+	return s.request(t, http.MethodPost, path, "", nil)
+}
+
+// postForm posts a form to a path, as the pages' own forms do.
+func (s *testServer) postForm(t *testing.T, path string, form url.Values) *http.Response {
+	t.Helper()
+	return s.request(t, http.MethodPost, path, "", form)
+}
+
+// postFormFrom is postForm from a given client address, for the rate-limit tests.
+func (s *testServer) postFormFrom(t *testing.T, path string, form url.Values, ip string) *http.Response {
+	t.Helper()
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+	request := httptest.NewRequest(http.MethodPost, path, body)
+	request.Header.Set("User-Agent", "Mozilla/5.0 Chrome/141.0")
+	request.Header.Set("X-Forwarded-For", ip)
+	if form != nil {
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	return recorder.Result()
+}
+
 // seedMessage is a sent campaign message for an active contact, ready to be tracked.
 func (s *testServer) seedMessage(t *testing.T) model.Message {
 	t.Helper()
@@ -148,6 +202,8 @@ func (s *testServer) seedMessage(t *testing.T) model.Message {
 	}
 	campaign := model.NewCampaign(newsletter.ID, "Issue 12", s.now)
 	campaign.Status = model.CampaignSending
+	startedAt := s.now
+	campaign.StartedAt = &startedAt
 	if err := s.store.CreateCampaign(context.Background(), campaign); err != nil {
 		t.Fatal(err)
 	}

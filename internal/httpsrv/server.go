@@ -67,6 +67,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /c/{token}", s.handleClick)
 	mux.HandleFunc("HEAD /c/{token}", s.handleClickHead)
 	mux.HandleFunc("POST /api/webhooks/ses", s.handleSESWebhook)
+	mux.HandleFunc("GET /unsubscribe", s.handleUnsubscribePage)
+	mux.HandleFunc("POST /api/unsubscribe", s.handleUnsubscribe)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	return s.withSecurityHeaders(s.withArchiveHost(s.withRequestLog(mux)))
 }
