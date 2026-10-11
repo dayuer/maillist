@@ -58,3 +58,15 @@ func TestSendApprovalMustBeAutoOrManual(t *testing.T) {
 		t.Fatal("bad SEND_APPROVAL accepted")
 	}
 }
+
+// tests/sending.test.mjs "campaigns pause above the bounce or complaint limit once 100 are sent"
+// opens by asserting the upstream LIMITS values; they live here now.
+func TestSendingLimitsMatchUpstream(t *testing.T) {
+	c, err := Load(strong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Limits.BounceRate != 0.02 || c.Limits.ComplaintRate != 0.0008 {
+		t.Fatalf("limits = %+v", c.Limits)
+	}
+}
