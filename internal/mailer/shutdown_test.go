@@ -24,6 +24,67 @@ func claimedCount(t *testing.T, db *store.DB) (claimed, unknown, pending int) {
 	return claimed, unknown, pending
 }
 
+// 关停中的 ctx 交给 SendBatch 时是「停」，不是「失败」：不领任何消息，也不返回错。
+//
+// This is the contract that made TestGracefulShutdownLeavesNothingClaimed flake: Run's select picks
+// at random between a done context and a ready ticker, so a shutdown can reach SendBatch through the
+// ticker case. Returning an error there means a graceful stop is reported as a broken send.
+func TestSendBatchOnACancelledContextStopsCleanly(t *testing.T) {
+	f := newFixture(t, 4)
+	if _, err := f.engine.Queue(context.Background(), f.campaign.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := f.engine.SendBatch(ctx, nil)
+	if err != nil {
+		t.Fatalf("SendBatch on a cancelled context = %v, want no error", err)
+	}
+	if !result.Retry || result.Done() != 0 {
+		t.Fatalf("result = %+v, want Retry with nothing claimed", result)
+	}
+	claimed, unknown, pending := claimedCount(t, f.db)
+	if claimed != 0 || unknown != 0 || pending != 4 {
+		t.Fatalf("claimed = %d, unknown = %d, pending = %d, want 0/0/4", claimed, unknown, pending)
+	}
+	if f.fake.SentCount() != 0 {
+		t.Fatalf("sent = %d, want 0", f.fake.SentCount())
+	}
+}
+
+// 同一个关停场景跑多轮：Run 的 select 可能在 ctx 结束时选中 ticker，那就撞上上面那条契约。
+// 这是概率性的，所以跑若干轮；旧代码在第 0–1 轮就会翻车。
+func TestGracefulShutdownRepeatedly(t *testing.T) {
+	for round := 0; round < 15; round++ {
+		f := newFixture(t, 10)
+		ctx, cancel := context.WithCancel(context.Background())
+		if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		f.fake.OnSend = func(n int) {
+			if n == 3 {
+				cancel()
+			}
+		}
+		go func() { done <- f.engine.Run(ctx) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("round %d: Run = %v, want a clean stop", round, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("round %d: the engine did not stop", round)
+		}
+		f.fake.OnSend = nil
+		cancel()
+		if claimed, unknown, _ := claimedCount(t, f.db); claimed != 0 || unknown != 0 {
+			t.Fatalf("round %d: claimed = %d, unknown = %d, want 0/0", round, claimed, unknown)
+		}
+	}
+}
+
 // 取消 ctx 打断一个批次时，没轮到的已领取消息回到 pending——不是 unknown。
 func TestCancelledBatchReleasesClaimedMessages(t *testing.T) {
 	f := newFixture(t, 20)

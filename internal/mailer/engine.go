@@ -94,6 +94,14 @@ func (e *Engine) Close() { e.bucket.Close() }
 // is what Run uses; with ids it sends exactly those (the CLI's path).
 func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResult, error) {
 	result := BatchResult{}
+	// A cancelled context means "stop", never "failed": nothing is claimed, nothing is lost, and the
+	// caller is told to stop rather than handed an error it would report as a broken send. This is
+	// reachable even when the caller checks first — a select over a done context and a ready ticker
+	// may pick either — so the check has to live here too.
+	if ctx.Err() != nil {
+		result.Retry = true
+		return result, nil
+	}
 	if !e.cfg.SendingOn {
 		result.Retry = true
 		return result, errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
@@ -495,6 +503,12 @@ func (e *Engine) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+		}
+		// A select whose context is done and whose ticker also fired picks either one at random, so
+		// the ticker case can land us here after a shutdown has begun. Calling SendBatch would be
+		// harmless (it refuses a cancelled context) but pointless, so stop here.
+		if ctx.Err() != nil {
+			return nil
 		}
 		for {
 			result, err := e.SendBatch(ctx, nil)
