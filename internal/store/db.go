@@ -71,6 +71,12 @@ func (db *DB) Close() error {
 // Path is the file this DB was opened from.
 func (db *DB) Path() string { return db.path }
 
+// Ping reads the database once, for the container healthcheck.
+func (db *DB) Ping(ctx context.Context) error {
+	var one int
+	return db.sql.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+}
+
 // Rows is the read side of the connection pool, for a package that owns a table of its own
 // (internal/jobs) and must still read with the same settings the rest of the store uses.
 func (db *DB) Rows(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
