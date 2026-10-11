@@ -93,3 +93,43 @@ func parseTime(value string) (time.Time, error) {
 	}
 	return parsed, nil
 }
+
+// parseTimePtr reads back a nullable column.
+func parseTimePtr(value sql.NullString) (*time.Time, error) {
+	if !value.Valid || value.String == "" {
+		return nil, nil
+	}
+	parsed, err := parseTime(value.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+// floatPtr reads back a nullable REAL column.
+func floatPtr(value sql.NullFloat64) *float64 {
+	if !value.Valid {
+		return nil
+	}
+	return &value.Float64
+}
+
+// boolInt is how the schema stores booleans.
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// requireOneRow turns "no row matched" into ErrNotFound for an UPDATE or DELETE.
+func requireOneRow(result sql.Result, kind, id string) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%s %s: %w", kind, id, ErrNotFound)
+	}
+	return nil
+}
