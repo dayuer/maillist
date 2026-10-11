@@ -77,17 +77,28 @@ func closerAhead(reader text.Reader, pc parser.Context) bool {
 	}
 }
 
+// advancePastLine consumes the marker's line but not its newline: the block loop advances past that
+// itself. A closing marker on the last line of the document has no newline to leave, and consuming
+// one byte less there left the final ":" behind — it rendered as its own paragraph (the phase 1-3
+// audit's FI-A1).
+func advancePastLine(reader text.Reader, line []byte) {
+	advance := len(line)
+	if advance > 0 && line[advance-1] == '\n' {
+		advance--
+	}
+	reader.Advance(advance)
+}
+
 type calloutParser struct{}
 
 func (p *calloutParser) Trigger() []byte { return []byte(":") }
 
 func (p *calloutParser) Open(parent ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
-	line, segment := reader.PeekLine()
+	line, _ := reader.PeekLine()
 	if !calloutOpenPattern.Match(line) || !closerAhead(reader, pc) {
 		return nil, parser.NoChildren
 	}
-	// Consume the line but not its newline: the block loop advances past that itself.
-	reader.Advance(segment.Len() - 1)
+	advancePastLine(reader, line)
 	return &calloutNode{}, parser.NoChildren
 }
 
@@ -97,7 +108,7 @@ func (p *calloutParser) Continue(node ast.Node, reader text.Reader, pc parser.Co
 		return parser.Close
 	}
 	if calloutClosePattern.Match(line) {
-		reader.Advance(segment.Len() - 1)
+		advancePastLine(reader, line)
 		return parser.Close
 	}
 	return parser.Continue | parser.HasChildren
