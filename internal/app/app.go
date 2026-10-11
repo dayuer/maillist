@@ -28,7 +28,10 @@ type App struct {
 	Sender mailer.Sender
 	Mailer *mailer.Engine
 	HTTP   *httpsrv.Server
-	Log    *slog.Logger
+	// Identities answers "which sending domains does SES consider verified?" — the pre-send check
+	// and `mailcheap domains` both read it.
+	Identities mailer.IdentityReader
+	Log        *slog.Logger
 }
 
 // New opens the database (creating and migrating it if needed) and builds the adapters on top.
@@ -50,6 +53,11 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		_ = db.Close()
 		return nil, err
 	}
+	identities, err := newIdentities(ctx, cfg)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	engine := mailer.NewEngine(db, sender, signer, mailer.Config{
 		AppURL:         cfg.AppURL,
 		SendingOn:      cfg.SendingOn,
@@ -60,13 +68,14 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	handler := events.New(db, log)
 
 	return &App{
-		Config: cfg,
-		Store:  db,
-		Signer: signer,
-		Events: handler,
-		Jobs:   jobs.New(db),
-		Sender: sender,
-		Mailer: engine,
+		Config:     cfg,
+		Store:      db,
+		Signer:     signer,
+		Events:     handler,
+		Jobs:       jobs.New(db),
+		Sender:     sender,
+		Mailer:     engine,
+		Identities: identities,
 		HTTP: httpsrv.New(cfg, db, signer, handler, engine,
 			sns.NewVerifier(httpsrv.CertificateFetcher(nil)), log),
 		Log: log,
@@ -84,6 +93,20 @@ func newSender(ctx context.Context, cfg config.Config) (mailer.Sender, error) {
 		return nil, fmt.Errorf("SES client: %w", err)
 	}
 	return sender, nil
+}
+
+// newIdentities mirrors newSender: asking for the fake sender means there are no AWS credentials, so
+// the identity list comes from MAILCHEAP_FAKE_SES_DOMAINS and the end-to-end script can drive both
+// the verified and the unverified branch.
+func newIdentities(ctx context.Context, cfg config.Config) (mailer.IdentityReader, error) {
+	if cfg.FakeSESLog != "" {
+		return mailer.StaticIdentity{Domains: cfg.FakeSESDomains}, nil
+	}
+	identities, err := mailer.NewSESIdentity(ctx, cfg.SESRegion)
+	if err != nil {
+		return nil, fmt.Errorf("SES identity client: %w", err)
+	}
+	return identities, nil
 }
 
 // Close releases the database and the send rate limiter.
