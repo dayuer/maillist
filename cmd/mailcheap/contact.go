@@ -32,7 +32,7 @@ func newContactCmd() *cobra.Command {
 		panic(err)
 	}
 	cmd.AddCommand(add, newContactListCmd(), newContactShowCmd(),
-		newContactUpdateCmd(), newContactExportCmd())
+		newContactUpdateCmd(), newContactImportCmd(), newContactExportCmd())
 	return cmd
 }
 
