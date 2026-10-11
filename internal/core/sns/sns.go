@@ -107,6 +107,12 @@ func SigningString(m Message) (string, bool) {
 type CertFetcher func(ctx context.Context, url string) ([]byte, error)
 
 // Verifier caches certificates per URL and retries failed downloads.
+//
+// A failed download is not remembered: the retry is upstream's behaviour and its test asserts it
+// ("certificates are cached per URL and failed downloads are retried"). The cost of that choice —
+// the verifier runs before the signature is checked, so an unauthenticated caller decides how many
+// outbound requests the process makes — is bounded at the webhook instead, by a per-source rate
+// limit (the phase 1-3 audit's S-I1).
 type Verifier struct {
 	fetch CertFetcher
 	mu    sync.Mutex
@@ -182,7 +188,10 @@ func (v *Verifier) certificate(ctx context.Context, certURL string) (crypto.Publ
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if len(v.cache) >= maxCachedCertificates {
+		// Both maps are keyed by certificate URL, so they are bounded together: the locks map grew
+		// with every URL ever seen, even as the cache was emptied.
 		v.cache = map[string]crypto.PublicKey{}
+		v.locks = map[string]*sync.Mutex{}
 	}
 	v.cache[certURL] = key
 	return key, nil

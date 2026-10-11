@@ -2,6 +2,7 @@ package httpsrv
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -98,30 +99,70 @@ func TestRateLimitedResponse(t *testing.T) {
 	}
 }
 
-// upstream getClientIp: the first hop in X-Forwarded-For, else X-Real-IP, else "unknown".
+// upstream getClientIp, with the trust the audit's S-I2 requires: the forwarded header is the
+// client only when the peer is a configured proxy.
 func TestClientIP(t *testing.T) {
+	proxy, err := ParseTrustedProxies([]string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
-		forwarded, realIP, want string
+		name            string
+		peer, forwarded string
+		realIP          string
+		trusted         []*net.IPNet
+		want            string
 	}{
-		{"203.0.113.9", "", "203.0.113.9"},
-		{"203.0.113.9, 70.41.3.18", "", "203.0.113.9"},
-		{"203.0.113.9,70.41.3.18", "", "203.0.113.9"},
-		{"", "198.51.100.4", "198.51.100.4"},
-		{"", "", "unknown"},
+		{"a trusted proxy's first hop", "10.0.0.5:443", "203.0.113.9", "", proxy, "203.0.113.9"},
+		{"a chain through the proxy", "10.0.0.5:443", "203.0.113.9, 70.41.3.18", "", proxy, "203.0.113.9"},
+		{"no space after the comma", "10.0.0.5:443", "203.0.113.9,70.41.3.18", "", proxy, "203.0.113.9"},
+		{"X-Real-IP when the proxy sends it", "10.0.0.5:443", "", "198.51.100.4", proxy, "198.51.100.4"},
+		{"nothing forwarded at all", "10.0.0.5:443", "", "", proxy, "10.0.0.5"},
+		// The header is a header: from anywhere but a proxy it is ignored.
+		{"a forwarded header from a stranger", "203.0.113.9:5000", "10.0.0.1", "", proxy, "203.0.113.9"},
+		{"a forwarded header with no proxy configured", "203.0.113.9:5000", "10.0.0.1", "", nil, "203.0.113.9"},
+		{"a forwarded header that is not an address", "10.0.0.5:443", "evil", "", proxy, "10.0.0.5"},
+		// A peer that cannot be read shares one bucket rather than escaping the limit.
+		{"an unreadable peer", "not-an-address", "", "", proxy, "unknown"},
+		{"an IPv6 literal", "[2001:db8::1]:443", "", "", nil, "2001:db8::1"},
 	} {
-		request, err := http.NewRequest(http.MethodGet, "https://example.com/", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if tc.forwarded != "" {
-			request.Header.Set("X-Forwarded-For", tc.forwarded)
-		}
-		if tc.realIP != "" {
-			request.Header.Set("X-Real-IP", tc.realIP)
-		}
-		if got := ClientIP(request); got != tc.want {
-			t.Errorf("ClientIP(forwarded=%q, real=%q) = %q, want %q",
-				tc.forwarded, tc.realIP, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			request, err := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.RemoteAddr = tc.peer
+			if tc.forwarded != "" {
+				request.Header.Set("X-Forwarded-For", tc.forwarded)
+			}
+			if tc.realIP != "" {
+				request.Header.Set("X-Real-IP", tc.realIP)
+			}
+			if got := ClientIP(request, tc.trusted); got != tc.want {
+				t.Errorf("ClientIP(peer=%q, forwarded=%q, real=%q) = %q, want %q",
+					tc.peer, tc.forwarded, tc.realIP, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseTrustedProxies(t *testing.T) {
+	nets, err := ParseTrustedProxies([]string{"10.0.0.0/8", " 192.168.1.5 ", "", "2001:db8::/32"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nets) != 3 {
+		t.Fatalf("got %d networks, want 3", len(nets))
+	}
+	// A bare address is a network of one, so a proxy configured as 192.168.1.5 is believed.
+	if !nets[1].Contains(net.ParseIP("192.168.1.5")) || nets[1].Contains(net.ParseIP("192.168.1.6")) {
+		t.Fatal("a bare address must be a single-host network")
+	}
+	// A typo is an error rather than a silently narrower trust set.
+	if _, err := ParseTrustedProxies([]string{"10.0.0.0/99"}); err == nil {
+		t.Error("a bad network was accepted")
+	}
+	if _, err := ParseTrustedProxies([]string{"not-an-address"}); err == nil {
+		t.Error("a bad address was accepted")
 	}
 }

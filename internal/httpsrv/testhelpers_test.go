@@ -109,7 +109,6 @@ func (s *testServer) request(t *testing.T, method, path, host string, form url.V
 	// so the default has to look like a person.
 	request.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "+
 		"AppleWebKit/537.36 Chrome/141.0 Safari/537.36")
-	request.Header.Set("X-Forwarded-For", "203.0.113.7")
 	if form != nil {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -181,7 +180,9 @@ func (s *testServer) postForm(t *testing.T, path string, form url.Values) *http.
 	return s.request(t, http.MethodPost, path, "", form)
 }
 
-// postFormFrom is postForm from a given client address, for the rate-limit tests.
+// postFormFrom is postForm from a given client address, for the rate-limit tests. It sets the peer
+// address rather than X-Forwarded-For: the header is only believed when the process is configured
+// behind a proxy (see ClientIP), so a test that wants two visitors must give them two peers.
 func (s *testServer) postFormFrom(t *testing.T, path string, form url.Values, ip string) *http.Response {
 	t.Helper()
 	var body io.Reader
@@ -190,7 +191,7 @@ func (s *testServer) postFormFrom(t *testing.T, path string, form url.Values, ip
 	}
 	request := httptest.NewRequest(http.MethodPost, path, body)
 	request.Header.Set("User-Agent", "Mozilla/5.0 Chrome/141.0")
-	request.Header.Set("X-Forwarded-For", ip)
+	request.RemoteAddr = ip + ":50000"
 	if form != nil {
 		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}

@@ -5,6 +5,7 @@ package httpsrv
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -32,8 +33,11 @@ type Server struct {
 	// Subscribe confirms an SNS subscription; it is a field so tests can stand in for SNS.
 	Subscribe Subscriber
 	Log       *slog.Logger
-	now       func() time.Time
-	handler   http.Handler
+	// trustedProxies are the networks whose X-Forwarded-For is believed. Empty means "believe
+	// nobody", which is the safe default.
+	trustedProxies []*net.IPNet
+	now            func() time.Time
+	handler        http.Handler
 }
 
 // New builds the router over the reader surface.
@@ -42,13 +46,28 @@ func New(cfg config.Config, db *store.DB, signer *sign.Signer, handler *events.H
 	if log == nil {
 		log = slog.Default()
 	}
+	// A mistyped proxy range is a configuration error worth failing on: it silently stops the
+	// forwarded header being trusted, so every visitor shares one bucket.
+	trusted, err := ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		if log == nil {
+			log = slog.Default()
+		}
+		log.Error("ignoring TRUSTED_PROXIES: " + err.Error())
+	}
 	server := &Server{
 		Config: cfg, Store: db, Signer: signer, Events: handler, Mailer: engine,
 		Limiter: NewMemoryLimiter(), Verifier: verifier, Subscribe: HTTPSubscriber(nil),
-		Log: log, now: time.Now,
+		Log: log, now: time.Now, trustedProxies: trusted,
 	}
 	server.handler = server.routes()
 	return server
+}
+
+// clientIP is the address a per-visitor limit counts against, honouring the trusted-proxy
+// configuration (see ClientIP).
+func (s *Server) clientIP(r *http.Request) string {
+	return ClientIP(r, s.trustedProxies)
 }
 
 // clock is the current time, injectable so a test can pin the scanner window.

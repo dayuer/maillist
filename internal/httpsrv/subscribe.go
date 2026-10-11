@@ -63,7 +63,7 @@ func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 			"That address doesn't look like one we can send to."))
 		return
 	}
-	if s.Limiter.Limited(subscribeIPLimit, ClientIP(r), s.clock()) {
+	if s.Limiter.Limited(subscribeIPLimit, s.clientIP(r), s.clock()) {
 		renderPage(w, http.StatusTooManyRequests, "subscribe.html", backToForm(
 			"Too many signups", "Too many signups from your network. Try again in a few minutes."))
 		return

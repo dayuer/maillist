@@ -188,6 +188,8 @@ func TestServeExitsWhenAComponentFails(t *testing.T) {
 		"APP_URL=https://mail.example.com",
 		"SENDING_ENABLED=true",
 		"MAILCHEAP_DB="+filepath.Join(dir, "mailcheap.db"),
+		// The fake sender: nothing in this repository talks to AWS, tests included.
+		"MAILCHEAP_FAKE_SES_LOG="+filepath.Join(dir, "sent.jsonl"),
 	)
 	var stderr bytes.Buffer
 	child.Stdout = io.Discard
