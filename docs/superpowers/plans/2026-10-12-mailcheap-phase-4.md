@@ -1592,3 +1592,8 @@ v1 的每次写也记审计：`actor = {api, "api:"+credential.Name}`，action `
 | 7 | `mailer.RunJob` 的 scheduled 守卫 | 计划里的「提前唤醒再等一次」在进程内调度器下是死代码（run_at 到点才领），改成上游真正做的事：状态或时间对不上就跳过 |
 | 8 | `checks.Input.Audience` 曾经是死字段 | 现在 `campaign check` 打印它 |
 | 9 | 审计的 C1/C2/C3 都是阶段 2/3 的真 bug | 已在阶段 4 修掉，见 §5；阶段 3 的「SIGTERM 后无 claimed」测试此前是靠运气通过的（F1） |
+| 10 | `internal/core/archive` 本阶段先建 `hosts.go` | v1 campaigns 的 `url` 字段要 `getArchiveUrls`；其余（SEO、内容、作者页）归阶段 7 |
+| 11 | v1 API 读**原始字段**而不是 typed struct | 上游校验的是类型（`typeof source !== "string"`）并给出专属文案；反序列化到 string 字段会让整个 body 失败、答成 "Send a JSON object"，同一个错误两种回答 |
+| 12 | 缩略图（`content.FirstImageOf`）也接到了 CLI 的 `campaign create` | 上游在建草稿时就记 `firstImageUrl`，阶段 7 的归档卡片要读它；阶段 2 的 CLI 漏了 |
+| 13 | `approve` 的语义 | `SEND_APPROVAL=manual` 时 send/schedule 落 `awaiting_approval` 的 job；`Queue.Lease` 不领这种状态，`approve` 把它改回 `pending` 并跑一次 wake |
+| 14 | 真实 AWS | 本阶段所有 SES/SNS 路径只经 fake；`NewSES`/`NewSESIdentity` 仅在未配 `MAILCHEAP_FAKE_SES_LOG` 时构造，`domains` 也从 `StaticIdentity` 读 |
