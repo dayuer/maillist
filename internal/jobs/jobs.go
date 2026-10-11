@@ -29,10 +29,11 @@ const (
 // without calling Complete or Fail leaves the job to be picked up again after this.
 const LeaseDuration = 5 * time.Minute
 
-// Job kinds the queue carries today. Later phases add send_welcome and send_alert.
+// Job kinds the queue carries today. Later phases add send_alert.
 const (
 	KindSendCampaign = "send_campaign"
 	KindSendBatch    = "send_batch"
+	KindSendWelcome  = "send_welcome"
 	KindImport       = "import_contacts"
 )
 
