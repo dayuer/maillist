@@ -1513,7 +1513,60 @@ v1 的每次写也记审计：`actor = {api, "api:"+credential.Name}`，action `
 5. §0.3 的两条「计划与上游不符」单独一个 docs 提交（同时改主计划 §5.2/§5.3 的措辞）；
 6. 推送 `phase-4-cli`、开 PR 到 main，描述写明完成标志证据、翻译/延后的上游测试、偏离。
 
-## 4. 上游测试的翻译与延后（本阶段）
+## 5. 阶段 1–3 审计（PR #7）的处置
+
+`docs/superpowers/audits/2026-10-12-phase-1-3-audit.md` 的每条，落点如下。**每条 P0/P1 一个 fix 提交，
+先写复现测试再修**；P2 与 Minor 里这一阶段能顺手修的修了，其余标注归属阶段。
+
+| 审计条目 | 处置 | 提交 |
+|---|---|---|
+| **C1** 在途 SES 被释放回 pending → 重发 | SES 调用改 `context.WithoutCancel(ctx)` + 30 s 超时；关停只停止领取。`Fake` 加 `WithContextCancellation`（先记录、再报 ctx 错误），`TestAnInFlightSendIsNeverReleasedToPending` 断言 SES 收下的封数与库里 `sent` 相等 | `05f9b11` |
+| **C2** settle 只数 pending → 丢信 | `CountUnfinishedCampaignMessages` 数 `pending + claimed`；并立下「serve 在跑时 CLI 不自己发」：serve 每 5 s 打心跳（迁移 0002），CLI 发送前查心跳，命中则只入队 | `283325f` |
+| **C3** paused 重发受众翻倍 | paused 分支跳过选人与预留，只重数已有消息；recipients 已是 `$set` | `5a47704` |
+| **F1** SIGTERM 测试 flaky | `Run` 的 select 在 ctx 结束与 ticker 同时就绪时随机选中 ticker，带已取消的 ctx 进 `SendBatch` → 裸 `context.Canceled`。现在 `SendBatch` 对已取消 ctx 回 Retry 且不领消息，`Run` 在 ticker 分支后先查 ctx | `2af6a01` |
+| **S-I1** SNS 未认证放大 + locks 无界 | webhook 加每来源限流（120/分钟）；负缓存**不采用**（上游测试钉住「失败会重试」），落点在限流；`locks` 随 `cache` 一起清空 | `c63e21c` |
+| **S-I2** XFF 可伪造 | 只有直连 peer 在 `TRUSTED_PROXIES` 网段内才读转发头，默认不信；裸地址按单机网段，写错是错误而不是静默收紧。测试助手改成设 peer 而不是设头 | `c63e21c` |
+| **ST-I1** 预算泄漏 | `ReserveAndInsert` 把预留与首个分块放进同一事务，并按实际新写入的行数把预留降下来（重试对账）；`Refund` 兜住「预留了但没写成」 | `ae0e142` |
+| **ST-I2** 引擎静默死亡 | 三个组件共用一个 ctx，任一失败即整体关停（心跳也改看这个 ctx —— 那条测试当场抓出我自己留的挂起） | `8262bd7` |
+| **ST-I3** 令牌桶按进程各一份 | 随 C2 的「禁止双发送者」不变量解决，无独立提交 | — |
+| **FI-A2** 两趟替换 + 点段不退订 | 改成上游的单趟 alternation（RE2 无反向引用，改为在回调里校验引号配平）；退订路径先 `path.Clean` 去点段再判定 | `36e0606` |
+| **FI-A3** 点段退订点击被计为互动 | render 与 sesmap 共用 `validate.UnsubscribePath`，两边必须一致 | `36e0606` |
+| **FI-A1** 结尾 `:::` 漏一个冒号 | `advancePastLine` 只在真有换行时少推进一字节 | `893f02d` |
+| **FI-A4** subject-length 按 rune | 改 `len(utf16.Encode([]rune(s)))` | `e410ae4` |
+| **FI-B** 4 处分歧未记录 | 全部加注释并钉测试：dropped 元素保文本、空盒、点段/百分号编码退订路径、订阅日只认 ISO 与纯日期 | `7c2b0f1` |
+| **ST-I4** `RecoverClaimed` 无进程归属 | 靠 C2 不变量解决（CLI 不再与 serve 并发发送）；**不**加 5 分钟年龄过滤——那会让崩溃留下的 claimed 永远卡住 | — |
+| **ST-I5** jobs 退避缺 10 分钟档 | 补 10 分钟档，测试改成读列表长度 | `54aa4d4` |
+| **ST-I6** 签名信上限非原子 | `InsertSignupMessage` 把上限判定写进 INSERT 语句本身；并发 12 个抢 5 个名额的测试断言恰好 5 行 | `a900a90` |
+| **ST-I7** 中途暂停仍报成功 | `sendOutcome` 在排空后回读 campaign，paused 时报「已发 N/M，campaign resume 继续」并以非零退出 | `18f5bcb` |
+| **S-M3** `sign.New` 不校验长度、`ContactToken` 收裸字符串 | `New` 强制 ≥32；新增 `sign.Kind` 类型，四类链接的 info 标签变成常量（签名含义不变） | `c30f6d8` |
+| **F2** `IssueWebURL` 缺归档域名 | 阶段 7 处理 `ARCHIVE_HOSTS` 时一并接上（4.8 的 v1 API 用的是 `core/archive` 的 URL 构造，不是它） | 阶段 7 |
+| **F3** `--dry-run`/`--config`/`-v` 无人认领 | 本阶段实现（见 Task 4.9） | `d0fa9e4` |
+| Minor：未来时间戳的 contact token | `VerifyContactToken` 拒绝 `issued.After(now)` | `2a1444f` |
+| Minor：CLI from-email 不规范化 | `newsletter create/update` 走 `validate.NormalizeEmail` | `781aec9` |
+| Minor：`Input.Audience` 死字段 | `campaign check` 打印受众（人读的那一行），JSON 里也给 | `781aec9` |
+| Minor：SNS 确认跟随重定向 | `HTTPSubscriber` 拒绝重定向 | `d96722f` |
+| Minor：限流器注释称 LRU、实为随机淘汰 | 注释改成实话（Go map 无序；限流器要的是有界，不是精确 LRU） | `d96722f` |
+| Minor：`%!w(<nil>)` | **未定位**：审计的 Minor 池没给位置，全仓 `%w` 的可达参数都非 nil。留给阶段 5 的部署排查（`grep` 输出即可发现） | 阶段 5 |
+| Minor：`UpdateCampaign` 全列写回 | 记录：`campaign update` 是读-改-写整行，与并发的事件回写理论上能互相覆盖；事件只写自己那一列，实践中不冲突。阶段 6 的 API 写路径要沿用同一警觉 | 阶段 6 |
+| Minor：`SEND_RATE` 静默回退 | 记录：`intIn` 越界即回退默认值，config 测试已钉住这个行为（与上游 `Number.parseInt` 一致） | 记录 |
+| Minor：suppression 大小写 | 已是 `COLLATE NOCASE` 主键，无需改 | — |
+| 真实 AWS 行为 | 本阶段所有 SES/SNS 路径只经 fake 验证（用户 2026-10-12 指示不对接 AWS）：`NewSES`/`NewSESIdentity` 只在未配 `MAILCHEAP_FAKE_SES_LOG` 时才构造，测试全部走 fake | — |
+
+### Task 4.9：全局 flag（F3）
+
+设计 §8 列了 `--json`、`--yes`、`--dry-run`、`--config`、`--tz`、`-v`。前两个阶段 2 已有；`--tz` 在
+`stats` 上；本 Task 补另外三个：
+
+- `--config <file>`：`config.LoadFile` 读 `KEY=VALUE`（空行/`#` 注释/`export ` 前缀/值两侧引号），
+  **环境变量优先于文件**（一条命令行的临时覆盖不该逼人改部署文件），文件内后出现的同名键优先。
+  坏行报「文件:行号」，不静默忽略。
+- `-v/--verbose`：日志级别 warn → info。
+- `--dry-run`：只在「这会做什么」是个真问题的命令上生效——`campaign send --dry-run` 报清单、受众与
+  这一步会写多少封，**不写任何东西**（不建消息、不改状态、不占预算）；`contact import --dry-run` 阶段
+  4.2 已有。**偏离设计**：「全局」`--dry-run` 对其余写命令没有意义（`stats --dry-run`？），所以它是
+  按命令给的 flag，不是全局 flag——记在执行记录里，不假装一个对所有命令都成立的开关。
+
+## 6. 上游测试的翻译与延后（本阶段）
 
 | 上游测试 | 本阶段 |
 |---|---|
@@ -1524,6 +1577,18 @@ v1 的每次写也记审计：`actor = {api, "api:"+credential.Name}`，action `
 | `tests/cleanup.test.mjs` / `last-chance.test.mjs` | 阶段 7 |
 | v1 API、`upload`、`db`、`audit`、`approve` 的测试 | 上游没有对应测试文件（dashboard 的路由测试不存在），全部是本计划新写的 `httptest` / `testscript` |
 
-## 5. 阶段 4 执行记录
+## 7. 阶段 4 执行记录
 
-（执行时逐条追加：计划与上游不符、计划做不到、发现的上游行为、被砍掉的东西。）
+执行时逐条追加：计划与上游不符、计划做不到、发现的上游行为、被砍掉的东西。
+
+| # | 事项 | 处置 |
+|---|---|---|
+| 1 | **§0.3 的时区分桶**（计划说用 `strftime`，SQLite 无 IANA 时区） | 能进 SQL 的聚合进 SQL，按日/按小时的行取回 Go 用 `*time.Location` 分桶；见 §0.3 与 `core/stats` |
+| 2 | **CSV 导入不入 job**（计划的 §5.2「优先入 job」在容器里拿不到操作者的文件） | CLI 直接分块写，靠 WAL + busy_timeout + 抖动重试；`import_contacts` job 留给阶段 6 的 MCP（行内数据） |
+| 3 | `contact export` 加了 `--out` | testscript 不能重定向 stdout，而导出/导入往返值得测 |
+| 4 | `updated` 计数语义 | `ApplyImportRows` 的 `updated` 是「刷新了已有联系人」，不是「改了状态」——`Merge.Write.UpdateID` 在库侧其实没被用到（状态用 `NewStatus`，刷新是无条件的）。测试注释写明 |
+| 5 | SNS 负缓存**不做** | 上游测试钉住「失败会重试」，改成每来源限流；理由写在 `core/sns` 与审计表 |
+| 6 | `--dry-run` 不设成全局 flag | 见 Task 4.9 的偏离说明 |
+| 7 | `mailer.RunJob` 的 scheduled 守卫 | 计划里的「提前唤醒再等一次」在进程内调度器下是死代码（run_at 到点才领），改成上游真正做的事：状态或时间对不上就跳过 |
+| 8 | `checks.Input.Audience` 曾经是死字段 | 现在 `campaign check` 打印它 |
+| 9 | 审计的 C1/C2/C3 都是阶段 2/3 的真 bug | 已在阶段 4 修掉，见 §5；阶段 3 的「SIGTERM 后无 claimed」测试此前是靠运气通过的（F1） |
