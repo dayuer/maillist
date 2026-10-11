@@ -26,6 +26,9 @@ type Fake struct {
 	sent     []SentEmail
 	failures map[string]APIError
 	logPath  string
+	// OnSend, when set, is called with the count of sends so far as each send arrives. It is what
+	// lets a test cancel a context mid-batch.
+	OnSend func(sent int)
 }
 
 // FakeOption configures a Fake.
@@ -76,6 +79,13 @@ func (f *Fake) SentCount() int {
 
 // Send records the email, unless that address was told to fail.
 func (f *Fake) Send(_ context.Context, email rules.RecipientEmail, tags map[string]string) (string, error) {
+	f.mu.Lock()
+	onSend, seen := f.OnSend, len(f.sent)
+	f.mu.Unlock()
+	if onSend != nil {
+		onSend(seen)
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if failure, ok := f.failures[email.To]; ok {

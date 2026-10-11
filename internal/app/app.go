@@ -1,5 +1,5 @@
-// Package app wires config, store, signer, jobs and the mailer into one value. The CLI and, from
-// phase 3, the HTTP server both take an App and nothing else.
+// Package app wires config, store, signer, jobs, the mailer and the HTTP server into one value. The
+// CLI and the reader surface both take an App and nothing else.
 package app
 
 import (
@@ -10,6 +10,9 @@ import (
 
 	"mailcheap/internal/config"
 	"mailcheap/internal/core/sign"
+	"mailcheap/internal/core/sns"
+	"mailcheap/internal/events"
+	"mailcheap/internal/httpsrv"
 	"mailcheap/internal/jobs"
 	"mailcheap/internal/mailer"
 	"mailcheap/internal/store"
@@ -20,9 +23,11 @@ type App struct {
 	Config config.Config
 	Store  *store.DB
 	Signer *sign.Signer
+	Events *events.Handler
 	Jobs   *jobs.Queue
 	Sender mailer.Sender
 	Mailer *mailer.Engine
+	HTTP   *httpsrv.Server
 	Log    *slog.Logger
 }
 
@@ -52,14 +57,19 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Limits:         cfg.Limits,
 		PollInterval:   250 * time.Millisecond,
 	}, log)
+	handler := events.New(db, log)
+
 	return &App{
 		Config: cfg,
 		Store:  db,
 		Signer: signer,
+		Events: handler,
 		Jobs:   jobs.New(db),
 		Sender: sender,
 		Mailer: engine,
-		Log:    log,
+		HTTP: httpsrv.New(cfg, db, signer, handler, engine,
+			sns.NewVerifier(httpsrv.CertificateFetcher(nil)), log),
+		Log: log,
 	}, nil
 }
 

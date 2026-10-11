@@ -2,6 +2,7 @@ package mailer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,8 +15,12 @@ import (
 	"mailcheap/internal/core/rules"
 	"mailcheap/internal/core/sign"
 	"mailcheap/internal/core/validate"
+	"mailcheap/internal/jobs"
 	"mailcheap/internal/store"
 )
+
+// releaseTimeout bounds the bookkeeping a stopped batch still owes the database.
+const releaseTimeout = 10 * time.Second
 
 // Config is what the engine needs from internal/config.
 type Config struct {
@@ -177,6 +182,13 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 
 		delivery, err := e.deliver(ctx, message, loaded, nil)
 		if err != nil {
+			// A cancelled context means we are stopping, not that the message is bad: it never
+			// reached SES, so it goes back to the queue instead of being marked failed.
+			if ctx.Err() != nil {
+				e.releaseAll(ctx, messages[i:])
+				result.Retry = true
+				return result, nil
+			}
 			outcome, stop := e.handleSendError(ctx, message, loaded, err)
 			result.Failed += outcome.failed
 			result.Retry = result.Retry || outcome.retry
@@ -203,22 +215,44 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		consecutiveFailures = 0
 	}
 
+	// Settling is the last bookkeeping of a batch that may have just been cancelled, so it runs on
+	// the same detached context as the other write-backs.
 	for campaignID := range campaigns {
-		if err := e.settle(ctx, campaignID); err != nil {
+		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+			return e.settle(writeCtx, campaignID)
+		}); err != nil {
 			return result, err
 		}
 	}
 	return result, nil
 }
 
-// releaseAll puts claimed messages the batch never reached back in the queue. A failure here is
-// logged and not fatal: the rows stay claimed until a restart recovers them as unknown.
+// writeBack runs the bookkeeping a completed SES call owes the database.
+//
+// It runs on a context detached from the batch's, because a stop is the usual reason to be here:
+// the caller's context was just cancelled (SIGTERM), and a write that failed would leave a message
+// that SES accepted looking unclaimed. The next start would call it unknown — a sent email losing
+// its record, which is exactly what D14 exists to prevent (design §3.1).
+func (e *Engine) writeBack(ctx context.Context, write func(context.Context) error) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	return write(writeCtx)
+}
+
+// releaseAll puts claimed messages the batch never reached back in the queue, on a detached context
+// for the same reason: a release that failed would turn them into unknown on the next start.
 func (e *Engine) releaseAll(ctx context.Context, messages []model.Message) {
-	for _, message := range messages {
-		if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
-			e.log.Error("release", "message", message.ID, "error", err)
-		}
+	if len(messages) == 0 {
+		return
 	}
+	_ = e.writeBack(ctx, func(writeCtx context.Context) error {
+		for _, message := range messages {
+			if err := e.store.ReleaseMessage(writeCtx, message.ID); err != nil {
+				e.log.Error("release", "message", message.ID, "error", err)
+			}
+		}
+		return nil
+	})
 }
 
 // errorOutcome is what one failed send asks for: whether to stop the batch, and how to count it.
@@ -361,22 +395,24 @@ func (e *Engine) contentFor(message model.Message, loaded store.MessageContext,
 // recordSent writes back a message SES accepted, and moves the counters that follow from it.
 func (e *Engine) recordSent(ctx context.Context, message model.Message, loaded store.MessageContext,
 	sent delivery) error {
-	if err := e.store.MarkMessageSent(ctx, message.ID, sent.sesMessageID, sent.sentAt); err != nil {
-		return err
-	}
-	if loaded.Campaign != nil {
-		if err := e.addSentStats(ctx, message, loaded.Campaign.ID); err != nil {
+	return e.writeBack(ctx, func(writeCtx context.Context) error {
+		if err := e.store.MarkMessageSent(writeCtx, message.ID, sent.sesMessageID, sent.sentAt); err != nil {
 			return err
 		}
-	}
-	// The sentinel test contact is not a real contact, so nothing is recorded for it. This is what
-	// keeps a test send out of the campaign report (design §6.2).
-	if message.ContactID != "" && message.ContactID != rules.TestContactID {
-		if err := e.store.RecordContactSend(ctx, message.ContactID, sent.sentAt, message.Kind); err != nil {
-			return err
+		if loaded.Campaign != nil {
+			if err := e.addSentStats(writeCtx, message, loaded.Campaign.ID); err != nil {
+				return err
+			}
 		}
-	}
-	return nil
+		// The sentinel test contact is not a real contact, so nothing is recorded for it. This is
+		// what keeps a test send out of the campaign report (design §6.2).
+		if message.ContactID != "" && message.ContactID != rules.TestContactID {
+			if err := e.store.RecordContactSend(writeCtx, message.ContactID, sent.sentAt, message.Kind); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (e *Engine) addSentStats(ctx context.Context, message model.Message, campaignID string) error {
@@ -685,6 +721,51 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 		return TestResult{}, err
 	}
 	return TestResult{MessageID: message.ID, SESMessageID: sent.sesMessageID, SentAt: sent.sentAt}, nil
+}
+
+// RunJob is the scheduler's handler: it turns one due job into work. An error sends the job back to
+// the queue with its backoff.
+func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
+	switch job.Kind {
+	case jobs.KindSendCampaign:
+		var payload struct {
+			CampaignID string `json:"campaignId"`
+			// Additional turns the job into the next step of a send in steps.
+			Additional int `json:"additional"`
+		}
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return fmt.Errorf("send_campaign payload: %w", err)
+		}
+		if payload.CampaignID == "" {
+			return errors.New("send_campaign job has no campaignId")
+		}
+		if payload.Additional > 0 {
+			_, err := e.QueueStep(ctx, payload.CampaignID, payload.Additional)
+			return err
+		}
+		_, err := e.Queue(ctx, payload.CampaignID)
+		return err
+	case jobs.KindSendWelcome:
+		var payload struct {
+			NewsletterID string `json:"newsletterId"`
+			ContactID    string `json:"contactId"`
+		}
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return fmt.Errorf("send_welcome payload: %w", err)
+		}
+		newsletter, err := e.store.Newsletter(ctx, payload.NewsletterID)
+		if err != nil {
+			return err
+		}
+		contact, err := e.store.Contact(ctx, payload.ContactID)
+		if err != nil {
+			return err
+		}
+		_, err = e.QueueWelcome(ctx, newsletter, contact)
+		return err
+	default:
+		return fmt.Errorf("unknown job kind %q", job.Kind)
+	}
 }
 
 // SignupResult is what queueing a welcome or confirmation email did; Skipped says why it didn't go.
