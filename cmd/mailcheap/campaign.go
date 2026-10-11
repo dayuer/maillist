@@ -12,6 +12,7 @@ import (
 
 	"mailcheap/internal/app"
 	"mailcheap/internal/core/checks"
+	"mailcheap/internal/core/content"
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/validate"
@@ -84,6 +85,9 @@ func runCampaignCreate(cmd *cobra.Command, _ []string) error {
 		campaign.Format = model.Format(format)
 		campaign.Body = string(body)
 		campaign.Source = "cli"
+		// The archive's card image, recorded when the draft is made so phase 7 does not have to walk
+		// every body (upstream's firstImageUrl).
+		campaign.ThumbnailURL = content.FirstImageOf(campaign.Format, campaign.Body)
 		if err := a.Store.CreateCampaign(ctx, campaign); err != nil {
 			return err
 		}

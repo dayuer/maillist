@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"mailcheap/internal/core/model"
 )
 
 // Upstream SKIPPED_URL_PATTERN: tracking pixels and chrome, not the picture of the issue.
@@ -16,6 +18,16 @@ var (
 	imageSrcPattern   = regexp.MustCompile(`(?i)\bsrc=["'](https://[^"']+)["']`)
 	imageWidthPattern = regexp.MustCompile(`(?i)\bwidth=["']?(\d+)`)
 )
+
+// FirstImageOf is upstream firstImageUrl({format, html, markdown}): the first usable image of a
+// draft, whichever way its body is written. A markdown body is rendered first, because the picture
+// is in the HTML a reader would see rather than in the Markdown.
+func FirstImageOf(format model.Format, body string) string {
+	if format == model.FormatMarkdown {
+		return FirstImageURL(MarkdownToHTML(body, false))
+	}
+	return FirstImageURL(body)
+}
 
 // FirstImageURL is the src of the first <img> with an https:// src, skipping tracking pixels and
 // images narrower than 120px, or "" when there is none. Only tags up to the last ">" are read: one
