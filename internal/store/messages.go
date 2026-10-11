@@ -528,23 +528,6 @@ func (db *DB) AdoptSESMessageID(ctx context.Context, id, sesMessageID string) er
 	})
 }
 
-// CountMessagesSince counts a newsletter's messages of the given kinds created since a moment; it
-// is what caps the welcome and confirmation emails at 100 per 10 minutes.
-func (db *DB) CountMessagesSince(ctx context.Context, newsletterID string,
-	kinds []model.MessageKind, since time.Time) (int, error) {
-	placeholders := make([]string, len(kinds))
-	args := []any{newsletterID, formatTime(since)}
-	for i, kind := range kinds {
-		placeholders[i] = "?"
-		args = append(args, string(kind))
-	}
-	query := "SELECT count(*) FROM messages WHERE newsletter_id = ? AND created_at >= ? AND kind IN (" + //nolint:gosec // G202: placeholders, not values
-		strings.Join(placeholders, ",") + ")"
-	var count int
-	err := db.sql.QueryRowContext(ctx, query, args...).Scan(&count)
-	return count, err
-}
-
 // HasMessageOfKind reports whether a contact already has a message of this kind.
 func (db *DB) HasMessageOfKind(ctx context.Context, contactID string, kind model.MessageKind) (bool, error) {
 	var count int
