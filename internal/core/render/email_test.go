@@ -173,7 +173,10 @@ func TestGeneratedHTMLPrintsTheSubjectAndPreviewText(t *testing.T) {
 }
 
 // tests/callouts.test.mjs "Markdown boxes are gray inline-styled boxes in emails". Task 1.7 left
-// this to Task 1.9 with a t.Skip because it needs render.Email; it lands here.
+// this to Task 1.9 with a t.Skip because it needs render.Email; it lands here. It also covers what
+// tests/rich-content.test.mjs "editor issues get inline styles in emails" asserts after the plan's
+// rewrite to a Markdown issue — that test's two editor-only assertions, "<li><p style=\"margin:0;\">"
+// and the inline image style, come from richEmailBody, which died with the rich format.
 func TestMarkdownBoxesAreInlineStyledInEmails(t *testing.T) {
 	const markdown = "Intro\n\n:::box\n**Project update**\n\n- Shipped the editor\n:::\n\n:::box\nSponsor\n:::\n\nOutro"
 	r := Email(EmailInput{
@@ -185,6 +188,12 @@ func TestMarkdownBoxesAreInlineStyledInEmails(t *testing.T) {
 	}
 	if strings.Contains(r.HTML, ":::") {
 		t.Errorf("box markers leaked:\n%s", r.HTML)
+	}
+	if strings.Contains(r.HTML, "data-callout") {
+		t.Errorf("the archive marker must not reach the email:\n%s", r.HTML)
+	}
+	if !strings.Contains(r.HTML, UnsubscribePlaceholder) {
+		t.Errorf("the footer must be added:\n%s", r.HTML)
 	}
 	if !strings.Contains(r.Text, "Shipped the editor") {
 		t.Errorf("text = %q", r.Text)
