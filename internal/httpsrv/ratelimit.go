@@ -49,9 +49,12 @@ func (l *MemoryLimiter) Limited(limit Limit, key string, now time.Time) bool {
 	if !limited {
 		within = append(within, now)
 	}
-	// Re-inserting keeps the map ordered by last use, so the oldest key goes first when it is full.
 	delete(l.hits, id)
 	l.hits[id] = within
+	// The eviction takes whichever key the map hands over first, which in Go is arbitrary: a map has
+	// no order, so the re-insert above does not make this least-recently-used. That is deliberate —
+	// the job here is to stay bounded, and losing one bucket's history under pressure is the failure
+	// mode that keeps every other bucket working (the phase 1-3 audit's Minor pool).
 	for len(l.hits) > MaxMemoryKeys {
 		for oldest := range l.hits {
 			delete(l.hits, oldest)

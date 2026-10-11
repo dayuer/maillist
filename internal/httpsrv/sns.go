@@ -22,9 +22,16 @@ const subscribeTimeout = 10 * time.Second
 type Subscriber func(ctx context.Context, url string) error
 
 // HTTPSubscriber is the real one; it refuses anything ValidSubscribeURL rejects.
+//
+// It does not follow redirects: the confirmation is a GET to an SNS-controlled URL, and a redirect
+// would let that URL choose a second destination for this process to call (the phase 1-3 audit's
+// Minor pool). SNS answers 200 or it does not confirm.
 func HTTPSubscriber(client *http.Client) Subscriber {
 	if client == nil {
-		client = &http.Client{Timeout: subscribeTimeout}
+		client = &http.Client{
+			Timeout:       subscribeTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
 	return func(ctx context.Context, url string) error {
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
