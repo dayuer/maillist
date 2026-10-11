@@ -331,6 +331,134 @@ func (db *DB) LoadMessageContext(ctx context.Context, m model.Message) (MessageC
 	return loaded, nil
 }
 
+// timestampColumns maps the plan's field names onto columns. The set is closed on purpose: a field
+// name never reaches SQL as text, so a malformed plan cannot become an injection.
+var timestampColumns = map[string]string{
+	"openedAt": "opened_at", "clickedAt": "clicked_at", "deliveredAt": "delivered_at",
+	"bouncedAt": "bounced_at", "complainedAt": "complained_at",
+}
+
+// FirstTimestamp sets one message timestamp only if it is still empty, and reports whether it wrote.
+// That WHERE clause is what makes a repeated SNS delivery harmless.
+func (db *DB) FirstTimestamp(ctx context.Context, id, field string, at time.Time) (bool, error) {
+	column, ok := timestampColumns[field]
+	if !ok {
+		return false, fmt.Errorf("unknown message timestamp %q", field)
+	}
+	wrote := false
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		wrote = false
+		result, err := tx.ExecContext(ctx,
+			"UPDATE messages SET "+column+" = ? WHERE id = ? AND "+column+" IS NULL",
+			formatTime(at), id)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		wrote = affected > 0
+		return nil
+	})
+	return wrote, err
+}
+
+// SetMessageStatusFrom moves a message to to only from one of the from statuses, and reports whether
+// it moved. That is how a late Delivery can't undo a Bounce.
+func (db *DB) SetMessageStatusFrom(ctx context.Context, id string, to model.MessageStatus, from []model.MessageStatus) (bool, error) {
+	moved := false
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		moved = false
+		placeholders := make([]string, len(from))
+		args := []any{string(to), id}
+		for i, status := range from {
+			placeholders[i] = "?"
+			args = append(args, string(status))
+		}
+		// The only interpolated text is a run of "?" placeholders; every value is bound.
+		query := "UPDATE messages SET status = ? WHERE id = ? AND status IN (" + //nolint:gosec // G202: placeholders, not values
+			strings.Join(placeholders, ",") + ")"
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		moved = affected > 0
+		return nil
+	})
+	return moved, err
+}
+
+// SetMessageError records why a message failed, truncated to upstream's 500 characters.
+func (db *DB) SetMessageError(ctx context.Context, id, message string) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE messages SET error = ? WHERE id = ?",
+			truncate(message, 500), id)
+		return err
+	})
+}
+
+// MessageBySESID loads the message SES's own id names, which is how most events arrive.
+func (db *DB) MessageBySESID(ctx context.Context, sesMessageID string) (model.Message, error) {
+	message, err := scanMessage(db.sql.QueryRowContext(ctx,
+		"SELECT "+messageColumns+" FROM messages WHERE ses_message_id = ?", sesMessageID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Message{}, fmt.Errorf("message with ses id %s: %w", sesMessageID, ErrNotFound)
+	}
+	return message, err
+}
+
+// AdoptSESMessageID writes SES's id onto a message that got an event before the send was written
+// back, so later events find it by id.
+func (db *DB) AdoptSESMessageID(ctx context.Context, id, sesMessageID string) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE messages SET ses_message_id = ? WHERE id = ? AND ses_message_id = ''",
+			sesMessageID, id)
+		return err
+	})
+}
+
+// CountMessagesSince counts a newsletter's messages of the given kinds created since a moment; it
+// is what caps the welcome and confirmation emails at 100 per 10 minutes.
+func (db *DB) CountMessagesSince(ctx context.Context, newsletterID string,
+	kinds []model.MessageKind, since time.Time) (int, error) {
+	placeholders := make([]string, len(kinds))
+	args := []any{newsletterID, formatTime(since)}
+	for i, kind := range kinds {
+		placeholders[i] = "?"
+		args = append(args, string(kind))
+	}
+	query := "SELECT count(*) FROM messages WHERE newsletter_id = ? AND created_at >= ? AND kind IN (" + //nolint:gosec // G202: placeholders, not values
+		strings.Join(placeholders, ",") + ")"
+	var count int
+	err := db.sql.QueryRowContext(ctx, query, args...).Scan(&count)
+	return count, err
+}
+
+// HasMessageOfKind reports whether a contact already has a message of this kind.
+func (db *DB) HasMessageOfKind(ctx context.Context, contactID string, kind model.MessageKind) (bool, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx,
+		"SELECT count(*) FROM messages WHERE contact_id = ? AND kind = ?",
+		contactID, string(kind)).Scan(&count)
+	return count > 0, err
+}
+
+// HasMessageOfKindSince is HasMessageOfKind bounded to a window.
+func (db *DB) HasMessageOfKindSince(ctx context.Context, contactID string,
+	kind model.MessageKind, since time.Time) (bool, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx,
+		"SELECT count(*) FROM messages WHERE contact_id = ? AND kind = ? AND created_at >= ?",
+		contactID, string(kind), formatTime(since)).Scan(&count)
+	return count > 0, err
+}
+
 func truncate(value string, limit int) string {
 	if len(value) <= limit {
 		return value
