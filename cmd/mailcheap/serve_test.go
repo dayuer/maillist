@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -160,6 +161,51 @@ func TestServeShutsDownCleanly(t *testing.T) {
 	}
 	if sent == messages {
 		t.Error("everything was sent: the signal did not land mid-batch")
+	}
+}
+
+// 一个组件起不来，serve 整体退出——不是半死不活地继续跑。
+//
+// ST-I2 from the phase 1-3 audit: the HTTP listener could fail to bind and the process would keep
+// running with a sender and a scheduler and no surface at all, healthz included. A container
+// platform restarts what exits; nothing restarts what looks healthy.
+func TestServeExitsWhenAComponentFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a subprocess")
+	}
+	// Somebody else has the port: the HTTP component cannot start.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	dir := t.TempDir()
+	child := exec.Command(os.Args[0], "-test.run=TestServeChild") //nolint:gosec // G204: re-running this test binary as the serve child
+	child.Env = append(os.Environ(),
+		"MAILCHEAP_TEST_SERVE_ADDR="+listener.Addr().String(),
+		"SESSION_SECRET=test-session-secret-with-at-least-32-characters",
+		"APP_URL=https://mail.example.com",
+		"SENDING_ENABLED=true",
+		"MAILCHEAP_DB="+filepath.Join(dir, "mailcheap.db"),
+	)
+	var stderr bytes.Buffer
+	child.Stdout = io.Discard
+	child.Stderr = &stderr
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	select {
+	case err := <-exited:
+		if err == nil {
+			t.Fatalf("serve exited 0 with no HTTP listener; stderr:\n%s", stderr.String())
+		}
+	case <-time.After(15 * time.Second):
+		_ = child.Process.Kill()
+		t.Fatal("serve kept running after a component failed; stderr:\n" + stderr.String())
 	}
 }
 
