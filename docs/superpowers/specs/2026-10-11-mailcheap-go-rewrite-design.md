@@ -69,6 +69,7 @@ mailcheap serve
 cmd/mailcheap/            入口，cobra 子命令树
 internal/core/            纯逻辑，零 I/O（golangci depguard 强制）
     ids/                  24 位十六进制 ID（D13）
+    model/                记录类型、状态枚举、发送阈值常数（core 共用，零 I/O）
     validate/             邮箱规范化、正文大小上限
     render/               邮件 HTML 渲染、Markdown、纯文本版、链接转写
     content/              允许列表清洗、callout 扩展、缩略图提取
@@ -87,7 +88,7 @@ internal/creds/           凭据签发、校验、scope、预算
 internal/audit/           audit_log 写入
 ```
 
-`core` 不 import 任何 `store` / `mailer`；`store` 只被 adapters 依赖。这条边界是测试可行性的前提。
+`core` 不 import 任何 `store` / `mailer`；`store` 只被 adapters 依赖。发送阈值常数放在 `core/model`（不是 `internal/config`，后者读 `os`），因此 `core/rules`、`core/checks` 引用阈值不会把 `os` 带进 `core`。这条边界是测试可行性的前提。
 
 模块路径：`mailcheap`（裸模块名，本项目只产出可执行文件，不供他人 import）。
 
@@ -171,7 +172,7 @@ services:
 | 表 | 关键约束 |
 |---|---|
 | `newsletters` | `slug` 唯一；from_name/from_email/reply_to/postal_address；archive_enabled；cleanup 策略字段 |
-| `contacts` | **唯一索引 `(newsletter_id, email)`**；status；source；signup_ip；last_open_at / last_click_at |
+| `contacts` | **唯一索引 `(newsletter_id, email)`**；status；source；signup_ip；last_open_at / last_click_at；imported.*（导入的历史打开/点击率，受众"最活跃优先"排序依赖） |
 | `campaigns` | status；format(`markdown`/`html`)；body；archive_slug；scheduled_at；test_sent_at；web_views |
 | `messages` | **热表**，每个读者一行。唯一索引 `(campaign_id, contact_id)`；kind；ses_message_id；status（`pending`→`claimed`→`sent`/`failed`/`unknown`）；claimed_at；sent_at；error |
 | `events` | 送达/打开/点击/退信/投诉；来自 SNS 与 `/o` `/c` |
@@ -235,7 +236,7 @@ services:
 
 **日预算**：步骤 2 之前，在一个事务里计算本次人数 N，检查 `send_ledger` 当日全局与凭据级余量，足够则一次性预留 N，不足则整体拒绝（不做部分发送）（D15）。
 
-**上游行为必须保留**（`lib/sending.js` / `lib/sending-rules.js`）：确认信与 last-chance 信不加追踪（`UNTRACKED_KINDS`）；每个联系人最多 3 封确认信（`MAX_CONFIRMATIONS_PER_CONTACT`）；欢迎信只发给 10 分钟内注册的人，且每 10 分钟最多 100 封；SES 错误分三类——`TooManyRequestsException`/`ThrottlingException`/`Throttling` 重试，`PAUSE_ERRORS` 集合暂停 campaign，其余记失败。
+**上游行为必须保留**（`lib/sending.js` / `lib/sending-rules.js`）：确认信与 last-chance 信不加追踪（`UNTRACKED_KINDS`）；每个联系人最多 3 封确认信（`MAX_CONFIRMATIONS_PER_CONTACT`）；欢迎信只发给 10 分钟内注册的人，且每 10 分钟最多 100 封；SES 错误分三类，判定同时依赖 `error.name` 与 `error.message`——`TooManyRequestsException`/`ThrottlingException`/`Throttling`，或 message 以 `Sending is off` 开头，归重试；`PAUSE_ERRORS` 集合（`AccountSuspendedException`/`SendingPausedException`/`MailFromDomainNotVerifiedException`/`LimitExceededException`/`NotFoundException`），或 `MessageRejected` 且 message 匹配 `/not verified/i`，归暂停 campaign；其余记失败。
 
 **测试发送的哨兵 ID**：原实现用 `TEST_CONTACT_ID`（全零的假 ObjectId）承载测试邮件，使其不计入 campaign 统计。SQLite 版需要一个等价的哨兵行/哨兵值，且所有统计查询都要显式排除它。漏掉这一点会让"发测试"污染真实报表——这正是原实现专门防的事。
 
@@ -250,9 +251,9 @@ services:
 dashboard 没了，campaign 内容来自 Markdown 或 HTML 文件。管线顺序：
 
 ```
-markdown 文件 ──goldmark──┐
-                          ├─→ 允许列表清洗（bluemonday）─→ 注入邮件专用内容 ─→ 纯文本版 ─→ 字节数检查
-HTML 文件 ────────────────┘
+markdown 文件 ──goldmark──→ 允许列表清洗（bluemonday）──┐
+                                                        ├─→ 注入邮件专用内容 ─→ 纯文本版 ─→ 字节数检查
+HTML 文件 ──────────────────────────────────────────────┘   （HTML 不清洗，保留自身设计）
 ```
 
 1. **Markdown 优先**。`goldmark` + 自定义 callout 扩展（现有 `lib/callouts.js` / `editor-callout.js` 的 callout 语法原样保留）——这是原 TipTap 富文本编辑器里唯一有信息量的部分
@@ -489,10 +490,12 @@ SEND_APPROVAL=manual   # send/schedule 落成 pending job，需 mailcheap approv
 
 每个阶段结束都应有一个可运行的产物，而不是"写完再调"。
 
+**阶段划分以实施计划为准**（`docs/superpowers/plans/2026-10-11-mailcheap-go-rewrite-plan.md`）。
+
 | 阶段 | 内容 | 完成标志 |
 |---|---|---|
-| 1 | `store`：schema + 迁移 + writer goroutine；`core/sign`；`core/render` | 能把现有 render-email / tracking 测试翻译过来并全绿 |
-| 2 | `mailer` + `jobs` + `core/audience` + `core/rules` + `core/checks` | 假 SES 下能把一封 campaign 发完，速率、暂停、分步都验证到 |
+| 1 | `core` 全部纯逻辑（ids / model / validate / sign / render / content / rules / checks / audience / sns / sesmap / importer / schedule）+ `internal/config` + `creds` token | 15 个包、20 来个测试文件全绿；签名 golden vector 通过；core 纯度 gate 通过 |
+| 2 | `store`：schema + 迁移 + writer goroutine；`jobs`；`mailer`；最薄 CLI 通路 | 假 SES 下能把一封 campaign 发完 |
 | 3 | `httpsrv`：追踪端点 + SNS webhook + 退订/确认 + 读者侧 4 个模板 | SNS 事件能回写 message/campaign/contact 并触发 suppression |
 | 4 | CLI 全命令面 + `credentials` + `audit` | 不用 HTTP 就能完整运营一个 newsletter |
 | 5 | Docker + compose + caddy + healthcheck | `docker compose up` 跑通端到端 |

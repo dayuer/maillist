@@ -48,6 +48,7 @@ Go `regexp` 是 RE2：**不支持** `(?=` `(?!` `(?<=` `(?<!` 环视、`\1` 反�
 | 位置 | 问题 | 处理 |
 |---|---|---|
 | `lib/tracking.js:7` `{4,4000}` | 重复次数超限，`MustCompile` 直接 panic | 已在 Task 1.4 解决：`{4,}` + 长度检查 |
+| `lib/tracking.js:8` `LINK_PATTERN` 的 `\2` | 反向引用，RE2 不支持 | 已在 Task 1.9 解决：拆成"双引号 href"与"单引号 href"两个分支正则。上游 `\2` 只是强制开引号与闭引号同类，拆开后每个分支的引号是字面量，两者等价（双引号分支用 `"`，单引号分支用 `'`） |
 | `lib/clean-html.js:61,65,186` | 前行/后行断言 | 不移植正则，改用 bluemonday 策略（Task 1.8） |
 | `lib/render-email.js:58` `(?<![ \t])[ \t]+\n` | 后行断言 | 改为逐行 `strings.TrimRight` 处理（Task 1.9） |
 
@@ -74,10 +75,10 @@ cmd/mailcheap/
     suppression.go stats.go domains.go credentials.go upload.go cleanup.go
     approve.go audit.go db.go health.go export.go           阶段 4
     mcp.go                          阶段 6
-internal/config/                    阶段 1  唯一读 env 的地方
+internal/config/                    阶段 1  唯一读 env 的地方（把 env 装进 model.Limits / Config）
 internal/core/
     ids/        阶段 1   24 位十六进制 ID
-    model/      阶段 1   记录类型与状态枚举
+    model/      阶段 1   记录类型、状态枚举、发送阈值 model.Limits（core 引用它不传递依赖 os）
     validate/   阶段 1   邮箱规范化
     sign/       阶段 1   HKDF+HMAC 链接签名、RFC 8058 退订链接
     content/    阶段 1   callout、markdown、清洗、缩略图
@@ -437,7 +438,7 @@ git commit -m "docs: credit upstream Mailcheap under MIT"
 
 ## 阶段 1：core 纯逻辑
 
-完成标志：`make test lint` 全绿；`tests/session-token.test.mjs`（管理端 session，随登录删除）与 `tests/favicon.test.mjs`（dashboard 图标）**不翻译**；上游 29 个测试文件中，除阶段 3/4/7 的 `security-headers`、`archive*`、`overview`、`favicon`、`slow-inputs`、`rate-limit`、`session-token`、`last-chance`、`cleanup` 外，其余全部有对应 Go 测试；`TestGoldenVectorsMatchOriginal` 通过。
+完成标志：`make test lint` 全绿；**永久不译**（随前端/登录一起消失）：`tests/session-token.test.mjs`（管理端 session，随登录删除）、`tests/favicon.test.mjs`（dashboard 图标）；**延后到阶段 3/4/7 翻译**：`security-headers`、`archive*`、`overview`、`slow-inputs`、`rate-limit`、`last-chance`、`cleanup`。上游 29 个测试文件中，除上述两类外其余全部有对应 Go 测试；`TestGoldenVectorsMatchOriginal` 通过。
 
 ### Task 1.1：ID
 
@@ -724,6 +725,18 @@ type Message struct {
 	ComplainedAt *time.Time
 	CreatedAt    time.Time
 }
+
+// Limits are the sending thresholds. SES reviews an account at 5% bounces or 0.1% complaints; pause
+// well before. These live in model, not config, so core packages (rules, checks) reference them
+// without pulling in internal/config, which reads os (phase-1 purity gate).
+type Limits struct {
+	BounceRate               float64
+	ComplaintRate            float64
+	MaxEmailBytes            int
+	SendRatePerSecond        int
+	WelcomeEmailsPer10Minute int
+	MaxSendsPerDay           int
+}
 ```
 
 - [ ] **Step 4: 确认通过** — Run: `go test ./internal/core/model` Expected: `ok`
@@ -844,7 +857,7 @@ func NormalizeAddress(value string) string {
 - Create: `internal/core/sign/contact.go`
 - Test: `internal/core/sign/sign_test.go`
 
-`TestGoldenVectorsMatchOriginal` 的期望值由上游 Node 代码在 commit `67d13b0` 上生成（secret `test-session-secret-with-at-least-32-characters`，确认/keep 的时间戳 `1791000000000` ms）。它锁定了 HKDF 空 salt、info 标签、JSON 字段顺序 `c,n,t`、22/43 字符截断这些最容易悄悄出错的细节。
+`TestGoldenVectorsMatchOriginal` 的期望值由上游 Node 代码在 commit `67d13b0` 上生成（secret `test-session-secret-with-at-least-32-characters`，确认/keep 的时间戳 `1791000000000` ms）。它锁定了 HKDF 空 salt、info 标签、JSON 字段顺序 `c,n,t`、22/43 字符截断这些最容易悄悄出错的细节。这 5 组常量可用 `node scripts/gen-golden.mjs` 重算复核（脚本内抄录上游算法，只读 `third_party/upstream/` 而不执行）；脚本输出与本文常量不一致时，以脚本输出为准修订常量。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1542,8 +1555,11 @@ func TestSessionSecretNeeds32Characters(t *testing.T) {
 	}
 }
 
+// Intentional tightening, not a straight port of tests/config.test.mjs: upstream readSendRate uses
+// Number.parseInt, so "5.5" → 5 and " 7 " → 7; Go's strconv.Atoi rejects both and falls back to 10.
+// Being stricter here (never a silent half-read value) is deliberate.
 func TestSendRateOutsideOneToFourteenFallsBackToTen(t *testing.T) {
-	for v, want := range map[string]int{"": 10, "1": 1, "14": 14, "0": 10, "15": 10, "abc": 10, "5.5": 10} {
+	for v, want := range map[string]int{"": 10, "1": 1, "14": 14, "0": 10, "15": 10, "abc": 10, "5.5": 10, " 7 ": 10} {
 		c, err := Load(with("SEND_RATE_PER_SECOND", v))
 		if err != nil {
 			t.Fatal(err)
@@ -1583,6 +1599,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"mailcheap/internal/core/model"
 )
 
 const (
@@ -1591,16 +1609,6 @@ const (
 	MaxSendRate            = 14
 	DefaultMaxSendsPerDay  = 50_000
 )
-
-// Limits are the sending thresholds. SES reviews an account at 5% bounces or 0.1% complaints; pause well before.
-type Limits struct {
-	BounceRate               float64
-	ComplaintRate            float64
-	MaxEmailBytes            int
-	SendRatePerSecond        int
-	WelcomeEmailsPer10Minute int
-	MaxSendsPerDay           int
-}
 
 type Config struct {
 	SessionSecret string
@@ -1616,7 +1624,7 @@ type Config struct {
 	ArchiveHosts  string
 	AlertFrom     string
 	AdminEmail    string
-	Limits        Limits
+	Limits        model.Limits
 }
 
 // Load reads env (os.Environ when nil) and returns every problem at once.
@@ -1651,7 +1659,7 @@ func Load(env map[string]string) (Config, error) {
 		ArchiveHosts:  env["ARCHIVE_HOSTS"],
 		AlertFrom:     env["ALERT_FROM"],
 		AdminEmail:    env["ADMIN_EMAIL"],
-		Limits: Limits{
+		Limits: model.Limits{
 			BounceRate:               0.02,
 			ComplaintRate:            0.0008,
 			MaxEmailBytes:            100_000,
@@ -1669,7 +1677,8 @@ func or(v, fallback string) string {
 	return v
 }
 
-// intIn parses v, falling back when it isn't an integer in [lo, hi].
+// intIn parses v, falling back when it isn't an integer in [lo, hi]. Stricter than upstream's
+// Number.parseInt: "5.5" and " 7 " are rejected rather than truncated/trimmed (see the test above).
 func intIn(v string, lo, hi, fallback int) int {
 	n, err := strconv.Atoi(v)
 	if err != nil || n < lo || n > hi {
@@ -1747,8 +1756,9 @@ func InlineCalloutStyles(html string) string
 // <img> only with an http(s) src, and data-callout as the only attribute on div. Used on rendered Markdown.
 func CleanContent(html string) string
 
-// KeepSafeURLs drops javascript:, data: and other non-http(s)/mailto URL attributes, leaving the rest of the
-// document as is. Used on HTML-format issues before they go into the archive's sandboxed iframe.
+// KeepSafeURLs drops URL attributes outside the upstream SAFE_URL_PATTERN (^https?:|mailto:|tel:|#|/|data:image/),
+// i.e. javascript:, non-image data:, and anything else; the rest of the document is left as is. Used on
+// HTML-format issues before they go into the archive's sandboxed iframe.
 func KeepSafeURLs(html string) string
 
 // FirstImageURL is the src of the first <img> with an http(s) src, or "".
@@ -1818,6 +1828,7 @@ func Inbox(email, fromEmail string) (name, url string)
 - `tests/callouts.test.mjs`：去掉 Task 1.7 留下的 `t.Skip`
 
 **移植陷阱：**
+- `tracking.js:8` 的 `LINK_PATTERN` 用了反向引用 `\2`（见 §1.3），RE2 不支持。拆成两个分支正则：`(<a\b[^>]*?\shref\s*=\s*")https?:\/\/[^"\s]+"` 与 `(<a\b[^>]*?\shref\s*=\s*')https?:\/\/[^'\s]+'`，各自把原 `\2` 换回对应引号字面量；对每处 href 回填 `baseURL + "/c/" + token` 时保留原引号
 - `render-email.js:58` 的后行断言 `(?<![ \t])[ \t]+\n` 改为：按 `\n` 切行，对每行 `strings.TrimRight(line, " \t")`，再拼回
 - 邮件外壳 HTML（`wrapMarkdownBody` / `withFooter` 的模板字符串）原样搬进 `templates.go` 的常量，用 `strings.Builder` 拼接，**不用** `html/template`：它会转义已清洗的 body，和上游的字节输出对不上
 - `"&#847;&zwnj;&nbsp;".repeat(40)` 的 preheader 填充原样保留
@@ -1882,7 +1893,7 @@ func NextStepLimit(sentSoFar, additional int) int
 
 type CampaignStats struct{ Sent, Bounced, Complained int }
 type PauseReason string // "" | "bounce" | "complaint"
-func CampaignPauseReason(st CampaignStats, l config.Limits) PauseReason
+func CampaignPauseReason(st CampaignStats, l model.Limits) PauseReason
 
 type ErrorAction string
 const (
@@ -1890,15 +1901,22 @@ const (
 	ErrorPause ErrorAction = "pause"
 	ErrorFail  ErrorAction = "fail"
 )
-// SendErrorAction classifies an SES error by its error code (smithy APIError.ErrorCode()).
-func SendErrorAction(code string) ErrorAction
+// SendErrorAction classifies an SES error the way upstream getSendErrorAction does, from both the
+// error code (smithy APIError.ErrorCode()) and the error message:
+//   - code in RETRY_ERRORS (TooManyRequestsException, ThrottlingException, Throttling), or
+//     message starts with "Sending is off" → ErrorRetry
+//   - code in PAUSE_ERRORS (AccountSuspendedException, SendingPausedException,
+//     MailFromDomainNotVerifiedException, LimitExceededException, NotFoundException) → ErrorPause
+//   - code == "MessageRejected" and message matches /not verified/i → ErrorPause
+//   - anything else → ErrorFail
+func SendErrorAction(code, message string) ErrorAction
 ```
 
-注意 `rules` 引用 `config.Limits`：`internal/config` 不在 depguard 黑名单内，允许；但 `config.Load` 读 `os`，因此 **core 只能引用 `config.Limits` 类型，不得调用 `config.Load`**。在 `.golangci.yml` 的 `core-is-pure` 规则里无法按函数禁止，改为代码审查检查项。
+注意发送阈值 `Limits` 定义在 `internal/core/model`（Task 1.2），不是 `internal/config`：`config.Load` 读 `os`，若 `rules`/`checks` 引用 `internal/config`，`os` 就会传递进 `core`，阶段 1 收尾的纯度 gate 必然失败（见"阶段 1 收尾"节）。因此 **core 只引用 `model.Limits`，绝不 import `internal/config`**；依赖方向相反——`internal/config` import `model`，在 `Load` 里把 env 装进 `model.Limits`。
 
 **要翻译的测试**（`tests/sending.test.mjs` 全部 11 条，`tests/tracking.test.mjs`：sent emails are tracked and keep a direct unsubscribe link，`tests/confirmation.test.mjs`：the confirmation email carries a clean link in both versions，`tests/rich-content.test.mjs`：editor issues get inline styles in emails 改写为 Markdown 版本）
 
-**移植陷阱：** 上游把 `PAUSE_ERRORS`、`RETRY_ERRORS` 写成 Set，照抄集合成员；"from names are quoted, encoded, and can't inject headers" 是安全测试，每个输入都必须翻译。
+**移植陷阱：** 上游把 `PAUSE_ERRORS`、`RETRY_ERRORS` 写成 Set，照抄集合成员；但 `getSendErrorAction` 不只看 error code：`message.startsWith("Sending is off")` 也归 `retry`，`name === "MessageRejected" && /not verified/i.test(message)` 归 `pause`。因此 `SendErrorAction` 必须同时接收 code 与 message，不能只传 smithy `ErrorCode()`（那两条分支会漏判）。"from names are quoted, encoded, and can't inject headers" 是安全测试，每个输入都必须翻译。
 
 ### Task 1.11：发送前检查（`lib/presend-checks.js`）
 
@@ -1924,7 +1942,7 @@ type Input struct {
 	Rendered      render.Rendered
 	SendingOn     bool
 	Audience      int
-	Limits        config.Limits
+	Limits        model.Limits
 }
 
 func Run(in Input) []Check
@@ -1943,8 +1961,10 @@ func Blocked(cs []Check) (Check, bool)
 ```go
 package audience
 
-// Select keeps active contacts whose email isn't suppressed, most engaged first (upstream compareByEngagement:
-// lastClickAt desc, lastOpenAt desc, then createdAt asc, then id asc for a stable order), up to limit (0 = all).
+// Select keeps active contacts whose email isn't suppressed, most engaged first (upstream AUDIENCE_SORT:
+// lastClickAt desc, lastOpenAt desc, imported.clickRate desc, imported.openRate desc, then createdAt asc,
+// then id asc for a stable order; a missing/zero engagement field sorts last under desc), up to limit (0 = all).
+// Less is the two-element comparator behind that order.
 func Select(contacts []model.Contact, suppressed map[string]bool, limit int) []model.Contact
 func Less(a, b model.Contact) bool
 ```
@@ -1997,10 +2017,14 @@ type FirstWrite struct{ Field string; At time.Time }
 
 type Plan struct {
 	Type          EventType
-	MessageID     string // from the "message_id" tag; "" when not ours
+	SESMessageID  string    // mail.messageId (SES's own id); "" when absent
+	MessageID     string    // from the "message_id" tag; "" when not ours
+	Email         string    // normalized mail.destination[0]; "" when absent
+	OccurredAt    time.Time // detail.timestamp, else mail.timestamp, else now
 	Kind          model.MessageKind
 	Firsts        []FirstWrite
 	NewStatus     model.MessageStatus // "" = unchanged; only moves forward
+	Error         string              // e.g. "Hard bounce: …"; "" when none
 	Suppress      []string            // emails to add to suppressions
 	SuppressAs    model.SuppressionReason
 	ContactStatus model.ContactStatus // "" = unchanged
@@ -2008,6 +2032,15 @@ type Plan struct {
 	Store         json.RawMessage     // event data to keep, without raw mail headers
 }
 type Engagement struct{ LastOpenAt, LastClickAt *time.Time }
+
+// Three mapping rules from upstream (lib/ses-event-mapping.js):
+//   - Bounce: detail.bounceType == "Permanent" → Hard, anything else → Soft. Only a Hard bounce sets
+//     NewStatus "bounced", Firsts bouncedAt, a "bounce" suppression and ContactStatus "bounced"; a Soft
+//     bounce only fills Error.
+//   - Complaint: skipped entirely when detail.complaintFeedbackType == "not-spam" (that's a recipient
+//     leaving spam, not complaining) — no status change, no suppression.
+//   - Click: a click on an unsubscribe link (detail.link path /unsubscribe or /api/unsubscribe) is not
+//     engagement and must not set LastClickAt.
 
 func Type(raw json.RawMessage) EventType
 func TrackingPlan(t EventType, at time.Time) Plan
@@ -2032,7 +2065,10 @@ const MaxRowsPerRequest = 1000
 // Columns are header indexes from upstream COLUMN_ALIASES; -1 = absent.
 type Columns struct{ Email, Status, SubscribedAt, EmailsReceived, OpenRate, ClickRate int }
 func MapColumns(headers []string) Columns
-func NormalizeStatus(v string) (model.ContactStatus, bool) // never guesses active for unknown values
+// NormalizeStatus maps a CSV status cell the way upstream normalizeStatus does: "" or whitespace → active,
+// a recognized alias → that status, anything else → dormant. It never fails (no bool: upstream has no
+// failure branch).
+func NormalizeStatus(v string) model.ContactStatus
 func NormalizeRate(v string) (float64, bool)               // "45%", "0.45", "45" → 0.45
 type Row struct {
 	Email          string
@@ -2046,11 +2082,20 @@ func NormalizeRow(rec []string, cols Columns, statusOverride model.ContactStatus
 
 // Merge decides writes for one newsletter: adds missing contacts, only ever makes a status stricter,
 // never reactivates existing contacts, leaves pending (waiting to confirm) as is.
-type Write struct{ Insert *Row; UpdateID string; NewStatus model.ContactStatus }
+type Write struct {
+	Insert    *Row
+	UpdateID  string
+	NewStatus model.ContactStatus
+	// Suppress is the global suppression this write must also upsert (upstream writes Suppression for
+	// bounced/complained imports): model.SuppressBounce or model.SuppressComplaint, else "". The caller
+	// upserts (email, reason), detail = import source, on the contact's email (Insert.Email or the
+	// existing contact's). "" means no suppression write.
+	Suppress model.SuppressionReason
+}
 func Merge(rows []Row, existing map[string]model.Contact) []Write
 ```
 
-**要翻译的测试**：`tests/csv-import.test.mjs` 前 4 条（第 5 条 "sanitizes rows coming from the browser" 随前端消失，**不翻译**）；`tests/contact-import.test.mjs` 全部 2 条。
+**要翻译的测试**：`tests/csv-import.test.mjs` 前 4 条（第 5 条 "sanitizes rows coming from the browser" 随前端消失，**不翻译**）；`tests/contact-import.test.mjs` 全部 2 条。另加 1 条：导入 `bounced`/`complained` 行时，`Merge` 对每个这类联系人给出一条 `Suppress`（`bounce`/`complaint`），其余状态为空。
 
 ### Task 1.16：定时（`lib/schedule.js`）
 
@@ -2061,19 +2106,21 @@ func Merge(rows []Row, existing map[string]model.Contact) []Write
 ```go
 package schedule
 
-// Problem: "" when at is in the future and within a year of now, else upstream's message.
+// Problem: "" when at is at least 1 minute ahead of now and within a year, else upstream's message
+// (e.g. "Pick a time in the future"). Slots are UTC throughout, so there is no location parameter.
 func Problem(at, now time.Time) string
-// Suggestions from past send times: same weekday and hour, next occurrence, rounded to the quarter hour,
-// moved a week on when about to pass or taken.
-func Suggestions(history, taken []time.Time, now time.Time, loc *time.Location) []time.Time
+// Suggestions from past send times: same weekday and time-of-day, next occurrence at least 10 minutes
+// ahead, rounded to the 15-minute slot, moved a week on when taken or too close. All arithmetic is UTC
+// (upstream uses Date.UTC / getUTCDay); no loc parameter.
+func Suggestions(history, taken []time.Time, now time.Time) []time.Time
 ```
 
-**要翻译的测试**：`tests/schedule.test.mjs` 全部 5 条。时区一律显式传 `*time.Location`（CLI 的 `--tz`）。
+**要翻译的测试**：`tests/schedule.test.mjs` 全部 5 条。时区语义固定为 UTC（上游 `Date.UTC`/`getUTCDay`，注释 "Slots are in UTC"），不传 `*time.Location`。
 
 ### 阶段 1 收尾
 
 - [ ] Run: `make test lint` — Expected: 全部 `ok`，`0 issues.`
-- [ ] Run: `go list -deps ./internal/core/... | grep -E '^(os|net/http|database/sql|mailcheap/internal/(store|mailer))$'` — Expected: 无输出
+- [ ] Run: `go list -f '{{.ImportPath}} {{.Imports}}' ./internal/core/... | grep -E '\b(os|net/http|database/sql|mailcheap/internal/(store|mailer))\b'` — Expected: 无输出（只看直接 import；`go list -deps` 给的是传递闭包，会把 `config` 的 `os` 一起带出来，故不用）
 - [ ] 开 PR `phase-1-core` → main，CI 绿后合并
 
 ---
@@ -2089,7 +2136,7 @@ func Suggestions(history, taken []time.Time, now time.Time, loc *time.Location) 
 | 2.1 | `internal/store/db.go`、`migrate.go`、`migrations/0001_init.sql` | 打开库（WAL、`busy_timeout=10000`、`synchronous=NORMAL`、`foreign_keys=on`）；内嵌迁移；`schema_migrations` 表 | 在临时目录建库两次，第二次不重复迁移；`PRAGMA journal_mode` 返回 `wal` |
 | 2.2 | `internal/store/writer.go` | 单写者 goroutine（channel 串行）；`SQLITE_BUSY` 抖动重试（10 ms 起，×2，上限 1 s，总时长上限 10 s） | 两个进程（`exec.Command` 起子进程）并发写 1000 次全部成功；重试耗尽返回带 `ErrBusy` 的错误 |
 | 2.3 | `internal/store/newsletters.go`、`contacts.go`、`campaigns.go`、`suppressions.go` | CRUD；`(newsletter_id, email)` 唯一；邮箱前缀搜索 `LIKE ? ESCAPE '\'` + `COLLATE NOCASE`，转义 `%` `_` | 前缀含 `%`、`_` 时不误匹配；`EXPLAIN QUERY PLAN` 显示使用索引 |
-| 2.4 | `internal/store/audience.go` | 受众 SQL：active、排除 suppressions、按 `audience.Less` 同序、`LIMIT` | 同一组 200 个随机联系人，SQL 结果与 `audience.Select` 逐项相等；空抑制列表；limit 为 0 与负数 |
+| 2.4 | `internal/store/audience.go` | 受众 SQL：active、排除 suppressions、`ORDER BY` 与 `audience.Less` 同序（`lastClickAt` desc、`lastOpenAt` desc、`imported.clickRate` desc、`imported.openRate` desc、`createdAt` asc、`id` asc）、`LIMIT` | 同一组 200 个随机联系人，SQL 结果与 `audience.Select` 逐项相等；空抑制列表；limit 为 0 与负数 |
 | 2.5 | `internal/store/ledger.go` | `send_ledger` 在一个事务里检查全局与凭据级余量并预留 N（D15） | 两个 goroutine 同时各预留 60%：恰好一个成功；跨 UTC 日界重置 |
 | 2.6 | `internal/store/messages.go` | 分块（1000/事务）建 `pending` messages；`Claim(n)` 原子领取并置 `claimed`；`MarkSent`/`MarkFailed`；`RecoverClaimed()` 把 `claimed` 转 `unknown` | 1 万行分块写入；`RecoverClaimed` 后再次领取不会领到这些行 |
 | 2.7 | `internal/jobs/jobs.go` | jobs 表：`Enqueue(kind, payload, runAt)`、`Lease`（只领 `run_at <= now`；`locked_at` 超时可被重领）、`Complete`、`Fail`（退避 1 s、5 s、30 s、2 min、10 min）、空闲 worker 经 channel 立即唤醒 | `run_at` 未到不被领取；租约超时重领；第 5 次失败进入 `dead` |
