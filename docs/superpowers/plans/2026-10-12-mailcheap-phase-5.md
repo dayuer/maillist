@@ -369,4 +369,21 @@ CI 的 runner 自带 Docker ✓。`smoke` job 依赖 `image`？不必，脚本�
 
 ## 4. 阶段 5 执行记录
 
-（执行时逐条追加。）
+执行时发现的东西，逐条。
+
+| # | 事项 | 处置 |
+|---|---|---|
+| 1 | **`/data` 属于 root，非 root 进程写不进去** | 假 SES 栈第一次起来后 `mailcheap health` 一直不健康，直接跑容器得到 `ping /data/mailcheap.db: unable to open database file (14)`。Docker 对镜像里不存在的挂载点按 root 创建，而**命名卷的属主取自它挂载的那个目录**。修法：构建阶段 `mkdir -p /out/data`，运行阶段 `COPY --from=build --chown=nonroot:nonroot /out/data /data` |
+| 2 | **`SES_ACCESS_KEY_ID`/`SES_SECRET_ACCESS_KEY` 被 SDK 忽略** | SDK 的环境变量 provider 读的是 `AWS_ACCESS_KEY_ID`；这两个变量没人看，凭据链于是去找实例角色 → 容器里 IMDS 不可达 → 五秒后 "get credentials: request canceled"。修法：`SESOptions` 里显式传静态凭据（`lib/ses.js` 当年就是这么做的）。这正是"默认路径不该等到第一次发送才报凭据错误"那条提醒的具体形态 |
+| 3 | **`ListEmailIdentities` 是 `POST /v2/email/list-identities`** | 我按 API 名字猜成 GET `/v2/email/identities`，假 SES 于是答 404，而失败出现在**第一次发送**时。SDK 自带的 `request_snapshot/ListEmailIdentities.request.snap` 第一行就是 `POST /v2/email/list-identities`。路由改成不绑方法，并**加了一条单测**：真 `SESIdentity` 客户端打到假 SES 上，把方法与路径钉住 |
+| 4 | **CLI 把发送交给在跑的 serve** | 冒烟脚本 `campaign send` 打印的是 `queued 1 recipients; the running server is sending them`（阶段 4 的 C2 不变量），所以信到假 SES 比命令返回晚一点。脚本改成**轮询** `/_sent`，顺带端到端验证了那条不变量 |
+| 5 | **打开像素不做扫描器过滤，点击做** | 用 `curl` 的 UA 点链接不计点击（`isLikelyScanner`），而像素照样记打开——这与上游一致：`isLikelyScanner` 只出现在 `lib/ses-events.js` 的 Click 分支。脚本因此用浏览器 UA，并在点击前**等过 30 秒窗口**（`SCANNER_WINDOW=31`）。这三条都写进了 `docs/ses-smoke.md` 的排错一节 |
+| 6 | **渲染器自己加了一个 `Read online` 链接** | 它也被改写成 `/c/…`，所以脚本按"第一个 `/c/`"取链接时取到的是它。改成**遍历全部 `/c/` 链接**：每个都必须 302，并且其中必须有一个跳回正文里那个地址 |
+| 7 | **一键退订的 URL 在 header 里，不在正文** | 正文字脚是 `/unsubscribe?token=…`（页面，GET；POST 它会给 405），RFC 8058 的入口是 `List-Unsubscribe` header 里的 `/api/unsubscribe?token=…`。假 SES 现在也**解出 `Content.Simple.Headers`** 并记进 `/_sent`，脚本用 header 里那个 URL 发 POST |
+| 8 | **镜像大小的三个数字** | `docker images` 说 36.2MB（把 buildkit 的构建层算进去了）、`docker image inspect .Size` 说 8.2MB（压缩后的 blob）、导出后数文件是 **22.3MB**（二进制 20.31 + cacerts 0.21 + zoneinfo 0.11 + …）。计划里的"< 25 MB"以**导出后的未压缩大小**为准，CI 也用这个口径（`docker export \| wc -c` → 23 MB，含 tar 的块对齐开销）。三个数字的关系写在 CI 注释里，免得下一个人按错的那个调 |
+| 9 | **假 SES 也实现了两个身份查询操作** | 否则本地栈的 `domain` 检查无从通过。`FAKE_SES_DOMAINS` 列出的域名按 verified 返回，于是本地栈把**发送前检查**也走了一遍真代码路径（`domains` 命令在本地栈上也能用） |
+| 10 | **`TRUSTED_PROXIES` 必须在部署里给** | 阶段 4 的 S-I2 让 XFF 默认不可信；容器里 caddy 是唯一入口，所以 `compose.yaml` 默认给 `172.16.0.0/12`（docker 的默认网桥池），`deploy/.env.example` 里也写明换自定义网段时要改。不改的后果是"每个读者共用一个限流桶"——安全，但没有用 |
+| 11 | **`.dockerignore`** | `third_party/`、`.git`、`docs/`、`testdata` 都不进构建上下文。冒烟用的正文与图片是**挂载**进去的（`compose.local.yaml` 把 `testdata/smoke` 挂到 `/seed`，只读），不是因为它们在镜像里 |
+| 12 | **本地验证与 CI** | 本机 Docker 29.4.0：镜像构建 ✓、`docker run … version` ✓、`scripts/compose-smoke.sh` 多次跑通 ✓（最后一次 exit=0）。CI 新增 `image`（构建 + 跑 + 大小）与 `smoke`（同一个脚本，`KEEP=1` 以便失败时打印日志）两个 job，与本地是同一个脚本 |
+| 13 | **`%!w(<nil>)`（审计 Minor 池）** | 本阶段仍未定位。审计没给位置，全仓 `%w` 的可达参数都非 nil；本阶段新增的代码里也没有。留待阶段 6/7 继续捎带排查 |
+| 14 | **5.4 未运行** | `scripts/ses-smoke.sh` 与 `docs/ses-smoke.md` 已交付，标"待用户执行"；只做了 `sh -n` 与 `DRY_RUN=1`（打印将要执行的命令）。真实 SES 行为——真实退信分类、SNS 真实投递、身份查询分页与缓存——**未验证** |
