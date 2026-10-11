@@ -634,6 +634,51 @@ func sendOutcome(ctx context.Context, a *app.App, campaignID string, recipients 
 		"campaign resume sends the rest", stats.FormatNumber(counters.Sent), stats.FormatNumber(recipients))
 }
 
+// reportDryRun is what `campaign send --dry-run` prints: the checklist, the audience, and how many
+// of them would go out in this step. Nothing is written — no messages, no status change, no budget
+// reservation — so it is safe to run against a live campaign.
+func reportDryRun(ctx context.Context, a *app.App, cmd *cobra.Command, campaign model.Campaign,
+	newsletter model.Newsletter, limit int) error {
+	report, audience, err := runChecks(ctx, a, campaign, newsletter)
+	if err != nil {
+		return err
+	}
+	reached, err := a.Store.ReachedContacts(ctx, campaign.ID)
+	if err != nil {
+		return err
+	}
+	contacts, err := a.Store.SelectAudience(ctx, campaign.NewsletterID, campaign.AudienceLimit)
+	if err != nil {
+		return err
+	}
+	fresh := 0
+	for _, contact := range contacts {
+		if _, already := reached[contact.ID]; !already {
+			fresh++
+		}
+	}
+	step := fresh
+	if limit > 0 && limit < step {
+		step = limit
+	}
+	if jsonOutput(cmd) {
+		return printJSON(cmd, map[string]any{
+			"campaignId": campaign.ID, "status": campaign.Status, "checks": report,
+			"audience": audience, "wouldSend": step, "dryRun": true,
+		})
+	}
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "dry run: nothing was written")
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  status       %s\n", campaign.Status)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  audience     %s active contacts\n", stats.FormatNumber(audience))
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  would send   %s\n", stats.FormatNumber(step))
+	for _, item := range report {
+		if !item.OK {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %s: %s\n", "check", item.ID, item.Message)
+		}
+	}
+	return nil
+}
+
 // drainQueue is the CLI's own sender: it drains queued messages until there are none left. It is
 // what a command does when no serve process holds the heartbeat.
 func drainQueue(ctx context.Context, a *app.App) error {
