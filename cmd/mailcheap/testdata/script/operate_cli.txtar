@@ -1,0 +1,107 @@
+# Phase 4 done-criterion: the whole command surface runs, without HTTP.
+#
+# Every subcommand task 4.1 adds is called at least once here. The two that cannot reach their own
+# state in a script (pause needs a campaign mid-send, resume needs a paused one) are called for their
+# refusal, and the transitions themselves are covered by the store and mailer tests.
+
+mailcheap init
+exists mailcheap.db
+
+# --- newsletter ---------------------------------------------------------------------------------
+mailcheap newsletter create --name 'Field notes' --slug field-notes --from-name 'Jane Doe' --from-email jane@example.net --postal-address '1 Main St, Paris' --archive-enabled
+stdout '^[0-9a-f]{24}\n$'
+mailcheap newsletter list
+stdout 'field-notes'
+mailcheap newsletter show field-notes
+stdout 'jane@example.net'
+stdout 'archive         true'
+mailcheap newsletter update field-notes --name 'Field Notes Weekly' --require-confirmation
+stdout 'updated field-notes \(name, require-confirmation\)'
+mailcheap newsletter show field-notes --json
+stdout '"Name": "Field Notes Weekly"'
+
+# Requiring confirmation is what makes the contact below pending; turn it back off so the campaign
+# step has somebody to send to.
+mailcheap newsletter update field-notes --require-confirmation=false
+stdout 'updated field-notes \(require-confirmation\)'
+
+# --- contact ------------------------------------------------------------------------------------
+mailcheap contact add reader@example.com --newsletter field-notes
+stdout '^[0-9a-f]{24}\n$'
+mailcheap contact add second@example.com --newsletter field-notes
+mailcheap contact list --newsletter field-notes
+stdout 'reader@example.com'
+stdout '2 shown of 2'
+mailcheap contact list --newsletter field-notes --prefix second
+stdout '1 shown of 1'
+mailcheap contact show reader@example.com --newsletter field-notes
+stdout 'status           active'
+mailcheap contact update reader@example.com --newsletter field-notes --source imported
+stdout 'updated'
+mailcheap contact list --newsletter field-notes --json
+stdout '"Source": "imported"'
+
+# The exported header is the set an import reads back, which is what makes the file a backup.
+mailcheap contact export --newsletter field-notes
+stdout '^email,status,subscribed_at,emails_received,open_rate,click_rate'
+stdout 'reader@example.com,active,'
+
+# --- campaign -----------------------------------------------------------------------------------
+mailcheap campaign create --newsletter field-notes --subject 'Issue 12' --file issue.md --preview-text 'This week'
+stdout '^[0-9a-f]{24}\n$'
+mailcheap campaign list
+stdout 'draft\tIssue 12'
+mailcheap campaign show --subject 'Issue 12'
+stdout 'status       draft'
+mailcheap campaign update --subject 'Issue 12' --preview-text 'This week, from Paris'
+stdout 'updated'
+mailcheap campaign show --subject 'Issue 12' --json
+stdout '"PreviewText": "This week, from Paris"'
+
+# preview writes the email body exactly as a reader would get it, minus the per-recipient parts:
+# no tracking pixel and the unsubscribe placeholder still in place, because there is no message id
+# and no contact yet. That is upstream's renderEmail too (FormCampaign renders the preview the same
+# way, with the placeholder shown).
+mailcheap campaign preview --subject 'Issue 12' --out preview
+stdout 'preview.html and preview.txt'
+exists preview.html
+exists preview.txt
+grep 'unsubscribe_url' preview.html
+grep 'you subscribed to Field Notes Weekly' preview.html
+! grep '/o/' preview.html
+
+# check is the same checklist the send runs, and it passes here.
+mailcheap campaign check --subject 'Issue 12'
+stdout 'ok    subject'
+stdout 'ok    domain'
+! stdout 'FAIL'
+
+# test sends one message under the sentinel contact, so it must not touch the report.
+mailcheap campaign test --subject 'Issue 12' --to checker@example.com
+stdout 'test sent to checker@example.com'
+grep '"to":"checker@example.com"' sent.jsonl
+grep '"kind":"test"' sent.jsonl
+
+# schedule rejects a time in the past and accepts a relative one.
+! mailcheap campaign schedule --subject 'Issue 12' --at '2000-01-01T00:00:00Z'
+stderr 'Pick a time in the future'
+mailcheap campaign schedule --subject 'Issue 12' --at 'in 2h'
+stdout 'scheduled'
+mailcheap campaign list
+stdout 'scheduled\tIssue 12'
+
+# A scheduled campaign can still be sent by hand (the schedule is a plan, not a lock).
+mailcheap campaign send --subject 'Issue 12' --yes
+stdout 'queued 2 recipients'
+grep '"to":"reader@example.com"' sent.jsonl
+
+# pause and resume only have meaning mid-send; both refuse clearly otherwise.
+! mailcheap campaign pause --subject 'Issue 12'
+stderr 'only a sending one can be paused'
+! mailcheap campaign resume --subject 'Issue 12'
+stderr 'only a paused one can resume'
+
+-- issue.md --
+# Hello
+
+Read [this](https://example.com).

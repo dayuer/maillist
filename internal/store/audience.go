@@ -28,6 +28,16 @@ func (db *DB) SelectAudience(ctx context.Context, newsletterID string, limit int
 	return db.queryContacts(ctx, query, args...)
 }
 
+// CountActiveContacts is how many contacts a newsletter could send to right now. The pre-send
+// checklist shows it ("this step goes to N") and the campaign report uses it for "how many are left".
+func (db *DB) CountActiveContacts(ctx context.Context, newsletterID string) (int, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx,
+		"SELECT count(*) FROM contacts WHERE newsletter_id = ? AND status = ?",
+		newsletterID, string(model.ContactActive)).Scan(&count)
+	return count, err
+}
+
 // SuppressedEmails is every suppressed address, for callers that need the set in Go.
 func (db *DB) SuppressedEmails(ctx context.Context) ([]string, error) {
 	rows, err := db.sql.QueryContext(ctx, "SELECT email FROM suppressions ORDER BY email")

@@ -14,8 +14,6 @@ import (
 	"mailcheap/internal/core/checks"
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/rules"
 	"mailcheap/internal/core/validate"
 	"mailcheap/internal/mailer"
 	"mailcheap/internal/store"
@@ -26,7 +24,12 @@ func newCampaignCmd() *cobra.Command {
 		Use:   "campaign",
 		Short: "Manage campaigns",
 	}
-	cmd.AddCommand(newCampaignCreateCmd(), newCampaignListCmd(), newCampaignSendCmd())
+	cmd.AddCommand(
+		newCampaignCreateCmd(), newCampaignListCmd(), newCampaignSendCmd(),
+		newCampaignUpdateCmd(), newCampaignShowCmd(), newCampaignPreviewCmd(),
+		newCampaignCheckCmd(), newCampaignTestCmd(), newCampaignScheduleCmd(),
+		newCampaignPauseCmd(), newCampaignResumeCmd(),
+	)
 	return cmd
 }
 
@@ -158,22 +161,22 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 		}
 		// The pre-send checks are the ones the engine enforces; running them here turns a rejected
 		// send into a readable error instead of a queued campaign that never starts.
-		verified, err := verifiedDomains(ctx, a)
+		report, err := runChecks(ctx, a, campaign, newsletter)
 		if err != nil {
 			return err
 		}
-		report := checks.Run(checks.Input{
-			Campaign: campaign, Newsletter: newsletter,
-			Rendered: render.Email(render.EmailInput{
-				Format: campaign.Format, Body: campaign.Body, Subject: campaign.Subject,
-				PreviewText: campaign.PreviewText, Newsletter: newsletter,
-			}),
-			SendingOn:      a.Config.SendingOn,
-			Limits:         a.Config.Limits,
-			DomainVerified: rules.VerifiedFromDomain(verified, newsletter.FromEmail),
-		})
 		if blocked, ok := checks.Blocked(report); ok {
 			return fmt.Errorf("%s: %s", blocked.ID, blocked.Message)
+		}
+		// SEND_APPROVAL=manual parks the send for `mailcheap approve` instead of doing it now.
+		if jobID, held, err := queueOrHold(ctx, a, campaign, limit); err != nil {
+			return err
+		} else if held {
+			if jsonOutput(cmd) {
+				return printJSON(cmd, map[string]any{"jobId": jobID, "holding": true})
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "held for approval: approve %s\n", jobID)
+			return nil
 		}
 		if !yes && !confirm(cmd) {
 			return errors.New("aborted")
