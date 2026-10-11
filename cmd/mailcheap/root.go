@@ -43,6 +43,10 @@ func newRootCmd() *cobra.Command {
 		newCredentialsCmd(),
 		newAuditCmd(),
 		newUploadCmd(),
+		newDomainsCmd(),
+		newApproveCmd(),
+		newDBCmd(),
+		newHealthCmd(),
 	)
 	return root
 }

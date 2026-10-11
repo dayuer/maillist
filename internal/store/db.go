@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -75,6 +76,22 @@ func (db *DB) Path() string { return db.path }
 func (db *DB) Ping(ctx context.Context) error {
 	var one int
 	return db.sql.QueryRowContext(ctx, "SELECT 1").Scan(&one)
+}
+
+// BackupTo writes a consistent copy of the database to path with SQLite's own VACUUM INTO.
+//
+// It is the online backup the design asks for: the copy is taken while the database keeps serving,
+// readers and the writer included, and it is one consistent snapshot rather than a file copy that
+// could catch a checkpoint halfway. The destination must not exist — SQLite refuses to overwrite,
+// which is the behaviour a backup wants.
+func (db *DB) BackupTo(ctx context.Context, path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists", path)
+	}
+	if _, err := db.sql.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
+		return fmt.Errorf("back up to %s: %w", path, err)
+	}
+	return nil
 }
 
 // Rows is the read side of the connection pool, for a package that owns a table of its own
