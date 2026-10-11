@@ -2,7 +2,11 @@
 // Mongoose models (marclou/mailcheap@67d13b0 models/*.js) minus what died with the dashboard.
 package model
 
-import "time"
+import (
+	"time"
+
+	"mailcheap/internal/core/ids"
+)
 
 // Format is how a campaign body is written. The upstream "rich" format (TipTap) is gone.
 type Format string
@@ -128,6 +132,23 @@ type Campaign struct {
 	WebViews      int
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
+}
+
+// NewCampaign is a draft carrying the schema defaults upstream's Mongoose model declares, so every
+// creation path (the CLI now, the API and MCP later) starts from the same values.
+func NewCampaign(newsletterID, subject string, now time.Time) Campaign {
+	return Campaign{
+		ID:           ids.New(),
+		NewsletterID: newsletterID,
+		Subject:      subject,
+		Status:       CampaignDraft,
+		Format:       FormatMarkdown,
+		// Upstream: archiveListed: {type: Boolean, default: true}. The Go zero value is false, so it
+		// is stated here; the store's column default is the second line of defence.
+		ArchiveListed: true,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
 }
 
 type Contact struct {

@@ -1,0 +1,267 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"mailcheap/internal/core/model"
+	"mailcheap/internal/core/rules"
+)
+
+// CampaignCounters are the issue's own counters (upstream campaign.stats).
+type CampaignCounters struct {
+	Recipients, Sent, Delivered, Bounced, Complained, Opened, Clicked, Unsubscribed, Failed int
+}
+
+// LastChanceCounters are the last-chance emails a campaign sent instead of the issue (upstream
+// campaign.lastChance). They are counted apart so open and click rates stay the issue's own.
+type LastChanceCounters struct {
+	Recipients, Sent, Delivered, Bounced, Complained, Failed, Dormant int
+}
+
+// PauseStats is what rules.CampaignPauseReason looks at: last-chance emails go to the least engaged
+// addresses, so their bounces and complaints count toward the limits too (upstream
+// getCampaignPauseReason(stats, lastChance)).
+func (c CampaignCounters) PauseStats(lastChance LastChanceCounters) rules.CampaignStats {
+	return rules.CampaignStats{
+		Sent:       c.Sent + lastChance.Sent,
+		Bounced:    c.Bounced + lastChance.Bounced,
+		Complained: c.Complained + lastChance.Complained,
+	}
+}
+
+// campaignColumns is the SELECT list every campaign query shares, in scanCampaign order.
+const campaignColumns = `id, newsletter_id, subject, preview_text, format, body, status,
+    audience_limit, source, scheduled_at, started_at, sent_at, test_sent_at, archive_slug,
+    thumbnail_url, archive_listed, archive_pinned, web_views, stats_recipients, stats_sent,
+    stats_delivered, stats_bounced, stats_complained, stats_opened, stats_clicked,
+    stats_unsubscribed, stats_failed, last_chance_recipients, last_chance_sent,
+    last_chance_delivered, last_chance_bounced, last_chance_complained, last_chance_failed,
+    last_chance_dormant, created_at, updated_at`
+
+// CreateCampaign inserts one campaign. archive_listed is written explicitly: the model's
+// model.NewCampaign sets it, and the column default covers rows inserted without it.
+func (db *DB) CreateCampaign(ctx context.Context, c model.Campaign) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO campaigns (`+campaignColumns+`) VALUES (
+            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			c.ID, c.NewsletterID, c.Subject, c.PreviewText, string(c.Format), c.Body, string(c.Status),
+			c.AudienceLimit, c.Source, formatTimePtr(c.ScheduledAt), formatTimePtr(c.StartedAt),
+			formatTimePtr(c.SentAt), formatTimePtr(c.TestSentAt), c.ArchiveSlug, c.ThumbnailURL,
+			boolInt(c.ArchiveListed), boolInt(c.ArchivePinned), c.WebViews,
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+			formatTime(nonZero(c.CreatedAt)), formatTime(time.Now()))
+		return err
+	})
+}
+
+func nonZero(at time.Time) time.Time {
+	if at.IsZero() {
+		return time.Now()
+	}
+	return at
+}
+
+func scanCampaign(row interface{ Scan(...any) error }) (model.Campaign, error) {
+	var (
+		c                              model.Campaign
+		format, status                 string
+		scheduledAt, startedAt, sentAt sql.NullString
+		testSentAt                     sql.NullString
+		archiveListed, archivePinned   int
+		createdAt, updatedAt           string
+	)
+	err := row.Scan(&c.ID, &c.NewsletterID, &c.Subject, &c.PreviewText, &format, &c.Body, &status,
+		&c.AudienceLimit, &c.Source, &scheduledAt, &startedAt, &sentAt, &testSentAt, &c.ArchiveSlug,
+		&c.ThumbnailURL, &archiveListed, &archivePinned, &c.WebViews,
+		new(int), new(int), new(int), new(int), new(int), new(int), new(int), new(int), new(int),
+		new(int), new(int), new(int), new(int), new(int), new(int), new(int),
+		&createdAt, &updatedAt)
+	if err != nil {
+		return model.Campaign{}, err
+	}
+	c.Format = model.Format(format)
+	c.Status = model.CampaignStatus(status)
+	c.ArchiveListed = archiveListed != 0
+	c.ArchivePinned = archivePinned != 0
+	for _, field := range []struct {
+		source sql.NullString
+		target **time.Time
+	}{
+		{scheduledAt, &c.ScheduledAt}, {startedAt, &c.StartedAt},
+		{sentAt, &c.SentAt}, {testSentAt, &c.TestSentAt},
+	} {
+		parsed, err := parseTimePtr(field.source)
+		if err != nil {
+			return model.Campaign{}, err
+		}
+		*field.target = parsed
+	}
+	if c.CreatedAt, err = parseTime(createdAt); err != nil {
+		return model.Campaign{}, err
+	}
+	if c.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return model.Campaign{}, err
+	}
+	return c, nil
+}
+
+// Campaign loads one by id.
+func (db *DB) Campaign(ctx context.Context, id string) (model.Campaign, error) {
+	c, err := scanCampaign(db.sql.QueryRowContext(ctx,
+		"SELECT "+campaignColumns+" FROM campaigns WHERE id = ?", id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Campaign{}, fmt.Errorf("campaign %s: %w", id, ErrNotFound)
+	}
+	return c, err
+}
+
+// Campaigns lists a newsletter's campaigns, most recently active first. An empty newsletterID lists
+// every newsletter's.
+func (db *DB) Campaigns(ctx context.Context, newsletterID string, limit int) ([]model.Campaign, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := "SELECT " + campaignColumns + " FROM campaigns"
+	args := []any{}
+	if newsletterID != "" {
+		query += " WHERE newsletter_id = ?"
+		args = append(args, newsletterID)
+	}
+	query += ` ORDER BY coalesce(sent_at, started_at, scheduled_at, updated_at) DESC, id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []model.Campaign
+	for rows.Next() {
+		c, err := scanCampaign(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// UpdateCampaign writes every mutable column of c back. created_at is never rewritten.
+func (db *DB) UpdateCampaign(ctx context.Context, c model.Campaign) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE campaigns SET
+            subject = ?, preview_text = ?, format = ?, body = ?, status = ?, audience_limit = ?,
+            source = ?, scheduled_at = ?, started_at = ?, sent_at = ?, test_sent_at = ?,
+            archive_slug = ?, thumbnail_url = ?, archive_listed = ?, archive_pinned = ?,
+            web_views = ?, updated_at = ? WHERE id = ?`,
+			c.Subject, c.PreviewText, string(c.Format), c.Body, string(c.Status), c.AudienceLimit,
+			c.Source, formatTimePtr(c.ScheduledAt), formatTimePtr(c.StartedAt),
+			formatTimePtr(c.SentAt), formatTimePtr(c.TestSentAt), c.ArchiveSlug, c.ThumbnailURL,
+			boolInt(c.ArchiveListed), boolInt(c.ArchivePinned), c.WebViews,
+			formatTime(time.Now()), c.ID)
+		if err != nil {
+			return err
+		}
+		return requireOneRow(result, "campaign", c.ID)
+	})
+}
+
+// SetCampaignStatus moves a campaign from one of the from statuses to to and reports whether it
+// moved. It is how "only draft/scheduled/paused may start sending" is enforced at the database
+// (design D7, invariant 3).
+func (db *DB) SetCampaignStatus(ctx context.Context, id string, from []model.CampaignStatus, to model.CampaignStatus) (bool, error) {
+	moved := false
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		moved = false
+		placeholders := make([]string, len(from))
+		args := []any{string(to), formatTime(time.Now())}
+		for i, status := range from {
+			placeholders[i] = "?"
+			args = append(args, string(status))
+		}
+		args = append(args, id)
+		// The only interpolated text is a run of "?" placeholders; every value is bound.
+		query := "UPDATE campaigns SET status = ?, updated_at = ? WHERE status IN (" + //nolint:gosec // G202: placeholders, not values
+			strings.Join(placeholders, ",") + ") AND id = ?"
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		moved = affected > 0
+		return nil
+	})
+	return moved, err
+}
+
+// AddCampaignStats bumps the issue's counters; it is the only writer of the stats_* columns.
+func (db *DB) AddCampaignStats(ctx context.Context, id string, delta CampaignCounters) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE campaigns SET
+            stats_recipients = stats_recipients + ?, stats_sent = stats_sent + ?,
+            stats_delivered = stats_delivered + ?, stats_bounced = stats_bounced + ?,
+            stats_complained = stats_complained + ?, stats_opened = stats_opened + ?,
+            stats_clicked = stats_clicked + ?, stats_unsubscribed = stats_unsubscribed + ?,
+            stats_failed = stats_failed + ?, updated_at = ?
+            WHERE id = ?`,
+			delta.Recipients, delta.Sent, delta.Delivered, delta.Bounced, delta.Complained,
+			delta.Opened, delta.Clicked, delta.Unsubscribed, delta.Failed, formatTime(time.Now()), id)
+		return err
+	})
+}
+
+// AddLastChanceStats bumps the last-chance counters.
+func (db *DB) AddLastChanceStats(ctx context.Context, id string, delta LastChanceCounters) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE campaigns SET
+            last_chance_recipients = last_chance_recipients + ?,
+            last_chance_sent = last_chance_sent + ?, last_chance_delivered = last_chance_delivered + ?,
+            last_chance_bounced = last_chance_bounced + ?,
+            last_chance_complained = last_chance_complained + ?,
+            last_chance_failed = last_chance_failed + ?, last_chance_dormant = last_chance_dormant + ?,
+            updated_at = ? WHERE id = ?`,
+			delta.Recipients, delta.Sent, delta.Delivered, delta.Bounced, delta.Complained,
+			delta.Failed, delta.Dormant, formatTime(time.Now()), id)
+		return err
+	})
+}
+
+// CampaignCountersOf reads both counter groups.
+func (db *DB) CampaignCountersOf(ctx context.Context, id string) (CampaignCounters, LastChanceCounters, error) {
+	var (
+		stats      CampaignCounters
+		lastChance LastChanceCounters
+	)
+	err := db.sql.QueryRowContext(ctx, `SELECT
+            stats_recipients, stats_sent, stats_delivered, stats_bounced, stats_complained,
+            stats_opened, stats_clicked, stats_unsubscribed, stats_failed,
+            last_chance_recipients, last_chance_sent, last_chance_delivered, last_chance_bounced,
+            last_chance_complained, last_chance_failed, last_chance_dormant
+        FROM campaigns WHERE id = ?`, id).Scan(
+		&stats.Recipients, &stats.Sent, &stats.Delivered, &stats.Bounced, &stats.Complained,
+		&stats.Opened, &stats.Clicked, &stats.Unsubscribed, &stats.Failed,
+		&lastChance.Recipients, &lastChance.Sent, &lastChance.Delivered, &lastChance.Bounced,
+		&lastChance.Complained, &lastChance.Failed, &lastChance.Dormant)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CampaignCounters{}, LastChanceCounters{}, fmt.Errorf("campaign %s: %w", id, ErrNotFound)
+	}
+	return stats, lastChance, err
+}
+
+// SetCampaignSentAt records the first send's time; a campaign sent in steps keeps the earliest.
+func (db *DB) SetCampaignSentAt(ctx context.Context, id string, at time.Time) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE campaigns SET sent_at = ?, updated_at = ?
+            WHERE id = ? AND (sent_at IS NULL OR sent_at > ?)`,
+			formatTime(at), formatTime(time.Now()), id, formatTime(at))
+		return err
+	})
+}
