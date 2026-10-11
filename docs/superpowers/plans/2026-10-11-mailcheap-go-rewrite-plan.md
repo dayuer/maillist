@@ -1888,11 +1888,13 @@ type RecipientInput struct {
 func BuildRecipientEmail(s *sign.Signer, in RecipientInput) (RecipientEmail, error)
 
 // SendProblem is the first blocking reason in upstream's wording ("Add content", …), or "".
-func SendProblem(c model.Campaign, n model.Newsletter, maxEmailBytes int) string
+// SendProblem builds the test email to measure it, so it needs the signer and the app URL; n is a
+// pointer so "Newsletter not found" is expressible. Revised during phase 1 (see 阶段 1 计划修订).
+func SendProblem(s *sign.Signer, appURL string, c model.Campaign, n *model.Newsletter, maxEmailBytes int) string
 func NextStepLimit(sentSoFar, additional int) int
 
 type CampaignStats struct{ Sent, Bounced, Complained int }
-type PauseReason string // "" | "bounce" | "complaint"
+type PauseReason string // "" | "bounce rate" | "complaint rate" (upstream's wording)
 func CampaignPauseReason(st CampaignStats, l model.Limits) PauseReason
 
 type ErrorAction string
@@ -1937,12 +1939,13 @@ type Check struct {
 }
 
 type Input struct {
-	Campaign      model.Campaign
-	Newsletter    model.Newsletter
-	Rendered      render.Rendered
-	SendingOn     bool
-	Audience      int
-	Limits        model.Limits
+	Campaign       model.Campaign
+	Newsletter     model.Newsletter
+	Rendered       render.Rendered
+	SendingOn      bool
+	DomainVerified bool // upstream's isDomainVerified; the "domain" check needs it (phase-1 revision)
+	Audience       int
+	Limits         model.Limits
 }
 
 func Run(in Input) []Check
@@ -2112,7 +2115,15 @@ func Problem(at, now time.Time) string
 // Suggestions from past send times: same weekday and time-of-day, next occurrence at least 10 minutes
 // ahead, rounded to the 15-minute slot, moved a week on when taken or too close. All arithmetic is UTC
 // (upstream uses Date.UTC / getUTCDay); no loc parameter.
-func Suggestions(history, taken []time.Time, now time.Time) []time.Time
+// Suggestion carries the slot's history too: upstream's test asserts Uses, LastUsedAt and
+// IsLastIssue, which []time.Time can't hold. Revised during phase 1.
+type Suggestion struct {
+	At          time.Time
+	Uses        int
+	LastUsedAt  time.Time
+	IsLastIssue bool
+}
+func Suggestions(history, taken []time.Time, now time.Time) []Suggestion
 ```
 
 **要翻译的测试**：`tests/schedule.test.mjs` 全部 5 条。时区语义固定为 UTC（上游 `Date.UTC`/`getUTCDay`，注释 "Slots are in UTC"），不传 `*time.Location`。
@@ -2122,6 +2133,35 @@ func Suggestions(history, taken []time.Time, now time.Time) []time.Time
 - [ ] Run: `make test lint` — Expected: 全部 `ok`，`0 issues.`
 - [ ] Run: `go list -f '{{.ImportPath}} {{.Imports}}' ./internal/core/... | grep -E '\b(os|net/http|database/sql|mailcheap/internal/(store|mailer))\b'` — Expected: 无输出（只看直接 import；`go list -deps` 给的是传递闭包，会把 `config` 的 `os` 一起带出来，故不用）
 - [ ] 开 PR `phase-1-core` → main，CI 绿后合并
+
+### 阶段 1 计划修订（执行 Task 1.1–1.16 时发现）
+
+按 §1 的原则"计划与上游不符时以上游为准"，执行中改了下面几处**签名或契约**。理由都写在进行处。阶段 2 及以后请以本表为准，不要照抄上文旧签名。
+
+| Task | 计划原样 | 实际落地 | 理由 |
+|---|---|---|---|
+| 1.10 | `SendProblem(c, n model.Newsletter, maxBytes)` | `SendProblem(s *sign.Signer, appURL string, c, n *model.Newsletter, maxBytes)` | 上游用测试联系人真发一封来量字节数，量尺本身要签名者与 APP_URL；`n` 用指针才能表达 "Newsletter not found" |
+| 1.10 | `PauseReason` 注释写 `"bounce"`/`"complaint"` | `"bounce rate"`/`"complaint rate"` | 上游 `getCampaignPauseReason` 的原话，测试直接断言 |
+| 1.10 | `RecipientEmail` 无 `Bytes` | 增加 `Bytes int` | 上游 `buildRecipientEmail` 返回 bytes，测试断言 `bytes === byteLength(html)` |
+| 1.10 | `IssueWebURL` 判 `archiveListed === false` | 判 `!c.ArchiveListed` | 上游 schema `archiveListed: {type: Boolean, default: true}`：**默认列出**，而 Go 零值是 false。阶段 2 建表与 create 路径必须把该列默认写成 true，否则草稿会悄悄不上归档 |
+| 1.10 | 未提 slugify | `rules.slugify`（unexported，引 `golang.org/x/text/unicode/norm`） | 草稿的归档链接要用主题 slug，上游用 NFKD 去音标 |
+| 1.10 | 未提 confirm/keep 占位符 | `rules.ConfirmURLPlaceholder` / `KeepURLPlaceholder` | 上游放在 `confirmation-content.js` / `last-chance-content.js`（阶段 4/7），但 1.10 的组装函数现在就要用 |
+| 1.11 | `checks.Input` 无域验证字段 | 增加 `DomainVerified bool` | 上游 `isDomainVerified` 是 `domain` 检查的唯一输入 |
+| 1.13 | `Verifier.cache map[string]*x509.Certificate` | `map[string]crypto.PublicKey` | 上游测试喂给验证器的是裸 PUBLIC KEY PEM（不是证书）。真实 SNS 发的是证书，两种都解析 |
+| 1.14 | `Plan`/`FirstWrite` 只留时间戳与状态 | 增加 `StatusFrom`、`SuppressDetail`、`ContactStatusFrom`、`FirstWrite.Stat`/`ContactStat` | 上游测试断言 `status.from`、`suppression.detail`、`suppression.contactStatusFrom`、`firsts[].stat`——这些正是"只前进""不把 complained 降级回 bounced"的守卫 |
+| 1.14 | 未提状态词汇映射 | 上游 `"queued"` → 设计的 `pending`/`claimed` | 设计 D14 的消息生命周期与上游不同名，见设计 §"messages"行 |
+| 1.14 | `Plan.Kind` 无来源 | 取自 Mailcheap 写入的 `kind` 标签 | 上游从库里读 `message.kind`；标签是同一信息（`lib/sending.js getMessageTags`） |
+| 1.15 | `Merge(rows, existing) []Write` | 保持签名，但**明确收窄**：只决定"插入"与"状态前进"，不刷新既有联系人的导入互动数据 | 上游 `$set: {"imported.*"}` 会刷新既有联系人；计划的 `Write` 无此字段。阶段 2 写 store 时必须重新决定（CSV 原文手边就有） |
+| 1.16 | `Suggestions(...) []time.Time` | 返回 `[]Suggestion`（含 `Uses`/`LastUsedAt`/`IsLastIssue`） | 上游测试断言这三个字段，纯时间数组存不下 |
+| 1.8 | 未提 `BeforeLastTagEnd`/`ReplaceElements` | 从 `content` 导出 | 二者是上游 `clean-html.js` 的导出，`render` 的 `htmlToText` 要用 |
+| 1.7 | 渲染器含 `WithAutoHeadingID` | 去掉 | marked 不加标题 id，goldmark 默认也不加；加了会多出 `<h1 id="…">` |
+| 1.8 | 只提 `FirstImageURL(html)` | 保持；上游 `firstImageUrl` 的 Markdown 分支**延后** | 计划签名只覆盖 HTML 分支；Markdown 缩略图属归档/导入路径（阶段 7） |
+
+另有几处是**测试断言**层面的偏差，理由已写在各自测试注释里：
+
+- Task 1.8：上游是逐条正则的清洗器，Go 用 bluemonday 策略。输出形状差 `<br/>` vs `<br />`（已归一化）、文本里的 `>` vs `&gt;`、含空格的相对 href 被整条丢弃（bluemonday 更严）。`renderIssueBody` 相关的断言（archive 包装、`fetchpriority`/`decoding`）属阶段 7。
+- Task 1.10/1.11：上游 `rich` 格式的用例改写为 Markdown 版本（`rich` 随编辑器一起删除）；`formatFromAddress` 的 `campaign.replyTo` 在上游 schema 里并不存在，实际恒为 newsletter 的 `replyTo`。
+- Task 1.15：`contact-import.test.mjs` 断言的是 Mongo `bulkWrite` 文档形状（`$setOnInsert`/`$set`/`upsert`），按 §1.2 不直译，改为在 `Merge` 的词汇里断言同样的决策；`sanitizeImportRow` 的用例随浏览器端导入消失。
 
 ---
 
