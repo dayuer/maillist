@@ -610,6 +610,28 @@ func printCampaignReport(cmd *cobra.Command, campaign model.Campaign, counters s
 	}
 }
 
+// sendOutcome reports what the CLI's own drain left behind.
+//
+// A campaign that paused part-way through is not a success: the engine pauses when the bounce or
+// complaint rate crosses its limit, and saying "queued N recipients" over a half-sent issue hid
+// that. The count of what did go out is the useful part of the message (the phase 1-3 audit's
+// ST-I7).
+func sendOutcome(ctx context.Context, a *app.App, campaignID string, recipients int) error {
+	campaign, err := a.Store.Campaign(ctx, campaignID)
+	if err != nil {
+		return err
+	}
+	if campaign.Status != model.CampaignPaused {
+		return nil
+	}
+	counters, _, err := a.Store.CampaignCountersOf(ctx, campaignID)
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("the campaign paused after %s of %s: the bounce or complaint rate crossed its limit; "+
+		"campaign resume sends the rest", stats.FormatNumber(counters.Sent), stats.FormatNumber(recipients))
+}
+
 // drainQueue is the CLI's own sender: it drains queued messages until there are none left. It is
 // what a command does when no serve process holds the heartbeat.
 func drainQueue(ctx context.Context, a *app.App) error {

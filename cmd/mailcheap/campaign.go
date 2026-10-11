@@ -194,8 +194,12 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 			return errors.New(queued.Reason)
 		}
 		if !serverIsSending {
-			// Nothing else is sending, so the command drains its own queue.
+			// Nothing else is sending, so the command drains its own queue — and reports what that
+			// left behind rather than assuming it finished.
 			if err := drainQueue(ctx, a); err != nil {
+				return err
+			}
+			if err := sendOutcome(ctx, a, campaign.ID, queued.Recipients); err != nil {
 				return err
 			}
 		}
