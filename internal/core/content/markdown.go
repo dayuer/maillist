@@ -5,7 +5,6 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
-	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer/html"
 )
 
@@ -19,9 +18,9 @@ var (
 func newMarkdownRenderer(isEmail bool) goldmark.Markdown {
 	return goldmark.New(
 		goldmark.WithExtensions(extension.GFM, calloutExtension{isEmail: isEmail}),
-		goldmark.WithParserOptions(parser.WithAutoHeadingID()),
-		// Raw HTML is allowed here: the result is cleaned afterwards (CleanContent, Task 1.8), and
-		// HTML-format issues never come through this path at all.
+		// No heading ids: marked, the upstream parser, doesn't add them either.
+		// Raw HTML is allowed here: the result is cleaned afterwards (CleanContent), and HTML-format
+		// issues never come through this path at all.
 		goldmark.WithRendererOptions(html.WithUnsafe()),
 	)
 }
