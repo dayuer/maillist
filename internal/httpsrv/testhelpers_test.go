@@ -17,6 +17,7 @@ import (
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/sign"
 	"mailcheap/internal/events"
+	"mailcheap/internal/mailer"
 	"mailcheap/internal/store"
 )
 
@@ -27,6 +28,8 @@ type testServer struct {
 	*Server
 	store  *store.DB
 	signer *sign.Signer
+	fake   *mailer.Fake
+	engine *mailer.Engine
 	now    time.Time
 }
 
@@ -64,10 +67,17 @@ func newTestServerWith(t *testing.T, tweak func(*config.Config)) *testServer {
 	tweak(&cfg)
 
 	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
-	server := New(cfg, db, signer, events.New(db, testLogger(t)), testVerifier(t), testLogger(t))
+	fake := mailer.NewFake()
+	engine := mailer.NewEngine(db, fake, signer, mailer.Config{
+		AppURL: cfg.AppURL, SendingOn: cfg.SendingOn,
+		SendRatePerSec: 1000, Limits: cfg.Limits, PollInterval: 10 * time.Millisecond,
+	}, testLogger(t))
+	t.Cleanup(engine.Close)
+
+	server := New(cfg, db, signer, events.New(db, testLogger(t)), engine, testVerifier(t), testLogger(t))
 	server.Subscribe = func(context.Context, string) error { return nil }
 	server.now = func() time.Time { return now }
-	return &testServer{Server: server, store: db, signer: signer, now: now}
+	return &testServer{Server: server, store: db, signer: signer, fake: fake, engine: engine, now: now}
 }
 
 func testLogger(t *testing.T) *slog.Logger {
@@ -187,6 +197,28 @@ func (s *testServer) postFormFrom(t *testing.T, path string, form url.Values, ip
 	recorder := httptest.NewRecorder()
 	s.ServeHTTP(recorder, request)
 	return recorder.Result()
+}
+
+// confirmToken signs a confirmation link for a contact.
+func (s *testServer) confirmToken(t *testing.T, contact model.Contact) string {
+	t.Helper()
+	token, err := s.signer.ContactToken(sign.InfoConfirm,
+		sign.Ref{ContactID: contact.ID, NewsletterID: contact.NewsletterID}, s.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+// keepToken signs a last-chance "keep sending it" link for a contact.
+func (s *testServer) keepToken(t *testing.T, contact model.Contact) string {
+	t.Helper()
+	token, err := s.signer.ContactToken(sign.InfoKeep,
+		sign.Ref{ContactID: contact.ID, NewsletterID: contact.NewsletterID}, s.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
 }
 
 // seedMessage is a sent campaign message for an active contact, ready to be tracked.

@@ -687,6 +687,116 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 	return TestResult{MessageID: message.ID, SESMessageID: sent.sesMessageID, SentAt: sent.sentAt}, nil
 }
 
+// SignupResult is what queueing a welcome or confirmation email did; Skipped says why it didn't go.
+type SignupResult struct {
+	MessageID string
+	Skipped   string
+}
+
+// QueueWelcome is upstream queueWelcomeEmail: one welcome email per contact, only to an active one,
+// and only while the newsletter's welcome email is switched on and complete.
+func (e *Engine) QueueWelcome(ctx context.Context, newsletter model.Newsletter, contact model.Contact) (SignupResult, error) {
+	if !e.cfg.SendingOn {
+		return SignupResult{}, errSendingOff
+	}
+	content, ok := rules.WelcomeContent(newsletter)
+	if !ok {
+		return SignupResult{Skipped: "welcome email is off"}, nil
+	}
+	if contact.Status != model.ContactActive {
+		return SignupResult{Skipped: "contact is not active"}, nil
+	}
+	if problem := rules.SendProblem(e.signer, e.cfg.AppURL, model.Campaign{
+		Format: model.FormatMarkdown, Subject: content.Subject,
+		PreviewText: content.PreviewText, Body: content.Markdown,
+	}, &newsletter, e.cfg.Limits.MaxEmailBytes); problem != "" {
+		e.log.Warn("welcome email not sent", "newsletter", newsletter.Slug, "problem", problem)
+		return SignupResult{Skipped: problem}, nil
+	}
+	return e.queueSignup(ctx, newsletter, contact, model.KindWelcome)
+}
+
+// QueueConfirmation is upstream queueConfirmationEmail: at most rules.MaxConfirmationsPerContact per
+// contact, never twice inside the welcome window, and only to a contact waiting to confirm.
+func (e *Engine) QueueConfirmation(ctx context.Context, newsletter model.Newsletter, contact model.Contact) (SignupResult, error) {
+	if !e.cfg.SendingOn {
+		return SignupResult{}, errSendingOff
+	}
+	if contact.Status != model.ContactPending {
+		return SignupResult{Skipped: "contact is not pending"}, nil
+	}
+	content := rules.ConfirmationContent(newsletter)
+	if problem := rules.SendProblem(e.signer, e.cfg.AppURL, model.Campaign{
+		Format: model.FormatMarkdown, Subject: content.Subject,
+		PreviewText: content.PreviewText, Body: content.Markdown,
+	}, &newsletter, e.cfg.Limits.MaxEmailBytes); problem != "" {
+		e.log.Warn("confirmation email not sent", "newsletter", newsletter.Slug, "problem", problem)
+		return SignupResult{Skipped: problem}, nil
+	}
+	return e.queueSignup(ctx, newsletter, contact, model.KindConfirmation)
+}
+
+// queueSignup is the shared tail of the two: the caps, then one message and one batch.
+func (e *Engine) queueSignup(ctx context.Context, newsletter model.Newsletter, contact model.Contact,
+	kind model.MessageKind) (SignupResult, error) {
+	if _, suppressed, err := e.store.Suppression(ctx, contact.Email); err != nil {
+		return SignupResult{}, err
+	} else if suppressed {
+		return SignupResult{Skipped: "suppressed"}, nil
+	}
+
+	window := time.Now().UTC().Add(-rules.WelcomeWindow)
+	if kind == model.KindWelcome {
+		sent, err := e.store.HasMessageOfKind(ctx, contact.ID, model.KindWelcome)
+		if err != nil {
+			return SignupResult{}, err
+		}
+		if sent {
+			return SignupResult{Skipped: "already sent"}, nil
+		}
+	} else {
+		count, err := e.store.CountContactMessages(ctx, contact.ID, model.KindConfirmation)
+		if err != nil {
+			return SignupResult{}, err
+		}
+		recent, err := e.store.HasMessageOfKindSince(ctx, contact.ID, model.KindConfirmation, window)
+		if err != nil {
+			return SignupResult{}, err
+		}
+		if recent || count >= rules.MaxConfirmationsPerContact {
+			return SignupResult{Skipped: "already sent"}, nil
+		}
+	}
+
+	// Welcome and confirmation emails share one cap per newsletter, so a signup flood cannot burn
+	// the sending domain's reputation, and one newsletter's flood doesn't hold up another's.
+	recent, err := e.store.CountMessagesSince(ctx, newsletter.ID,
+		[]model.MessageKind{model.KindWelcome, model.KindConfirmation}, window)
+	if err != nil {
+		return SignupResult{}, err
+	}
+	if recent >= e.cfg.Limits.WelcomeEmailsPer10Minute {
+		e.log.Warn("signup emails capped", "newsletter", newsletter.Slug,
+			"limit", e.cfg.Limits.WelcomeEmailsPer10Minute)
+		return SignupResult{Skipped: "rate limited"}, nil
+	}
+
+	message := model.Message{
+		ID: ids.New(), Kind: kind, NewsletterID: newsletter.ID, ContactID: contact.ID,
+		Email: contact.Email, Status: model.MessagePending, CreatedAt: time.Now().UTC(),
+	}
+	if _, err := e.store.InsertMessages(ctx, []model.Message{message}); err != nil {
+		return SignupResult{}, err
+	}
+	if _, err := e.SendBatch(ctx, []string{message.ID}); err != nil {
+		return SignupResult{}, err
+	}
+	return SignupResult{MessageID: message.ID}, nil
+}
+
+// errSendingOff is upstream's wording, which rules.SendErrorAction also recognises.
+var errSendingOff = errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
+
 // toMessages turns an audience into pending campaign messages.
 func toMessages(campaign model.Campaign, contacts []model.Contact) []model.Message {
 	now := time.Now().UTC()

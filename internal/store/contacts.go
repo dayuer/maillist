@@ -469,6 +469,187 @@ func (db *DB) CreditLatestCampaignUnsubscribe(ctx context.Context, contactID, ne
 	})
 }
 
+// UpsertContact is upstream upsertContact: joining is idempotent, a suppressed address joins with the
+// status its suppression implies, and only an explicit resubscribe brings a contact back.
+func (db *DB) UpsertContact(ctx context.Context, newsletter model.Newsletter, email, source string,
+	resubscribe bool) (model.Contact, bool, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	joinStatus := model.ContactActive
+	if newsletter.RequireConfirmation {
+		joinStatus = model.ContactPending
+	}
+	now := time.Now().UTC()
+	var (
+		contact model.Contact
+		created bool
+	)
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		reason, suppressed, err := suppressionInTx(ctx, tx, email)
+		if err != nil {
+			return err
+		}
+		status := joinStatus
+		if suppressed {
+			status = suppressedStatus(reason)
+		}
+
+		result, err := tx.ExecContext(ctx, `INSERT INTO contacts (
+                id, newsletter_id, email, status, source, subscribed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(newsletter_id, email) DO NOTHING`,
+			ids.New(), newsletter.ID, email, string(status), source,
+			formatTime(now), formatTime(now), formatTime(now))
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		created = affected > 0
+
+		if !created && resubscribe && !suppressed {
+			// Signing up again is a sign of life, and brings back a contact who left or went dormant.
+			if _, err := tx.ExecContext(ctx, `UPDATE contacts SET
+                    status = CASE WHEN status IN (?, ?) THEN ? ELSE status END,
+                    subscribed_at = CASE WHEN status IN (?, ?) THEN ? ELSE subscribed_at END,
+                    unsubscribed_at = CASE WHEN status IN (?, ?) THEN NULL ELSE unsubscribed_at END,
+                    last_engaged_at = CASE
+                        WHEN last_engaged_at IS NULL OR last_engaged_at < ? THEN ?
+                        ELSE last_engaged_at END,
+                    ignored_issues = 0,
+                    updated_at = ?
+                    WHERE newsletter_id = ? AND email = ?`,
+				string(model.ContactUnsubscribed), string(model.ContactDormant), string(joinStatus),
+				string(model.ContactUnsubscribed), string(model.ContactDormant), formatTime(now),
+				string(model.ContactUnsubscribed), string(model.ContactDormant),
+				formatTime(now), formatTime(now), formatTime(now), newsletter.ID, email); err != nil {
+				return err
+			}
+		}
+		contact, err = scanContact(tx.QueryRowContext(ctx,
+			"SELECT "+contactColumns+" FROM contacts WHERE newsletter_id = ? AND email = ?",
+			newsletter.ID, email))
+		return err
+	})
+	if err != nil {
+		return model.Contact{}, false, err
+	}
+	return contact, created, nil
+}
+
+// ConfirmContact is the click on the confirmation link. A contact that already confirmed stays as
+// it is, and confirmed reports whether this click is what did it.
+func (db *DB) ConfirmContact(ctx context.Context, contactID, newsletterID string) (model.Contact, bool, error) {
+	now := time.Now().UTC()
+	confirmed := false
+	var contact model.Contact
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE contacts SET
+                status = ?, confirmed_at = ?,
+                last_engaged_at = CASE
+                    WHEN last_engaged_at IS NULL OR last_engaged_at < ? THEN ?
+                    ELSE last_engaged_at END,
+                ignored_issues = 0,
+                updated_at = ?
+            WHERE id = ? AND newsletter_id = ? AND status = ?`,
+			string(model.ContactActive), formatTime(now), formatTime(now), formatTime(now),
+			formatTime(now), contactID, newsletterID, string(model.ContactPending))
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		confirmed = affected > 0
+		contact, err = scanContact(tx.QueryRowContext(ctx,
+			"SELECT "+contactColumns+" FROM contacts WHERE id = ? AND newsletter_id = ?",
+			contactID, newsletterID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	})
+	return contact, confirmed, err
+}
+
+// KeepContact is the "Yes, keep sending it" click in a last-chance email. It brings back a dormant
+// contact; unsubscribes, bounces and complaints stay as they are.
+func (db *DB) KeepContact(ctx context.Context, contactID, newsletterID string) (model.Contact, bool, error) {
+	var (
+		contact model.Contact
+		kept    bool
+	)
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		existing, err := scanContact(tx.QueryRowContext(ctx,
+			"SELECT "+contactColumns+" FROM contacts WHERE id = ? AND newsletter_id = ?",
+			contactID, newsletterID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if existing.Status != model.ContactActive && existing.Status != model.ContactDormant {
+			return nil
+		}
+		// A dormant contact who is also suppressed stays dormant: the suppression outranks a click.
+		if existing.Status == model.ContactDormant {
+			_, suppressed, err := suppressionInTx(ctx, tx, existing.Email)
+			if err != nil {
+				return err
+			}
+			if suppressed {
+				return nil
+			}
+		}
+		now := time.Now().UTC()
+		if _, err := tx.ExecContext(ctx, `UPDATE contacts SET status = ?,
+                last_engaged_at = CASE
+                    WHEN last_engaged_at IS NULL OR last_engaged_at < ? THEN ?
+                    ELSE last_engaged_at END,
+                ignored_issues = 0, updated_at = ?
+                WHERE id = ? AND newsletter_id = ? AND status IN (?, ?)`,
+			string(model.ContactActive), formatTime(now), formatTime(now), formatTime(now),
+			contactID, newsletterID, string(model.ContactActive), string(model.ContactDormant)); err != nil {
+			return err
+		}
+		contact, err = scanContact(tx.QueryRowContext(ctx,
+			"SELECT "+contactColumns+" FROM contacts WHERE id = ? AND newsletter_id = ?",
+			contactID, newsletterID))
+		kept = err == nil
+		return err
+	})
+	return contact, kept, err
+}
+
+// suppressionInTx reads the global suppression list inside a transaction.
+func suppressionInTx(ctx context.Context, tx *sql.Tx, email string) (model.SuppressionReason, bool, error) {
+	var reason string
+	err := tx.QueryRowContext(ctx, "SELECT reason FROM suppressions WHERE email = ?",
+		strings.ToLower(strings.TrimSpace(email))).Scan(&reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return model.SuppressionReason(reason), true, nil
+}
+
+// suppressedStatus is what a suppressed address joins as (upstream SUPPRESSED_STATUSES).
+func suppressedStatus(reason model.SuppressionReason) model.ContactStatus {
+	switch reason {
+	case model.SuppressBounce:
+		return model.ContactBounced
+	case model.SuppressComplaint:
+		return model.ContactComplained
+	default:
+		return model.ContactUnsubscribed
+	}
+}
+
 func derefInt(value *int) any {
 	if value == nil {
 		return nil

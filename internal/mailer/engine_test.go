@@ -46,7 +46,8 @@ func newFixture(t *testing.T, contacts int) *fixture {
 	newsletter := model.Newsletter{
 		ID: ids.New(), Slug: "field-notes", Name: "Field notes",
 		FromName: "Jane Doe", FromEmail: "jane@example.net", PostalAddress: "1 Main St, Paris",
-		ArchiveEnabled: true,
+		ArchiveEnabled: true, WelcomeEnabled: true,
+		Welcome: model.Content{Subject: "Welcome to Field notes", Markdown: "Hello"},
 	}
 	if err := db.CreateNewsletter(ctx, newsletter); err != nil {
 		t.Fatal(err)
@@ -76,7 +77,7 @@ func newFixture(t *testing.T, contacts int) *fixture {
 	engine := NewEngine(db, fake, signer, Config{
 		AppURL: testAppURL, SendingOn: true, SendRatePerSec: 1000,
 		Limits: model.Limits{MaxEmailBytes: 100_000, BounceRate: 0.02, ComplaintRate: 0.0008,
-			MaxSendsPerDay: 50_000},
+			MaxSendsPerDay: 50_000, WelcomeEmailsPer10Minute: 100},
 		PollInterval: 10 * time.Millisecond,
 	}, slog.New(slog.NewTextHandler(&testLogWriter{t}, nil)))
 	t.Cleanup(engine.Close)

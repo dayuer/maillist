@@ -12,16 +12,19 @@ import (
 	"mailcheap/internal/core/sign"
 	"mailcheap/internal/core/sns"
 	"mailcheap/internal/events"
+	"mailcheap/internal/mailer"
 	"mailcheap/internal/store"
 )
 
 // Server holds everything the handlers need. The admin surface (/api/v1, /mcp) is later phases;
 // this one is the reader side plus the SES webhook.
 type Server struct {
-	Config  config.Config
-	Store   *store.DB
-	Signer  *sign.Signer
-	Events  *events.Handler
+	Config config.Config
+	Store  *store.DB
+	Signer *sign.Signer
+	Events *events.Handler
+	// Mailer queues the welcome and confirmation emails a signup calls for.
+	Mailer  *mailer.Engine
 	Limiter *MemoryLimiter
 	// Verifier checks SNS signatures. Production passes sns.NewVerifier(CertificateFetcher(nil));
 	// the tests pass one that trusts a key they generated.
@@ -35,12 +38,12 @@ type Server struct {
 
 // New builds the router over the reader surface.
 func New(cfg config.Config, db *store.DB, signer *sign.Signer, handler *events.Handler,
-	verifier *sns.Verifier, log *slog.Logger) *Server {
+	engine *mailer.Engine, verifier *sns.Verifier, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	server := &Server{
-		Config: cfg, Store: db, Signer: signer, Events: handler,
+		Config: cfg, Store: db, Signer: signer, Events: handler, Mailer: engine,
 		Limiter: NewMemoryLimiter(), Verifier: verifier, Subscribe: HTTPSubscriber(nil),
 		Log: log, now: time.Now,
 	}
@@ -69,6 +72,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/webhooks/ses", s.handleSESWebhook)
 	mux.HandleFunc("GET /unsubscribe", s.handleUnsubscribePage)
 	mux.HandleFunc("POST /api/unsubscribe", s.handleUnsubscribe)
+	mux.HandleFunc("GET /subscribe/{slug}", s.handleSubscribePage)
+	mux.HandleFunc("POST /subscribe/{slug}", s.handleSubscribe)
+	mux.HandleFunc("GET /confirm", s.handleConfirmPage)
+	mux.HandleFunc("POST /confirm", s.handleConfirm)
+	mux.HandleFunc("GET /keep", s.handleKeepPage)
+	mux.HandleFunc("POST /keep", s.handleKeep)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	return s.withSecurityHeaders(s.withArchiveHost(s.withRequestLog(mux)))
 }
