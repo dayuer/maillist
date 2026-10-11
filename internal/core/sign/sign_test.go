@@ -189,6 +189,11 @@ func TestConfirmExpiresAfter30Days(t *testing.T) {
 	if _, ok := s.VerifyContactToken(InfoConfirm, tok, ConfirmMaxAge, now.Add(31*24*time.Hour)); ok {
 		t.Fatal("31-day-old confirm token must be rejected")
 	}
+	// A token stamped in the future has a negative age, and an age that is never greater than the
+	// limit is a link that never expires.
+	if _, ok := s.VerifyContactToken(InfoConfirm, tok, ConfirmMaxAge, now.Add(-time.Hour)); ok {
+		t.Fatal("a token stamped an hour in the future must be rejected")
+	}
 }
 
 // tests/confirmation.test.mjs "a confirmation link names one contact and stops working after 30

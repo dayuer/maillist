@@ -97,7 +97,11 @@ func (s *Signer) VerifyContactToken(kind Kind, token string, maxAge time.Duratio
 		return Ref{}, false
 	}
 	issued := time.Unix(int64(*p.T), 0)
-	if now.Sub(issued) > maxAge {
+	// A timestamp in the future would make the age negative, and an age that is never greater than
+	// maxAge is a link that never expires. Only this package issues tokens and it stamps them with
+	// now, so the only way here is a clock that moved backwards or a tampered payload (the phase 1-3
+	// audit's Minor pool).
+	if issued.After(now) || now.Sub(issued) > maxAge {
 		return Ref{}, false
 	}
 	return r, true
