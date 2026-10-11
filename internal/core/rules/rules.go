@@ -39,6 +39,13 @@ func Untracked(k model.MessageKind) bool {
 	return k == model.KindConfirmation || k == model.KindLastChance
 }
 
+// IsCampaignKind reports whether a message is part of a campaign's own send: the issue, or a
+// last-chance email for a cold contact (lib/cleanup.js). Upstream calls this set
+// CAMPAIGN_MESSAGE_KINDS.
+func IsCampaignKind(k model.MessageKind) bool {
+	return k == model.KindCampaign || k == model.KindLastChance
+}
+
 // Chunk splits items into consecutive slices of at most size.
 func Chunk[T any](items []T, size int) [][]T {
 	var chunks [][]T
