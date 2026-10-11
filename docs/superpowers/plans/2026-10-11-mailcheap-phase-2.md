@@ -3736,6 +3736,20 @@ git commit -m "test(mailer): benchmark message creation at 50k recipients"
 - [ ] Run: `go list -f '{{.ImportPath}} {{.Imports}}' ./internal/core/... | grep -E '\b(os|net/http|database/sql|mailcheap/internal/(store|mailer|jobs))\b'` — Expected: 无输出（core 仍然零 I/O）
 - [ ] 开 PR `phase-2-store` → main，描述写明完成标志的 testscript 结果、压测数字、对计划的偏离
 
+### 阶段 2 执行记录（开工后发现的偏离）
+
+| Task | 计划原样 | 实际落地 | 理由 |
+|---|---|---|---|
+| 2.2 | 计划 Step 6 让 `writer.go` 先放占位实现 | `go db.writer()` 必须在 `Migrate` **之前**启动 | `Migrate` 走 `db.Write`，而 writer goroutine 是 Write 的消费者；按计划顺序写会死锁（第一次跑就卡住）。阶段 4 的 `db migrate` 命令在 serve 运行时也要走同一条路 |
+| 2.6 | 领取只看 `status = 'pending'` | 领取再要求**所属 campaign 是 `sending`** | 否则暂停的 campaign 会被"领取→跳过→释放"无限循环：`drain` 永远结束不了，run 起来就是空转。上游的 claim 直接把行置成终态所以没这个问题；Go 侧行要留到 resume，就必须在领取处挡住 |
+| 2.9 | 计划的引擎步骤没提"批次中途停止" | 任何提前停止（ctx 取消、retry、pause、连续失败）都把**没轮到的已领取消息释放回 pending** | 留在 `claimed` 的行只会在下次启动被 `RecoverClaimed` 转成 `unknown`，等于静默丢信，正好是 D14 要避免的 |
+| 2.11 | 计划提议给 `checks.Input` 加 `DomainChecked` | `core/checks` **不动**；CLI 侧用 `blockingExceptDomain` 放行并在 stderr 打印一行说明 | 让 core 的 10 项检查保持与上游逐条一致，阶段 2 的能力缺口留在适配层可见处，阶段 4 接上 SES 身份查询后删掉这一个特例 |
+| 2.12 | 建表 < 10 s | 同一条断言，但 **`-race` 构建下只记录不判失败** | race 检测器把 0.82 s 抬到 11 s；预算是对生产二进制的，用 build tag 区分（`raceEnabled`） |
+| 2.7 | 未提 | `store` 增加 `Rows`/`Row`/`ParseTime`/`ParseTimePtr` 四个导出 | `internal/jobs` 自己拥有 jobs 表，但仍要经 store 的连接与时间编码读，避免第二套时间格式 |
+| 2.9 | 未提 | `rules.IsCampaignKind`（上游 `CAMPAIGN_MESSAGE_KINDS`） | 引擎要判断"这条消息属于一次 campaign 发送"，阶段 3 也要用 |
+| 2.3 | 未提 | `store.ApplyImportRows` 里用 `writes[i]` 与 `rows[i]` 配对 | `importer.Write` 不携带行本身，既有联系人的 `imported.*` 刷新要靠这个对齐；`importer.Merge` 的文档已保证一进一出、顺序不变 |
+| 2.11 | 未提 | 数据目录权限用 `0750`，secret 文件 `0600` | gosec G301；数据卷里同时有库和 secret，收紧是对的 |
+
 ### 本阶段已知的、留给后续的事
 
 - `events` / `credentials` / `audit_log` / `alerts` 表在本阶段建好但只有 `events` 会被阶段 3 写；`credentials` 与 `audit_log` 的读写是阶段 4。
