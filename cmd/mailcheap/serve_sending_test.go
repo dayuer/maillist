@@ -74,6 +74,23 @@ func TestSendLeavesSendingToARunningServer(t *testing.T) {
 	}
 }
 
+// runMailcheapError runs the CLI in-process, requires it to fail, and returns what it said. The
+// command tree is created for each call, so nothing leaks between them.
+func runMailcheapError(t *testing.T, args ...string) string {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := newRootCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("mailcheap %s did not fail\n%s", strings.Join(args, " "), out.String())
+	}
+	// The root command is silent about errors (main prints them), so the message is here.
+	return out.String() + err.Error()
+}
+
 // runMailcheap runs the CLI in-process and returns its stdout.
 func runMailcheap(t *testing.T, args ...string) string {
 	t.Helper()

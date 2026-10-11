@@ -116,7 +116,7 @@ func IssueWebURL(appURL string, c model.Campaign, n model.Newsletter) string {
 	}
 	slug := c.ArchiveSlug
 	if slug == "" {
-		slug = slugify(c.Subject, 80)
+		slug = Slugify(c.Subject, 80)
 	}
 	if slug == "" {
 		return ""
