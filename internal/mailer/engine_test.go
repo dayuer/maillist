@@ -86,6 +86,11 @@ func newFixtureWith(t *testing.T, contacts int, options ...FakeOption) *fixture 
 		Limits: model.Limits{MaxEmailBytes: 100_000, BounceRate: 0.02, ComplaintRate: 0.0008,
 			MaxSendsPerDay: 50_000, WelcomeEmailsPer10Minute: 100},
 		PollInterval: 10 * time.Millisecond,
+		// The whole suite runs with the engine's real concurrency: the invariants this port promises
+		// (C1 in flight is never released, C2 settling counts claimed, F1 shutdown leaves nothing
+		// claimed) have to hold when sixteen sends are in the air, not only when they are queued up
+		// one at a time. A test that needs a single file sets it back to 1.
+		SendConcurrency: 16,
 	}, slog.New(slog.NewTextHandler(&testLogWriter{t}, nil)))
 	t.Cleanup(engine.Close)
 
@@ -98,6 +103,18 @@ type testLogWriter struct{ t *testing.T }
 func (w *testLogWriter) Write(p []byte) (int, error) {
 	w.t.Log(strings.TrimSpace(string(p)))
 	return len(p), nil
+}
+
+// serial puts the fixture back to one send at a time.
+//
+// The assertions that count "the messages the batch had not reached yet" are statements about a
+// queue, and only a single file has one: with sixteen workers and six messages, every message has
+// already been handed out by the time the first send returns, so there is nothing left to reach.
+// Those tests say so out loud and use this; the concurrency-independent invariants (nothing left
+// claimed, nothing unknown, nothing sent twice) are asserted at the fixture's real concurrency.
+func (f *fixture) serial() *fixture {
+	f.engine.cfg.SendConcurrency = 1
+	return f
 }
 
 // drain sends everything that is queued.
@@ -480,8 +497,11 @@ func TestSESErrorsAreClassified(t *testing.T) {
 }
 
 // Five failures in a row pause the campaign (upstream MAX_CONSECUTIVE_FAILURES).
+//
+// The counter is a property of the order sends come back in, so the exact stopping point is a
+// statement about a single file; the concurrent version below says what is left of it at sixteen.
 func TestConsecutiveFailuresPauseTheCampaign(t *testing.T) {
-	f := newFixture(t, 6)
+	f := newFixture(t, 6).serial()
 	ctx := context.Background()
 	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
@@ -499,6 +519,51 @@ func TestConsecutiveFailuresPauseTheCampaign(t *testing.T) {
 	}
 	if loaded.Status != model.CampaignPaused {
 		t.Fatalf("campaign = %s, want paused", loaded.Status)
+	}
+	// The one message that was not reached is back in the queue, not failed and not claimed.
+	if claimed, unknown, pending := claimedCount(t, f.db); claimed != 0 || unknown != 0 || pending != 1 {
+		t.Fatalf("claimed = %d, unknown = %d, pending = %d, want 0/0/1", claimed, unknown, pending)
+	}
+}
+
+// 并发之下「五连败就暂停」仍成立，只是在飞的都会落地：停掉的判定只能拦住还没发出去的消息。
+//
+// With SEND_CONCURRENCY workers, by the time the fifth failure is counted up to concurrency-1 more
+// sends are already in flight and will come back too. What survives concurrency is the part that
+// matters: the campaign stops, the failures are recorded, and every message the batch did not reach
+// is released rather than left claimed.
+func TestConsecutiveFailuresPauseTheCampaignUnderConcurrency(t *testing.T) {
+	f := newFixture(t, 40)
+	ctx := context.Background()
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, contact := range f.contacts {
+		f.fake.FailWith(contact.Email, "MessageRejected", "Message contains a virus")
+	}
+	result := f.drain(t)
+
+	if result.Failed < rules.MaxConsecutiveFailures {
+		t.Fatalf("failed = %d, want at least %d", result.Failed, rules.MaxConsecutiveFailures)
+	}
+	// Nothing beyond the workers that were already in flight when the rule fired.
+	if most := rules.MaxConsecutiveFailures + f.engine.cfg.SendConcurrency - 1; result.Failed > most {
+		t.Fatalf("failed = %d, want no more than %d (the rule fires at %d and at most %d were in flight)",
+			result.Failed, most, rules.MaxConsecutiveFailures, f.engine.cfg.SendConcurrency)
+	}
+	loaded, err := f.db.Campaign(ctx, f.campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != model.CampaignPaused {
+		t.Fatalf("campaign = %s, want paused", loaded.Status)
+	}
+	claimed, unknown, pending := claimedCount(t, f.db)
+	if claimed != 0 || unknown != 0 {
+		t.Fatalf("claimed = %d, unknown = %d, want 0/0", claimed, unknown)
+	}
+	if result.Failed+pending != 40 {
+		t.Fatalf("failed %d + pending %d != 40: a message was lost", result.Failed, pending)
 	}
 }
 

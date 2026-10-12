@@ -88,6 +88,18 @@ func (f *Fake) SentCount() int {
 	return len(f.sent)
 }
 
+// SentPerRecipient is how many copies each address received. A test that restarts a batch uses it to
+// say "nobody got two" instead of trusting the total.
+func (f *Fake) SentPerRecipient() map[string]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	counts := make(map[string]int, len(f.sent))
+	for _, email := range f.sent {
+		counts[email.Email.To]++
+	}
+	return counts
+}
+
 // Send records the email, unless that address was told to fail.
 func (f *Fake) Send(ctx context.Context, email rules.RecipientEmail, tags map[string]string) (string, error) {
 	f.mu.Lock()
