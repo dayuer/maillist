@@ -64,7 +64,7 @@ func TestSendLeavesSendingToARunningServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	campaigns, err := db.Campaigns(ctx, "", 1)
+	campaigns, err := db.Campaigns(ctx, "", 1, 0)
 	if err != nil || len(campaigns) != 1 {
 		t.Fatalf("campaigns = %v %v", campaigns, err)
 	}

@@ -3,43 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
 
 	"mailcheap/internal/app"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/stats"
-	"mailcheap/internal/store"
+	"mailcheap/internal/statsquery"
 )
-
-// statsReport is the whole of `stats --json`: the curve, the hourly sends and the two-period email
-// figures, with the labels the terminal table prints.
-type statsReport struct {
-	Newsletter struct {
-		ID   string `json:"id"`
-		Slug string `json:"slug"`
-		Name string `json:"name"`
-	} `json:"newsletter"`
-	TimeZone struct {
-		Name    string `json:"name"`
-		Label   string `json:"label"`
-		Today   string `json:"today"`
-		FromKey string `json:"fromKey"`
-	} `json:"timezone"`
-	Subscribers struct {
-		Start          int              `json:"start"`
-		Total          int              `json:"total"`
-		Growth         int              `json:"growth"`
-		PreviousGrowth int              `json:"previousGrowth"`
-		Days           []stats.DayPoint `json:"days"`
-	} `json:"subscribers"`
-	Hours []stats.HourPoint `json:"hours"`
-	Email struct {
-		Current  store.EmailTotals `json:"current"`
-		Previous store.EmailTotals `json:"previous"`
-	} `json:"email"`
-}
 
 func newStatsCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -66,9 +37,9 @@ func runStats(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return err
 		}
-		reports := make([]statsReport, 0, len(newsletters))
+		reports := make([]statsquery.Report, 0, len(newsletters))
 		for _, newsletter := range newsletters {
-			report, err := buildStats(ctx, a, newsletter, zone)
+			report, err := statsquery.Build(ctx, a.Store, newsletter, zone)
 			if err != nil {
 				return err
 			}
@@ -101,102 +72,8 @@ func newslettersForStats(ctx context.Context, a *app.App, ref string) ([]model.N
 	return a.Store.Newsletters(ctx)
 }
 
-// buildStats reads the rows and does the arithmetic. now is taken once so the curve, the hours and
-// the periods all describe the same instant.
-func buildStats(ctx context.Context, a *app.App, newsletter model.Newsletter,
-	zone *time.Location) (statsReport, error) {
-	now := time.Now().UTC()
-	todayKey := stats.DateKey(now, zone)
-	dayKeys := stats.PeriodDayKeys(todayKey, stats.PeriodDays)
-	rangeStart := stats.StartOfDateKey(dayKeys[0], zone)
-
-	dayAgo := stats.StartOfDateKey(stats.ShiftDateKey(todayKey, -1), zone)
-	currentSince := now.AddDate(0, 0, -stats.PeriodDays)
-	previousSince := now.AddDate(0, 0, -2*stats.PeriodDays)
-
-	activeBefore, err := a.Store.ActiveBefore(ctx, newsletter.ID, rangeStart)
-	if err != nil {
-		return statsReport{}, err
-	}
-	joins, err := a.Store.JoiningContactsSince(ctx, newsletter.ID, rangeStart)
-	if err != nil {
-		return statsReport{}, err
-	}
-	unsubscribes, err := a.Store.UnsubscribingContactsSince(ctx, newsletter.ID, rangeStart)
-	if err != nil {
-		return statsReport{}, err
-	}
-	// A leave recorded as the contact was created belongs to whoever imported them, on a day nobody
-	// knows: upstream filters it in the query, this port filters it here because comparing two dates
-	// with a minute's slack is not something a TEXT comparison can do (see the store method).
-	leavers := unsubscribes[:0]
-	for _, row := range unsubscribes {
-		if stats.HasLeftInMailcheap(row.UnsubscribedAt, row.CreatedAt) {
-			leavers = append(leavers, row)
-		}
-	}
-	unsubscribes = leavers
-
-	suppressed, err := a.Store.SuppressionLeavesSince(ctx, newsletter.ID, rangeStart)
-	if err != nil {
-		return statsReport{}, err
-	}
-	sentTimes, err := a.Store.SentTimes(ctx, newsletter.ID, dayAgo)
-	if err != nil {
-		return statsReport{}, err
-	}
-	current, previous, err := a.Store.EmailTotalsSince(ctx, newsletter.ID, currentSince, previousSince)
-	if err != nil {
-		return statsReport{}, err
-	}
-
-	contribution := stats.SubscriberContributions(stats.SubscriberInput{
-		DayKeys: dayKeys, RangeStart: rangeStart, Loc: zone, ActiveBefore: activeBefore,
-		Joins: joins, Unsubscribes: unsubscribes, Suppressed: suppressed,
-	})
-	series := stats.BuildSubscriberSeries(dayKeys, contribution.Baseline, contribution.Joins, contribution.Leaves)
-	periods := stats.SplitPeriods(series, stats.PeriodDays)
-
-	hourRows := make([]stats.HourRow, 0, len(sentTimes))
-	byBucket := map[[2]int]int{}
-	yesterdayKey := stats.ShiftDateKey(todayKey, -1)
-	for _, sentAt := range sentTimes {
-		key := stats.DateKey(sentAt, zone)
-		if key != todayKey && key != yesterdayKey {
-			continue
-		}
-		day := 1
-		if key == yesterdayKey {
-			day = 0
-		}
-		byBucket[[2]int{day, stats.HourIn(sentAt, zone)}]++
-	}
-	for day := 0; day <= 1; day++ {
-		for hour := 0; hour < 24; hour++ {
-			if count := byBucket[[2]int{day, hour}]; count > 0 {
-				key := todayKey
-				if day == 0 {
-					key = yesterdayKey
-				}
-				hourRows = append(hourRows, stats.HourRow{Day: key, Hour: hour, Count: count})
-			}
-		}
-	}
-
-	report := statsReport{Hours: stats.BuildHourlySeries(hourRows, todayKey, stats.HourIn(now, zone))}
-	report.Newsletter.ID, report.Newsletter.Slug, report.Newsletter.Name =
-		newsletter.ID, newsletter.Slug, newsletter.Name
-	report.TimeZone.Name, report.TimeZone.Label = zone.String(), stats.TimeZoneLabel(zone, now)
-	report.TimeZone.Today, report.TimeZone.FromKey = todayKey, dayKeys[0]
-	report.Subscribers.Start, report.Subscribers.Total = series.Start, periods.Total
-	report.Subscribers.Growth, report.Subscribers.PreviousGrowth = periods.Growth, periods.PreviousGrowth
-	report.Subscribers.Days = series.Days
-	report.Email.Current, report.Email.Previous = current, previous
-	return report, nil
-}
-
 // printStats is the terminal table: the same numbers, in the order an operator reads them.
-func printStats(cmd *cobra.Command, r statsReport) {
+func printStats(cmd *cobra.Command, r statsquery.Report) {
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out, "%s (%s)\n", r.Newsletter.Name, r.Newsletter.Slug)
 	_, _ = fmt.Fprintf(out, "%s (%s)   %s .. %s\n\n",

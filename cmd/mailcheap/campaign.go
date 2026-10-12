@@ -117,7 +117,7 @@ func newCampaignListCmd() *cobra.Command {
 					}
 					newsletterID = newsletter.ID
 				}
-				campaigns, err := a.Store.Campaigns(ctx, newsletterID, 50)
+				campaigns, err := a.Store.Campaigns(ctx, newsletterID, 50, 0)
 				if err != nil {
 					return err
 				}
@@ -260,7 +260,7 @@ func campaignByRef(ctx context.Context, a *app.App, args []string, subject strin
 	if subject == "" {
 		return model.Campaign{}, errors.New("name a campaign by id or by subject")
 	}
-	campaigns, err := a.Store.Campaigns(ctx, "", 100)
+	campaigns, err := a.Store.Campaigns(ctx, "", 100, 0)
 	if err != nil {
 		return model.Campaign{}, err
 	}

@@ -7,55 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"mailcheap/internal/uploads"
 )
 
-// 最小但合法的四种图片文件头，以及一张 1×1 的完整 PNG。
-var (
-	pngBytes = append([]byte("\x89PNG\r\n\x1a\n"),
-		[]byte("\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4"+
-			"\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND"+
-			"\xaeB`\x82")...)
-	gifBytes  = []byte("GIF89a" + strings.Repeat("\x00", 10))
-	webpBytes = []byte("RIFF\x24\x00\x00\x00WEBPVP8 " + strings.Repeat("\x00", 16))
-	jpegBytes = []byte("\xff\xd8\xff\xe0" + strings.Repeat("\x00", 16))
-)
+// 最小但合法的 PNG：一张 1×1 的完整文件。魔数与格式的判据本身在 internal/uploads 里测。
+var pngBytes = append([]byte("\x89PNG\r\n\x1a\n"),
+	[]byte("\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4"+
+		"\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND"+
+		"\xaeB`\x82")...)
 
-// 类型由头几个字节决定，不是文件名：一个叫 .png 的文本文件不能进来。
-//
-// app/api/uploads/route.js checks the declared content-type against the signature. A CLI has no
-// declared type, so the signature is the whole check, and it is what keeps something that is not a
-// picture out of the directory the newsletter's HTML points at.
-func TestUploadDetectsTheImageTypeFromTheBytes(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		content   []byte
-		extension string
-		mediaType string
-	}{
-		{"a.png", pngBytes, "png", "image/png"},
-		{"a.gif", gifBytes, "gif", "image/gif"},
-		{"a.webp", webpBytes, "webp", "image/webp"},
-		{"a.jpg", jpegBytes, "jpg", "image/jpeg"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			kind, ok := detectImageType(tc.content)
-			if !ok || kind.Extension != tc.extension || kind.MediaType != tc.mediaType {
-				t.Fatalf("got %+v %v, want %s %s", kind, ok, tc.extension, tc.mediaType)
-			}
-		})
-	}
-
-	// A text file with an image name, a RIFF that is not WebP (it is a WAV), and an empty file.
-	for _, content := range [][]byte{
-		[]byte("<html>not a picture</html>"),
-		[]byte("RIFF\x24\x00\x00\x00WAVE" + strings.Repeat("\x00", 16)),
-		{},
-	} {
-		if kind, ok := detectImageType(content); ok {
-			t.Errorf("%q was taken for a %s", content[:min(len(content), 12)], kind.MediaType)
-		}
-	}
-}
+var webpBytes = []byte("RIFF\x24\x00\x00\x00WEBPVP8 " + strings.Repeat("\x00", 16))
 
 // 上传落盘并打印 URL：文件在 <data-dir>/uploads/<id>.<ext>，行里也有一份记录。
 func TestUploadCommandStoresTheImage(t *testing.T) {
@@ -86,7 +48,7 @@ func TestUploadCommandStoresTheImage(t *testing.T) {
 	}
 }
 
-// 非图片、超大、空文件都被拒，且什么都不落下。
+// 非图片、超大、空文件都被拒，且什么都不落下。拒绝的判据与话术都来自 internal/uploads。
 func TestUploadCommandRefusesWhatIsNotAnImage(t *testing.T) {
 	dir := uploadTestEnv(t)
 	runMailcheap(t, "init")
@@ -100,7 +62,7 @@ func TestUploadCommandRefusesWhatIsNotAnImage(t *testing.T) {
 	}
 
 	big := filepath.Join(dir, "big.png")
-	huge := append(append([]byte{}, pngBytes...), bytes.Repeat([]byte("x"), maxUploadBytes)...)
+	huge := append(append([]byte{}, pngBytes...), bytes.Repeat([]byte("x"), uploads.MaxBytes)...)
 	if err := os.WriteFile(big, huge, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -112,12 +74,12 @@ func TestUploadCommandRefusesWhatIsNotAnImage(t *testing.T) {
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out := runMailcheapError(t, "upload", empty); !strings.Contains(out, "is empty") {
+	if out := runMailcheapError(t, "upload", empty); !strings.Contains(out, "empty") {
 		t.Fatalf("err = %q", out)
 	}
 
-	if uploads, err := os.ReadDir(filepath.Join(dir, "uploads")); err == nil && len(uploads) != 0 {
-		t.Fatalf("uploads holds %d files after three refusals", len(uploads))
+	if entries, err := os.ReadDir(filepath.Join(dir, "uploads")); err == nil && len(entries) != 0 {
+		t.Fatalf("uploads holds %d files after three refusals", len(entries))
 	}
 }
 
