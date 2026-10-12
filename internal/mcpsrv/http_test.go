@@ -35,6 +35,26 @@ func postMCP(t *testing.T, handler http.Handler, authorization string) *httptest
 	return recorder
 }
 
+// 数据库坏了不是"token 无效"：501/500 与 401 的区别就是排障的人该看哪里（#43）。
+//
+// A 401 here sends whoever is debugging after their credential while the store is the thing that is
+// down — and a new token would not help.
+func TestABrokenDatabaseIsNotAnInvalidToken(t *testing.T) {
+	f := newFixture(t)
+	handler := New(f.deps).HTTPHandler()
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := postMCP(t, handler, "Bearer "+f.token)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("a closed database answered %d, want 500", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "Invalid token") {
+		t.Errorf("the answer blames the token: %s", recorder.Body.String())
+	}
+}
+
 // 没带 token 就被挡在门外，而且回的是一句能行动的话：401 且带 WWW-Authenticate。
 func TestMCPEndpointNeedsAToken(t *testing.T) {
 	f := newFixture(t)

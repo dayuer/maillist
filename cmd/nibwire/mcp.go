@@ -16,6 +16,7 @@ import (
 	"nibwire/internal/creds"
 	"nibwire/internal/httpsrv"
 	"nibwire/internal/mcpsrv"
+	"nibwire/internal/store"
 )
 
 // newMCPCmd is `nibwire mcp`: the MCP surface as a process of its own.
@@ -39,7 +40,8 @@ func newMCPCmd() *cobra.Command {
 	flags.Bool("stdio", false, "speak MCP on stdin/stdout (the default)")
 	flags.Bool("http", false, "listen for Streamable HTTP instead")
 	flags.String("addr", "", "address for --http (default MCP_HTTP_ADDR)")
-	flags.String("token", "", "the mcp token (default NIBWIRE_MCP_TOKEN)")
+	flags.String("token", "", "the mcp token; prefer NIBWIRE_MCP_TOKEN — an argument is visible to "+
+		"anyone who can list this machine's processes")
 	return cmd
 }
 
@@ -60,8 +62,12 @@ func runMCP(cmd *cobra.Command, _ []string) error {
 		// (mcpsrv does that), which is what makes revocation instant.
 		hash := creds.Hash(token)
 		credential, err := a.Store.CredentialByHash(ctx, hash)
-		if err != nil {
-			return fmt.Errorf("that token is not a live credential: %w", err)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return errors.New("that token is not a live credential: it was never issued, or it was revoked")
+		case err != nil:
+			// A database problem, not a token problem (phase 9 #43).
+			return fmt.Errorf("could not check the token: %w", err)
 		}
 		if credential.Kind != creds.KindMCP {
 			return fmt.Errorf("that token is a %s credential; `nibwire mcp` needs an %s one",
@@ -99,7 +105,8 @@ func mcpToken(cmd *cobra.Command) (string, error) {
 		token = os.Getenv("NIBWIRE_MCP_TOKEN")
 	}
 	if strings.TrimSpace(token) == "" {
-		return "", errors.New("no token: pass --token, or set NIBWIRE_MCP_TOKEN. Issue one with " +
+		return "", errors.New("no token: set NIBWIRE_MCP_TOKEN (or pass --token, which puts it where " +
+			"`ps` can read it). Issue one with " +
 			"`nibwire credentials create --kind mcp --name agent --scopes read,write,send`")
 	}
 	return strings.TrimSpace(token), nil

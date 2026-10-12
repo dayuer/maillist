@@ -59,14 +59,22 @@ func apiError(w http.ResponseWriter, status int, message string) {
 // The kind has to be `api` (design §11, layer 1). An MCP token is refused here for the same reason
 // the v1 key is refused on /mcp: the kind is what the operator issued it for, and honoring it is
 // what makes `credentials list` say something.
-func (s *Server) authenticate(r *http.Request) (store.Credential, bool) {
+func (s *Server) authenticate(r *http.Request) (store.Credential, error) {
 	token, ok := creds.ReadBearer(r.Header.Get("Authorization"))
 	if !ok {
-		return store.Credential{}, false
+		return store.Credential{}, errInvalidKey
 	}
 	credential, err := s.Store.CredentialByHash(r.Context(), creds.Hash(token))
-	if err != nil || credential.Kind != creds.KindAPI {
-		return store.Credential{}, false
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return store.Credential{}, errInvalidKey
+	case err != nil:
+		// The caller's key may be perfectly good: the database is what failed. It is a sentinel of
+		// its own so the handler can answer 500 rather than telling them their key is wrong.
+		s.Log.Error("could not look up the API key", "error", err)
+		return store.Credential{}, fmt.Errorf("look up the API key: %w", err)
+	case credential.Kind != creds.KindAPI:
+		return store.Credential{}, errInvalidKey
 	}
 	now := s.clock()
 	if creds.ShouldTouchLastUsed(credential.LastUsedAt, now) {
@@ -74,6 +82,27 @@ func (s *Server) authenticate(r *http.Request) (store.Credential, bool) {
 		if err := s.Store.TouchCredential(r.Context(), credential.ID, now); err != nil {
 			s.Log.Warn("could not update last_used_at", "credential", credential.ID, "error", err)
 		}
+	}
+	return credential, nil
+}
+
+// errInvalidKey is "this endpoint will not take that token": no header, not a live api key, or an
+// MCP token where an API key belongs. It is a sentinel so that a failure to *check* the key — the
+// database being down — is not mistaken for one (phase 9 #43).
+var errInvalidKey = errors.New("invalid API key")
+
+// requireAPIKey resolves the key or writes the refusal: 401 for a token this endpoint will not take,
+// 500 when the lookup itself failed.
+func (s *Server) requireAPIKey(w http.ResponseWriter, r *http.Request) (store.Credential, bool) {
+	credential, err := s.authenticate(r)
+	switch {
+	case errors.Is(err, errInvalidKey):
+		apiError(w, http.StatusUnauthorized, "Invalid API key")
+		return store.Credential{}, false
+	case err != nil:
+		apiError(w, http.StatusInternalServerError,
+			"The API key could not be checked: this is a problem on the server's side")
+		return store.Credential{}, false
 	}
 	return credential, true
 }
@@ -132,9 +161,8 @@ func asBool(raw json.RawMessage) (value bool, ok bool) {
 
 // handleAPIContactsPost is POST /api/v1/contacts: a website's signup form, with a key.
 func (s *Server) handleAPIContactsPost(w http.ResponseWriter, r *http.Request) {
-	credential, ok := s.authenticate(r)
+	credential, ok := s.requireAPIKey(w, r)
 	if !ok {
-		apiError(w, http.StatusUnauthorized, "Invalid API key")
 		return
 	}
 	if !s.requireScope(w, credential, creds.ScopeWrite) {
@@ -258,9 +286,8 @@ func (s *Server) handleAPIContactsPost(w http.ResponseWriter, r *http.Request) {
 // handleAPICampaignsGet is GET /api/v1/campaigns?newsletter=slug: the issues that went out, so
 // another site can list them. It is how the archive is embedded without our HTML.
 func (s *Server) handleAPICampaignsGet(w http.ResponseWriter, r *http.Request) {
-	credential, ok := s.authenticate(r)
+	credential, ok := s.requireAPIKey(w, r)
 	if !ok {
-		apiError(w, http.StatusUnauthorized, "Invalid API key")
 		return
 	}
 	if !s.requireScope(w, credential, creds.ScopeRead) {
@@ -327,9 +354,8 @@ func (s *Server) handleAPICampaignsGet(w http.ResponseWriter, r *http.Request) {
 // handleAPICampaignsPost is POST /api/v1/campaigns: a draft, from a site's own generator. Sending is
 // not part of it — that is `campaign send` or the MCP surface, and both go through the checks.
 func (s *Server) handleAPICampaignsPost(w http.ResponseWriter, r *http.Request) {
-	credential, ok := s.authenticate(r)
+	credential, ok := s.requireAPIKey(w, r)
 	if !ok {
-		apiError(w, http.StatusUnauthorized, "Invalid API key")
 		return
 	}
 	if !s.requireScope(w, credential, creds.ScopeWrite) {

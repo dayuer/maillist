@@ -128,3 +128,18 @@ func TestCampaignSendDryRunWritesNothing(t *testing.T) {
 		t.Fatalf("reserved = %d %v: a dry run does not spend the day", reserved, err)
 	}
 }
+
+// mcp 的 token 优先用环境变量：命令行参数对同机器上任何能列进程的人都可见（#42）。
+func TestTheMCPTokenFlagSendsTheOperatorToTheEnvironment(t *testing.T) {
+	cmd := newMCPCmd()
+	flag := cmd.Flags().Lookup("token")
+	if flag == nil {
+		t.Fatal("the mcp command has no --token")
+	}
+	if !strings.Contains(flag.Usage, "NIBWIRE_MCP_TOKEN") {
+		t.Errorf("the flag says %q, want it to name the environment variable", flag.Usage)
+	}
+	if !strings.Contains(flag.Usage, "processes") {
+		t.Errorf("the flag says %q, want it to say why the argument is worse", flag.Usage)
+	}
+}

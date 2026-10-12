@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -606,6 +608,62 @@ func TestConsecutiveFailuresPauseTheCampaignUnderConcurrency(t *testing.T) {
 	if result.Failed+pending != 40 {
 		t.Fatalf("failed %d + pending %d != 40: a message was lost", result.Failed, pending)
 	}
+}
+
+// ARCHIVE_HOSTS 的值要一路走到发出去的那封信里：config 读进来、app 交给引擎、引擎交给收件人渲染——
+// 三处字段赋值此前没有一条直接断言，"Read online" 链接就会随着任何一次重构静静退化（#50 与审计 F2）。
+func TestTheArchiveHostReachesTheSentEmail(t *testing.T) {
+	f := newFixtureConfigured(t, 1, func(cfg *Config) {
+		cfg.ArchiveHosts = "archive.example.com=field-notes"
+	})
+	ctx := context.Background()
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.drain(t); result.Sent != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+
+	sent := f.fake.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %d messages", len(sent))
+	}
+	// The link is a click redirect, so its target is behind the tracking token: decode it rather than
+	// looking for the URL in the HTML, which would also find the reader's own links to example.com.
+	want := "https://archive.example.com/p/issue-12"
+	targets := map[string]bool{}
+	for _, token := range clickTokens(t, sent[0].Email.HTML) {
+		click, ok := f.signer.ReadClickToken(token)
+		if ok {
+			targets[click.URL] = true
+		}
+	}
+	if !targets[want] {
+		t.Errorf("no link to %q; the email links to %v", want, keysOf(targets))
+	}
+	if targets[testAppURL+"/archive/field-notes/p/issue-12"] {
+		t.Error("the email links to the shared archive path although the newsletter has a host of its own")
+	}
+}
+
+// clickTokens pulls the tracking tokens out of a rendered email's links.
+func clickTokens(t *testing.T, html string) []string {
+	t.Helper()
+	matches := regexp.MustCompile(`/c/([A-Za-z0-9_.-]+)`).FindAllStringSubmatch(html, -1)
+	out := make([]string, 0, len(matches))
+	for _, match := range matches {
+		out = append(out, match[1])
+	}
+	return out
+}
+
+func keysOf(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // A test email goes to the sentinel contact: the campaign report never sees it (design §6.2).

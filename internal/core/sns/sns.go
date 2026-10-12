@@ -209,6 +209,14 @@ func (v *Verifier) urlLock(certURL string) *sync.Mutex {
 	defer v.mu.Unlock()
 	lock, ok := v.locks[certURL]
 	if !ok {
+		if len(v.locks) >= maxCachedCertificates {
+			// The cache is trimmed only when it fills, and a URL that fails to download never reaches
+			// it — so without a bound of its own, every URL an unauthenticated caller names leaves a
+			// mutex behind for the life of the process (phase 9 #39). Dropping the map costs at most a
+			// duplicated download while a URL is in flight: a lock that is not there serialises
+			// nothing, and a failed download is not remembered either way.
+			v.locks = map[string]*sync.Mutex{}
+		}
 		lock = &sync.Mutex{}
 		v.locks[certURL] = lock
 	}

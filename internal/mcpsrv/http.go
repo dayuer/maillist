@@ -3,12 +3,14 @@ package mcpsrv
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"nibwire/internal/creds"
+	"nibwire/internal/store"
 )
 
 // tokenHashKey is how the authenticated token travels from the middleware to the server builder.
@@ -60,8 +62,17 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		}
 		hash := creds.Hash(token)
 		credential, err := s.deps.Store.CredentialByHash(r.Context(), hash)
-		if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
 			unauthorized(w, "Invalid token")
+			return
+		case err != nil:
+			// Not the caller's fault and not something a new token would fix: saying "invalid token"
+			// here sends whoever is debugging after their credential while the database is the thing
+			// that is down (phase 9 #43).
+			s.deps.Log.Error("could not look up the token", "error", err)
+			writeJSONError(w, http.StatusInternalServerError,
+				"The token could not be checked: this is a problem on the server's side")
 			return
 		}
 		if credential.Kind != creds.KindMCP {
