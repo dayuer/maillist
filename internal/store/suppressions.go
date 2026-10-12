@@ -77,6 +77,42 @@ func (db *DB) Suppression(ctx context.Context, email string) (model.SuppressionR
 }
 
 // Suppressions lists every suppressed address, oldest first.
+// CountSuppressions is how many addresses are suppressed, without reading them.
+//
+// The set is a count for the tools that only report it: a suppression list grows with every bounce
+// and complaint, and reading all of it to take len() is work that grows with it too (phase 9 #45).
+func (db *DB) CountSuppressions(ctx context.Context) (int, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx, "SELECT count(*) FROM suppressions").Scan(&count)
+	return count, err
+}
+
+// SuppressionsPage reads one page of suppressed addresses, oldest first.
+//
+// The page is cut in SQL rather than in Go: Supressions returns the whole set because the send path
+// needs it as a set, but a caller showing twenty rows should not read a hundred thousand to do it.
+func (db *DB) SuppressionsPage(ctx context.Context, limit, offset int) ([]SuppressedEmail, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := db.sql.QueryContext(ctx,
+		"SELECT email, reason, detail FROM suppressions ORDER BY created_at, email LIMIT ? OFFSET ?",
+		limit, max(offset, 0))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SuppressedEmail
+	for rows.Next() {
+		var suppression SuppressedEmail
+		if err := rows.Scan(&suppression.Email, &suppression.Reason, &suppression.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, suppression)
+	}
+	return out, rows.Err()
+}
+
 func (db *DB) Suppressions(ctx context.Context) ([]SuppressedEmail, error) {
 	rows, err := db.sql.QueryContext(ctx,
 		"SELECT email, reason, detail FROM suppressions ORDER BY created_at, email")

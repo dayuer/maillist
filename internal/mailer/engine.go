@@ -1293,8 +1293,17 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 		return TestResult{}, err
 	}
 	claimed, err := e.store.ClaimMessagesByID(ctx, []string{message.ID})
-	if err != nil || len(claimed) != 1 {
+	if err != nil {
 		return TestResult{}, fmt.Errorf("claim test message: %w", err)
+	}
+	if len(claimed) != 1 {
+		// Not a store error: the claim found nothing. The insert above is INSERT OR IGNORE, so a test
+		// send to the same campaign and address a second time writes no row and has nothing to claim —
+		// and the old single check wrapped the nil error, which printed as %!w(<nil>) and told nobody
+		// anything (phase 9 #51).
+		return TestResult{}, fmt.Errorf(
+			"the test message for %s was not written: this campaign has already sent a test to that "+
+				"address (one message per contact per campaign)", message.Email)
 	}
 	// The sentinel contact has no row, so the lookup goes without it and the stand-in is set below.
 	loaded, err := e.store.LoadMessageContext(ctx, model.Message{

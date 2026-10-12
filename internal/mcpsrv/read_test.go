@@ -2,6 +2,8 @@ package mcpsrv
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"nibwire/internal/core/ids"
 	"nibwire/internal/core/model"
 	"nibwire/internal/mailer"
+	"nibwire/internal/store"
 )
 
 // 读 tool 的每一个都返回它该返回的形状，而不是一个空壳。
@@ -170,6 +173,93 @@ func TestCheckCampaignReportsHowFastTheAudienceGoesOut(t *testing.T) {
 	}
 	if out.Estimated == "" {
 		t.Fatal("check_campaign said nothing about how long the audience takes")
+	}
+}
+
+// 第 101 封之后的一期，按主题也要能找到：以前是列出前一百个再逐个比对，超出的永远引用不到（#47）。
+func TestACampaignPastTheFirstHundredIsStillReachableBySubject(t *testing.T) {
+	f := newFixture(t)
+	f.seedNewsletter(t, 1)
+	ctx := context.Background()
+	target := f.seedCampaign(t, "Issue 1")
+
+	// Older than everything about to be created, so a list of the hundred most recent does not hold
+	// it. CreateCampaign stamps updated_at itself, so this nudges the row afterwards.
+	if err := f.store.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE campaigns SET updated_at = ? WHERE id = ?",
+			store.FormatTime(time.Now().UTC().Add(-time.Hour)), target.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		f.seedCampaign(t, fmt.Sprintf("Issue %d", i+2))
+	}
+	session := f.connect(t)
+
+	if out := call[campaignView](t, session, "get_campaign", map[string]any{
+		"campaign": "Issue 1",
+	}); out.ID != target.ID {
+		t.Fatalf("get_campaign = %+v, want the one past the hundredth", out)
+	}
+}
+
+// 抑制名单在 SQL 里分页：行为不变（顺序、count、hasMore、越界为空），但不再整表读进内存（#45）。
+//
+// The page a caller sees is the same either way, which is the point: what changed is that showing
+// fifty rows no longer reads the whole table.
+func TestPagingThroughSuppressions(t *testing.T) {
+	f := newFixture(t)
+	newsletter := f.seedNewsletter(t, 1)
+	ctx := context.Background()
+	for i := 0; i < 120; i++ {
+		if err := f.store.AddSuppression(ctx, fmt.Sprintf("spam%d@example.com", i),
+			model.SuppressComplaint, "complaint"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := f.connect(t)
+
+	first := call[listSuppressionsOut](t, session, "list_suppressions", map[string]any{"limit": 50})
+	if first.Count != 50 || !first.HasMore || first.NextOffset != 50 {
+		t.Fatalf("first page = %+v", first)
+	}
+	second := call[listSuppressionsOut](t, session, "list_suppressions", map[string]any{
+		"limit": 50, "offset": 50,
+	})
+	if second.Count != 50 || !second.HasMore {
+		t.Fatalf("second page = %+v", second)
+	}
+	last := call[listSuppressionsOut](t, session, "list_suppressions", map[string]any{
+		"limit": 50, "offset": 100,
+	})
+	if last.Count != 20 || last.HasMore {
+		t.Fatalf("last page = %+v", last)
+	}
+	// Nothing overlaps and nothing is missing.
+	seen := map[string]bool{}
+	for _, page := range []listSuppressionsOut{first, second, last} {
+		for _, row := range page.Items {
+			if seen[row.Email] {
+				t.Errorf("%s came back twice", row.Email)
+			}
+			seen[row.Email] = true
+		}
+	}
+	if len(seen) != 120 {
+		t.Fatalf("%d addresses paged, want 120", len(seen))
+	}
+	// Past the end is an empty page, not an error.
+	if beyond := call[listSuppressionsOut](t, session, "list_suppressions", map[string]any{
+		"limit": 50, "offset": 500,
+	}); beyond.Count != 0 || beyond.HasMore {
+		t.Fatalf("past the end = %+v", beyond)
+	}
+	// And the count the other tool reports is still the whole set, read as a count.
+	if out := call[CountAudience](t, session, "count_audience", map[string]any{
+		"newsletter": newsletter.Slug,
+	}); out.Suppressed != 120 {
+		t.Fatalf("count_audience = %+v", out)
 	}
 }
 

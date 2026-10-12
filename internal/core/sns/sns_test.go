@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -313,5 +314,35 @@ func TestACertificateDownloadThatIsNotPEMIsRejected(t *testing.T) {
 	})
 	if verify(t, v, signMessage(t, notification(), "2", testKey)) {
 		t.Error("a non-PEM certificate must not verify")
+	}
+}
+
+// 全失败的下载路径也要让锁表有界：每条 URL 每次失败都留下一个 mutex，而 cache 从不因失败而增长，于是
+// "随 cache 一起清" 永远不会触发（#39）。
+func TestFailedDownloadsDoNotGrowTheLockMapForever(t *testing.T) {
+	attempts := 0
+	v := NewVerifier(func(context.Context, string) ([]byte, error) {
+		attempts++
+		return nil, errors.New("SES is not answering")
+	})
+	for i := 0; i < maxCachedCertificates*2; i++ {
+		// A real message with a real signature, and a certificate URL that never downloads: the
+		// signature is not the subject, the lock map is.
+		message := signMessage(t, notification(), "2", testKey)
+		message["SigningCertURL"] = "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-" +
+			strconv.Itoa(i) + ".pem"
+		if err := v.Verify(context.Background(), message); err == nil {
+			t.Fatal("a message whose certificate did not download was accepted")
+		}
+	}
+	v.mu.Lock()
+	locks := len(v.locks)
+	v.mu.Unlock()
+	if locks > maxCachedCertificates {
+		t.Fatalf("%d locks after %d failed downloads, want the map bounded at %d",
+			locks, attempts, maxCachedCertificates)
+	}
+	if attempts == 0 {
+		t.Fatal("no download was attempted, so this test did not exercise the path")
 	}
 }

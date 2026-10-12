@@ -255,11 +255,9 @@ func countAudience(ctx context.Context, sess *session, _ store.Credential, in co
 	}); err != nil {
 		return CountAudience{}, err
 	}
-	suppressed, err := sess.deps.Store.SuppressedEmails(ctx)
-	if err != nil {
+	if out.Suppressed, err = sess.deps.Store.CountSuppressions(ctx); err != nil {
 		return CountAudience{}, err
 	}
-	out.Suppressed = len(suppressed)
 	if strings.TrimSpace(in.Campaign) == "" {
 		return out, nil
 	}
@@ -378,19 +376,20 @@ func listSuppressions(ctx context.Context, sess *session, _ store.Credential, in
 	if err != nil {
 		return listSuppressionsOut{}, err
 	}
-	// The store query returns the whole set (it is a set — callers look addresses up in it), so the
-	// page is cut here, with the same one-extra-row rule the other lists use.
-	all, err := sess.deps.Store.Suppressions(ctx)
+	// The page is cut in SQL, with the same one-extra-row rule the other lists use: the list grows with
+	// every bounce and complaint, and reading it whole to show twenty rows is work that grows with it
+	// (phase 9 #45).
+	page, err := sess.deps.Store.SuppressionsPage(ctx, limit+1, offset)
 	if err != nil {
 		return listSuppressionsOut{}, err
 	}
-	rows := make([]suppressionRow, 0, len(all))
-	for _, suppression := range all {
+	rows := make([]suppressionRow, 0, len(page))
+	for _, suppression := range page {
 		rows = append(rows, suppressionRow{
 			Email: suppression.Email, Reason: string(suppression.Reason), Detail: suppression.Detail,
 		})
 	}
-	return listSuppressionsOut{paginate(slice(rows, offset), limit, offset)}, nil
+	return listSuppressionsOut{paginate(rows, limit, offset)}, nil
 }
 
 type getJobIn struct {
@@ -536,16 +535,11 @@ func campaignByRef(ctx context.Context, db *store.DB, ref string) (model.Campaig
 	if ids.Valid(ref) {
 		return db.Campaign(ctx, ref)
 	}
-	campaigns, err := db.Campaigns(ctx, "", 100, 0)
-	if err != nil {
-		return model.Campaign{}, err
+	campaign, err := db.CampaignBySubject(ctx, ref)
+	if errors.Is(err, store.ErrNotFound) {
+		return model.Campaign{}, fmt.Errorf("no campaign called %q: %w", ref, store.ErrNotFound)
 	}
-	for _, campaign := range campaigns {
-		if campaign.Subject == ref {
-			return campaign, nil
-		}
-	}
-	return model.Campaign{}, fmt.Errorf("no campaign called %q: %w", ref, store.ErrNotFound)
+	return campaign, err
 }
 
 // preSendChecks builds the checklist for a campaign: the same inputs the send path uses, so

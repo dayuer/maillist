@@ -270,14 +270,9 @@ func campaignByRef(ctx context.Context, a *app.App, args []string, subject strin
 	if subject == "" {
 		return model.Campaign{}, errors.New("name a campaign by id or by subject")
 	}
-	campaigns, err := a.Store.Campaigns(ctx, "", 100, 0)
-	if err != nil {
-		return model.Campaign{}, err
+	campaign, err := a.Store.CampaignBySubject(ctx, subject)
+	if errors.Is(err, store.ErrNotFound) {
+		return model.Campaign{}, fmt.Errorf("no campaign called %q: %w", subject, store.ErrNotFound)
 	}
-	for _, campaign := range campaigns {
-		if campaign.Subject == subject {
-			return campaign, nil
-		}
-	}
-	return model.Campaign{}, fmt.Errorf("no campaign called %q: %w", subject, store.ErrNotFound)
+	return campaign, err
 }

@@ -119,6 +119,21 @@ func TestTheTenantNameMustBeOneSESWouldAccept(t *testing.T) {
 	}
 }
 
+// ARCHIVE_HOSTS 原样进入配置：它是 "<host>=<slug>" 的清单，解析留给 core/archive（#50）。
+func TestArchiveHostsReachesTheConfig(t *testing.T) {
+	c, err := Load(with("ARCHIVE_HOSTS", "archive.example.com=field-notes,other.example=other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ArchiveHosts != "archive.example.com=field-notes,other.example=other" {
+		t.Fatalf("ArchiveHosts = %q", c.ArchiveHosts)
+	}
+	// And it is optional: a deployment with no archive domains of its own leaves it empty.
+	if c, err := Load(strong); err != nil || c.ArchiveHosts != "" {
+		t.Fatalf("ArchiveHosts = %q %v, want empty", c.ArchiveHosts, err)
+	}
+}
+
 func TestDefaultsAreSafe(t *testing.T) {
 	c, _ := Load(with("APP_URL", "https://mail.example.com/"))
 	if c.SendingOn || c.SendApproval != "auto" || c.AppURL != "https://mail.example.com" ||

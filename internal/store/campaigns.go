@@ -155,6 +155,24 @@ func (db *DB) Campaigns(ctx context.Context, newsletterID string, limit, offset 
 	return out, rows.Err()
 }
 
+// CampaignBySubject finds the campaign with this exact subject, most recent first — the same one the
+// two entry points used to find by listing a hundred campaigns and looking through them, which made
+// the hundred-and-first unreachable (phase 9 #47).
+//
+// Most recent first is the ordering the listing already had, so which of several campaigns with the
+// same subject wins is unchanged.
+func (db *DB) CampaignBySubject(ctx context.Context, subject string) (model.Campaign, error) {
+	row := db.sql.QueryRowContext(ctx, "SELECT "+campaignColumns+
+		` FROM campaigns WHERE subject = ?
+        ORDER BY coalesce(sent_at, started_at, scheduled_at, updated_at) DESC, id DESC LIMIT 1`,
+		subject)
+	campaign, err := scanCampaign(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Campaign{}, ErrNotFound
+	}
+	return campaign, err
+}
+
 // UpdateCampaign writes the columns an editor owns — the ones an operator changes by hand or through
 // an agent — and created_at is never rewritten.
 //

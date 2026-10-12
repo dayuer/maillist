@@ -277,6 +277,26 @@ func TestAnAPIKeyFloodIsRefusedAndAlerted(t *testing.T) {
 	}
 }
 
+// 库坏了回 500 而不是 401：密钥可能是好的，坏的是我们的数据库（#43）。
+func TestABrokenDatabaseIsNotAnInvalidAPIKey(t *testing.T) {
+	server := newTestServer(t)
+	server.seedNewsletter(t)
+	key := server.seedKey(t, creds.ScopeWrite)
+	if err := server.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	response := server.postAPI(t, "/api/v1/contacts", key,
+		`{"newsletter":"field-notes","email":"reader@example.com"}`)
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("a closed database answered %d, want 500", response.StatusCode)
+	}
+	if body := body(t, response); strings.Contains(body, "Invalid API key") {
+		t.Errorf("the answer blames the key: %s", body)
+	}
+}
+
 // 草稿：校验、落库，archiveSlug 唯一，缩略图来自正文里的第一张图。
 func TestAPICampaignsCreate(t *testing.T) {
 	server := newTestServer(t)
