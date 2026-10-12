@@ -1,6 +1,7 @@
 package cleanup
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -35,16 +36,7 @@ func ids(contacts []model.Contact) []string {
 }
 
 func sameIDs(got []model.Contact, want ...string) bool {
-	gotIDs := ids(got)
-	if len(gotIDs) != len(want) {
-		return false
-	}
-	for i := range gotIDs {
-		if gotIDs[i] != want[i] {
-			return false
-		}
-	}
-	return true
+	return slices.Equal(ids(got), want)
 }
 
 // 默认关闭；库里的数字赢过默认值。

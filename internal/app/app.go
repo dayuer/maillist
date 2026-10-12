@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"mailcheap/internal/alerts"
 	"mailcheap/internal/config"
 	"mailcheap/internal/core/sign"
 	"mailcheap/internal/core/sns"
@@ -58,6 +59,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		_ = db.Close()
 		return nil, err
 	}
+	// Alerts go through the sender the deployment already has: no second client, and no alert email
+	// when sending is off (there would be no verified domain to send it from).
+	notifier := &alerts.Notifier{
+		Store: db, Sender: sender, From: cfg.AlertFrom, To: cfg.AdminEmail,
+		AppURL: cfg.AppURL, SendingOn: cfg.SendingOn, Log: log,
+	}
 	engine := mailer.NewEngine(db, sender, signer, mailer.Config{
 		AppURL:         cfg.AppURL,
 		ArchiveHosts:   cfg.ArchiveHosts,
@@ -65,8 +72,9 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		SendRatePerSec: cfg.Limits.SendRatePerSecond,
 		Limits:         cfg.Limits,
 		PollInterval:   250 * time.Millisecond,
+		Alerts:         notifier,
 	}, log)
-	handler := events.New(db, log)
+	handler := events.New(db, log).WithAlerts(notifier)
 
 	return &App{
 		Config:     cfg,

@@ -10,6 +10,7 @@ import (
 
 	"github.com/aws/smithy-go"
 
+	"mailcheap/internal/alerts"
 	"mailcheap/internal/core/cleanup"
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
@@ -35,6 +36,9 @@ type Config struct {
 	Limits         model.Limits
 	// PollInterval is how often Run looks for work.
 	PollInterval time.Duration
+	// Alerts tells the operator what went wrong. It is optional: the CLI builds an engine with no
+	// server behind it, and there is nobody to alert there.
+	Alerts *alerts.Notifier
 }
 
 // BatchResult is what one batch did (upstream sendMessageBatch's result).
@@ -489,6 +493,12 @@ func (e *Engine) pause(ctx context.Context, campaignID, reason string) error {
 	}
 	if moved {
 		e.log.Warn("campaign paused", "campaign", campaignID, "reason", reason)
+		// A pause is the one thing an operator may need to act on within the hour, so its cooldown is a
+		// minute rather than the usual one (upstream pauseCampaign).
+		e.cfg.Alerts.Send(ctx, alerts.Alert{
+			Key: "campaign-paused-" + campaignID, Title: "Campaign paused",
+			Detail: reason, Cooldown: time.Minute,
+		})
 	}
 	return nil
 }
@@ -972,13 +982,13 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 		charge := Charge{CredentialID: payload.CredentialID}
 		if payload.Additional > 0 {
 			result, err := e.QueueStep(ctx, payload.CampaignID, payload.Additional, charge)
-			return nothingToSend(result, err)
+			return e.sendJobFailed(ctx, job, payload.CampaignID, nothingToSend(result, err))
 		}
 		if skip, err := e.scheduledSendIsStale(ctx, payload.CampaignID, payload.ScheduledAt); err != nil || skip {
-			return err
+			return e.sendJobFailed(ctx, job, payload.CampaignID, err)
 		}
 		result, err := e.Queue(ctx, payload.CampaignID, charge)
-		return nothingToSend(result, err)
+		return e.sendJobFailed(ctx, job, payload.CampaignID, nothingToSend(result, err))
 	case jobs.KindSendWelcome:
 		var payload struct {
 			NewsletterID string `json:"newsletterId"`
@@ -1000,6 +1010,26 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 	default:
 		return fmt.Errorf("unknown job kind %q", job.Kind)
 	}
+}
+
+// sendJobFailed alerts when a send job has run out of attempts: nothing will retry it, and a campaign
+// that never went out is exactly what an operator has to hear about (upstream alerts when a scheduled
+// send fails to start, and this is the same moment reached from the other end).
+func (e *Engine) sendJobFailed(ctx context.Context, job jobs.Job, campaignID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	// Attempts is how many tries this job has already had; the scheduler counts this one after it
+	// records the failure, so the last try is the one where job.Attempts is already at the limit.
+	if job.Attempts+1 >= jobs.MaxAttempts() {
+		e.cfg.Alerts.Send(ctx, alerts.Alert{
+			Key: "send-job-" + campaignID, Title: "A send stopped",
+			Detail: fmt.Sprintf("%s on campaign %s gave up after %d attempts. %s",
+				job.Kind, campaignID, job.Attempts+1, err),
+			Cooldown: time.Minute,
+		})
+	}
+	return err
 }
 
 // nothingToSend turns a refusal that is not an error into one, so the job fails with the reason
@@ -1141,6 +1171,12 @@ func (e *Engine) queueSignup(ctx context.Context, newsletter model.Newsletter, c
 	if !inserted {
 		e.log.Warn("signup emails capped", "newsletter", newsletter.Slug,
 			"limit", e.cfg.Limits.WelcomeEmailsPer10Minute)
+		e.cfg.Alerts.Send(ctx, alerts.Alert{
+			Key: "welcome-cap:" + newsletter.Slug, Title: "Signup emails capped",
+			Detail: fmt.Sprintf("Over %d welcome and confirmation emails for %s in 10 minutes. "+
+				"New signups get none until it slows down.",
+				e.cfg.Limits.WelcomeEmailsPer10Minute, newsletter.Name),
+		})
 		return SignupResult{Skipped: "rate limited"}, nil
 	}
 	if _, err := e.SendBatch(ctx, []string{message.ID}); err != nil {
