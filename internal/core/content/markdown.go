@@ -38,18 +38,13 @@ const MarkdownBudget = time.Second
 // autolinks, raw HTML passed through. isEmail selects the inline-styled box over the archive's
 // data-callout div.
 //
-// The parse runs on its own goroutine so that the caller can give up on it. goldmark has no way to be
-// interrupted — what is bounded here is the waiting, not the work: an abandoned parse finishes on its
-// own, which is why the budget is a second and not a minute.
+// It goes through the process's Cache: a body is parsed once however many times it is rendered, and a
+// body whose parse overruns the budget is shown as text rather than allowed to become another
+// minutes-long goroutine on somebody else's request. See markdown_cache.go for why all three of those
+// are the same decision.
 func MarkdownToHTML(src string, isEmail bool) string {
-	done := make(chan string, 1)
-	go func() { done <- convertMarkdown(src, isEmail) }()
-	select {
-	case rendered := <-done:
-		return rendered
-	case <-time.After(MarkdownBudget):
-		return plainText(src)
-	}
+	rendered, _ := defaultCache.Render(src, isEmail)
+	return rendered
 }
 
 func convertMarkdown(src string, isEmail bool) string {

@@ -1,6 +1,11 @@
 package content
 
 import (
+	"container/list"
+	"crypto/sha256"
+	"encoding/hex"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +22,8 @@ import (
 //     running at once: past that, a body is shown as text instead of parsed. This is what stops a body
 //     that is already in the database — one saved before this gate existed — from turning every reader
 //     of its page and every recipient of its email into another minutes-long goroutine.
+//   - identical bodies are parsed once (Cache), which is what makes a page a hundred readers ask for
+//     one parse rather than a hundred.
 //
 // goldmark cannot be interrupted, so what the budget bounds is the waiting. The cap and the memo are
 // what bound the work.
@@ -28,11 +35,16 @@ import (
 // a healthy deployment never notices the cap; it only bites when parses are already overrunning.
 const MaxConcurrentParses = 2
 
-// defaultCache is what MarkdownToHTML renders through.
-var defaultCache = NewCache()
+// DefaultCacheBytes is how much rendered Markdown the process remembers, by total size. A body may be
+// half a megabyte, so this is a few dozen of them: enough for the issues a deployment is serving, small
+// enough not to be a leak.
+const DefaultCacheBytes = 16 << 20
 
-// DefaultCache is the cap every renderer in this process shares. It is exported for its counters: an
-// operator asking why a box is busy wants to know how much parsing is going on.
+// defaultCache is what MarkdownToHTML renders through.
+var defaultCache = NewCache(DefaultCacheBytes)
+
+// DefaultCache is the memo every renderer in this process shares. It is exported for its counters: an
+// operator asking why an archive page is slow wants to know whether bodies are being parsed again.
 func DefaultCache() *Cache { return defaultCache }
 
 // ErrTooComplex is what CheckRenderable returns for a body that cannot be rendered inside the budget.
@@ -67,32 +79,54 @@ func CheckRenderable(format model.Format, body string) error {
 // It is also where the concurrency cap lives, because the two are one decision: a body that has just
 // been rendered is not parsed again, and a body whose parse is still running when the budget passes is
 // one of the few the process allows to keep going.
-// Cache is where the concurrency cap lives: it is the process's memory of how much parsing is already
-// going on.
 type Cache struct {
-	slots chan struct{}
+	maxBytes int
+	slots    chan struct{}
+
+	mu    sync.Mutex
+	order *list.List
+	items map[string]*cacheEntry
+	bytes int
 
 	parses atomic.Int64
+	hits   atomic.Int64
 	live   atomic.Int64
 	peak   atomic.Int64
 }
 
-// NewCache returns a cache. It takes no size: what it holds is not what it remembers but how much
-// parsing it has allowed to start.
-func NewCache() *Cache {
-	return &Cache{slots: make(chan struct{}, MaxConcurrentParses)}
+// NewCache returns an empty cache that remembers at most maxBytes of rendered Markdown.
+func NewCache(maxBytes int) *Cache {
+	return &Cache{
+		maxBytes: maxBytes,
+		slots:    make(chan struct{}, MaxConcurrentParses),
+		order:    list.New(),
+		items:    map[string]*cacheEntry{},
+	}
 }
 
-// Render parses one body.
+// Render is MarkdownToHTML through this cache.
 //
 // within is false when the body was shown as text instead of rendered: its parse ran past the budget,
-// or the process was already parsing as much as it allows and this body did not wait for a slot.
+// or the process was already parsing as much as it allows and this body did not wait for a slot. A
+// cached answer reports the same within it was stored with, so a body's fate does not depend on which
+// request paid for it.
 func (c *Cache) Render(src string, isEmail bool) (rendered string, within bool) {
-	return c.parseBody(src, isEmail)
+	key := cacheKey(src, isEmail)
+	if entry, ok := c.lookup(key); ok {
+		c.hits.Add(1)
+		return entry.rendered, entry.within
+	}
+	rendered, within = c.parseBody(src, isEmail)
+	c.store(key, rendered, within)
+	return rendered, within
 }
 
-// Parses is how many bodies this cache has parsed.
+// Parses is how many bodies this cache has parsed, and Hits how many renders it answered from memory.
+// Together they are the whole story of what the memo did.
 func (c *Cache) Parses() int64 { return c.parses.Load() }
+
+// Hits is how many renders the memo answered without parsing.
+func (c *Cache) Hits() int64 { return c.hits.Load() }
 
 // Peak is the most parses that have ever been running at once. It is what the concurrency cap is
 // asserted against, and what an operator would look at to see the cap working.
@@ -150,4 +184,54 @@ func (c *Cache) trackLiveness(delta int64) {
 			return
 		}
 	}
+}
+
+func (c *Cache) lookup(key string) (cacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.items[key]
+	if !ok {
+		return cacheEntry{}, false
+	}
+	c.order.MoveToFront(entry.element)
+	return *entry, true
+}
+
+func (c *Cache) store(key, rendered string, within bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.items[key]; ok {
+		c.order.MoveToFront(existing.element)
+		return
+	}
+	// A rendering larger than the whole budget is not worth evicting everything else for.
+	if len(rendered) > c.maxBytes {
+		return
+	}
+	entry := &cacheEntry{key: key, rendered: rendered, within: within}
+	entry.element = c.order.PushFront(entry)
+	c.items[key] = entry
+	c.bytes += len(rendered)
+	for c.bytes > c.maxBytes {
+		oldest := c.order.Back()
+		if oldest == nil {
+			break
+		}
+		evicted := oldest.Value.(*cacheEntry)
+		c.order.Remove(oldest)
+		delete(c.items, evicted.key)
+		c.bytes -= len(evicted.rendered)
+	}
+}
+
+type cacheEntry struct {
+	key      string
+	rendered string
+	within   bool
+	element  *list.Element
+}
+
+func cacheKey(src string, isEmail bool) string {
+	sum := sha256.Sum256([]byte(strconv.FormatBool(isEmail) + "\x00" + src))
+	return hex.EncodeToString(sum[:])
 }
