@@ -116,17 +116,31 @@ func TestFailedJobIsRetriedAndTheLoopContinues(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- runner.Run(runCtx) }()
 
+	// The wait is for the failure to have been *recorded*, not merely for the handler to have
+	// returned. The scheduler writes the retry after the handler returns, so cancelling in between
+	// leaves the job leased — recovered when the lease expires, but not in time for what follows.
 	deadline := time.After(2 * time.Second)
+	var pending []jobs.Job
 	for {
 		mu.Lock()
-		failed, done2 := attempts > 0, completed
+		done2 := completed
 		mu.Unlock()
+		var err error
+		if pending, err = queue.Pending(ctx, 10); err != nil {
+			t.Fatal(err)
+		}
+		failed := false
+		for _, job := range pending {
+			if job.Kind == jobs.KindSendCampaign && job.Attempts > 0 && job.LastError == "boom" {
+				failed = true
+			}
+		}
 		if failed && done2 {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("attempts = %d, completed = %v", attempts, done2)
+			t.Fatalf("attempts = %d, completed = %v, jobs = %+v", attempts, done2, pending)
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
@@ -135,13 +149,16 @@ func TestFailedJobIsRetriedAndTheLoopContinues(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The failed job went back to pending with an attempt recorded.
-	pending, err := queue.Pending(ctx, 10)
+	// The failed job is waiting to be retried: pending, one attempt, and the handler's error on it.
+	pending, err = queue.Pending(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	found := false
 	for _, job := range pending {
+		if job.State != jobs.Pending {
+			t.Fatalf("a job is still leased after a graceful stop: %+v", job)
+		}
 		if job.Kind == jobs.KindSendCampaign && job.Attempts > 0 && job.LastError == "boom" {
 			found = true
 		}
