@@ -19,7 +19,7 @@
 
 - **不做** 数据迁移工具（现有 MongoDB 数据不迁，开新库）
 - **不做** 可视化编辑器、图表、dashboard
-- **不做** 多实例横向扩展（SQLite 单文件决定了单实例，明确接受）
+- **不做** 多实例横向扩展（SQLite 单文件决定了单实例，明确接受）。吞吐靠单机并发发送 + 按 SES 账号配额自适应限速解决（D16–D18，第 19 节）；多机协作只预留扩展点（D19），按实测需要再做
 - **不做** 云端存储、消息队列、Redis 等外部服务
 - **不做** OG 分享图生成
 - **不做** 多用户 / 权限组 / 团队
@@ -45,6 +45,10 @@
 | D13 | 所有主键为 24 位小写十六进制随机 ID（TEXT） | 与上游 ObjectId 同形，签名链接格式与上游测试数据可原样搬运。**不**为了让旧邮件链接继续可用——不迁数据，旧 ID 在新库不存在 |
 | D14 | 发送为至多一次（at-most-once）：调 SES 前把 message 置 `claimed`，重启时遗留 `claimed` 一律转 `unknown` 不重发 | 进程在"SES 已接收、库未写回"之间崩溃无法避免；宁丢一封不重发 |
 | D15 | 日预算在发送开始时一次性预留到 `send_ledger`，再分块建 messages | 分块逐块查额度会让并发 campaign 一起超额 |
+| D16 | 单机并发发送：`SEND_CONCURRENCY` 路同时在途的 SES 请求（默认 16），共享一个进程级令牌桶 | 发信是 I/O 等待（每次 SES 调用 50–150 ms），串行时吞吐 ≤ 1/延迟 ≈ 7–20 封/秒，用不满提额后的配额；并发后 1 vCPU 即可跑满数百封/秒 |
+| D17 | 发送速率取自 SES 账号配额：定期调用 SESv2 `GetAccount`，目标速率 = `MaxSendRate × SEND_RATE_HEADROOM`（默认 0.9），`SEND_RATE_PER_SECOND` 设了就作为上限；遇限流按 AIMD 自适应（减半、再缓慢回升） | SES 的每秒上限与 24 小时配额是**账号级**的，速率必须跟着账号走而不是写死；去掉上游 1–14 的硬上限 |
+| D18 | 发送前对照 SES 24 小时剩余配额（`Max24HourSend − SentLast24Hours`）与 `MAX_SENDS_PER_DAY` 取较小者，不足则整次拒绝；发送中撞到日配额则暂停 campaign 并告警 | 与 D15"不做部分发送"一致；发到一半被 AWS 截断最难收拾 |
+| D19 | 多机分布式（协调节点 + 工作节点按租约领批次、令牌由协调节点统一发放）**本期不做**，只保证 `Sender`、`QuotaReader`、限速器都是接口、令牌桶是唯一速率来源，将来可把工作节点接到协调节点的令牌上 | 账号级配额决定了多机不会更快，反而必须集中限速；单机并发已能用满配额。实测单机 CPU/网络成为瓶颈时再做 |
 
 ---
 
@@ -56,7 +60,7 @@
 mailcheap serve
   ├── HTTP server       读者侧页面 + /o /c /p 追踪 + /api/webhooks/ses + /api/v1 + /mcp
   ├── scheduler         goroutine，轮询 jobs 表取到期任务
-  └── sender worker     goroutine，按 SEND_RATE_PER_SECOND 令牌桶发 SES
+  └── sender worker     `SEND_CONCURRENCY` 路并发，共享一个按 SES 账号配额自适应的令牌桶（D16、D17）
 ```
 
 - 模板与静态资源用 `embed.FS` 打进二进制
@@ -229,7 +233,7 @@ services:
 
 1. 受众计算：active contacts，排除 suppression（退订/退信/投诉），**最活跃优先**排序
 2. 分块建 `messages`（1000/事务），状态 `pending`
-3. sender worker 按令牌桶速率领取（`SEND_RATE_PER_SECOND`，1–14，默认 10），领取即置 `claimed`（D14），再逐封调 SES v2
+3. sender worker 以 `SEND_CONCURRENCY` 路并发领取，每封先从令牌桶取令牌（速率见 D17，取自 SES `GetAccount`），领取即置 `claimed`（D14），再调 SES v2；状态回写按批提交
 4. 每封写入 `ses_message_id` 与 `tags`（`message_id`、`kind`），供 SNS 事件回查
 5. 周期性检查暂停条件：`MIN_SENT_BEFORE_PAUSE = 100` 之后，退信率 > 2% 或投诉率 > 0.08% 即暂停 campaign 并发告警
 6. 分步发送：`getNextStepLimit` 语义保留，"发给最活跃的一批"由 `--limit` 表达
@@ -242,7 +246,7 @@ services:
 
 `SEND_BATCH_SIZE = 50` 在原来是因为"一条 QStash 消息发 50 封"，现在队列在进程内，这个数字不再是外部约束，改为按 DB 事务效率选择的内部旋钮。
 
-**发送中的速率控制**：原 `lib/sending.js` 的 `nextSendAt` 全局变量 + `setTimeout` 节流，在 Go 里就是一个 `time.Ticker` 加一个带缓冲 channel，天然并发安全。
+**发送中的速率控制**：原 `lib/sending.js` 的 `nextSendAt` 全局变量 + `setTimeout` 节流，在 Go 里就是一个 `time.Ticker` 加一个带缓冲 channel，天然并发安全。阶段 8 起速率可在运行中调整（D17），细节见第 19 节。
 
 ---
 
@@ -465,7 +469,9 @@ SEND_APPROVAL=manual   # send/schedule 落成 pending job，需 mailcheap approv
 
 保留：`SESSION_SECRET`、`APP_URL`、`SENDING_ENABLED`（默认 false，安全默认）、`SES_REGION`、`SES_ACCESS_KEY_ID`、`SES_SECRET_ACCESS_KEY`、`SES_CONFIGURATION_SET`、`SES_SNS_TOPIC_ARN`、`SEND_RATE_PER_SECOND`、`ARCHIVE_HOSTS`、`ALERT_FROM`、`ADMIN_EMAIL`
 
-新增：`MAILCHEAP_DATA_DIR`（默认 `/data`）、`MAILCHEAP_DB`、`MAX_SENDS_PER_DAY`（默认 50000）、`SEND_APPROVAL`（默认 `auto`）、`MCP_HTTP_ADDR`（默认 `127.0.0.1:8081`）
+新增：`MAILCHEAP_DATA_DIR`（默认 `/data`）、`MAILCHEAP_DB`、`MAX_SENDS_PER_DAY`（默认 50000）、`SEND_APPROVAL`（默认 `auto`）、`MCP_HTTP_ADDR`（默认 `127.0.0.1:8081`）、`SEND_CONCURRENCY`（默认 16，1–256）、`SEND_RATE_HEADROOM`（默认 0.9，0.1–1.0）
+
+语义变更（阶段 8）：`SEND_RATE_PER_SECOND` 从"固定速率，1–14"改为"可选上限，1–5000"；不设时速率完全由 SES 账号配额决定（D17）
 
 删除：`MONGODB_URI`、`ADMIN_PASSWORD`、`QSTASH_TOKEN`、`QSTASH_CURRENT_SIGNING_KEY`、`QSTASH_NEXT_SIGNING_KEY`、`QSTASH_URL`、`UPSTASH_REDIS_REST_URL`、`UPSTASH_REDIS_REST_TOKEN`、`BLOB_READ_WRITE_TOKEN`
 
@@ -501,6 +507,7 @@ SEND_APPROVAL=manual   # send/schedule 落成 pending job，需 mailcheap approv
 | 5 | Docker + compose + caddy + healthcheck | `docker compose up` 跑通端到端 |
 | 6 | MCP tool 面（stdio + HTTP 双模） | 一个 agent 能靠 MCP 走完"统计 → 建草稿 → 检查 → 测试 → 发送 → 看报告" |
 | 7 | 归档页 + sitemap/robots + `ARCHIVE_HOSTS` + 清理/最后通牒 + 告警 | 功能映射表逐条打勾 |
+| 8 | 吞吐与 AWS 速率合规：并发发送、按 SES 配额自适应限速、日配额预检、批量回写、压测（第 19 节） | 假 SES（带延迟与限流）下 2 万封按配额发完、零重复、限流后自动收敛 |
 
 阶段 1–3 是硬骨头（数据层、发送引擎、事件回写），阶段 4–6 是"把已有能力接出来"，阶段 7 是收尾。
 
@@ -537,6 +544,34 @@ SEND_APPROVAL=manual   # send/schedule 落成 pending job，需 mailcheap approv
 
 ---
 
+## 19. 吞吐与 AWS 速率合规（2026-10-12 追加）
+
+**问题**：引擎原为串行发送（一封等 SES 返回再发下一封），吞吐被单次请求延迟锁死在约 7–20 封/秒；速率配置照搬上游硬限 1–14，与账号实际配额无关。用户要求：用最便宜的服务器处理大任务，并遵守 AWS 的发送频率限制。
+
+**判断**：瓶颈是 SES **账号级**配额（每秒上限 + 24 小时配额），不是机器数。多机分布式不会更快，反而要求集中限速。因此本期采用**单机并发 + 配额自适应限速**（方案 A），多机协作只留扩展点（D19）。一台 1 vCPU 的最低配 VPS 即可跑满提额后的数百封/秒。
+
+| SES 配额 | 5 万人 | 100 万人 |
+|---|---|---|
+| 14/s（新账号常见默认） | ≈ 1 小时 | ≈ 20 小时，且超日配额需分天 |
+| 200/s | ≈ 4 分钟 | ≈ 1.4 小时 |
+| 1000/s | < 1 分钟 | ≈ 17 分钟 |
+
+**速率控制（D17）**：
+1. `QuotaReader` 接口：真实实现调 SESv2 `GetAccount` 读 `SendQuota{MaxSendRate, Max24HourSend, SentLast24Hours}`，启动时读一次、之后每 60 秒一次；读失败沿用上次值；从未读到时用 1 封/秒保守值并告警
+2. 目标速率 `target = MaxSendRate × SEND_RATE_HEADROOM`，若设了 `SEND_RATE_PER_SECOND` 再取 `min`
+3. AIMD：SES 返回限流（`TooManyRequestsException`/`ThrottlingException`/`Throttling` 且不是日配额）时当前速率减半（下限 1/s），被限流的那封**未被 SES 接受**，释放回 `pending`；之后每 30 秒无限流则回升 10%，直到 `target`
+4. 令牌桶支持运行中调速，是进程内唯一的速率来源
+
+**日配额（D18）**：发送前预检 `min(SES 剩余 24 小时配额, send_ledger 余量)`，不足整次拒绝并提示可发上限（配合 `--limit`）；发送中若 SES 报日配额用尽，暂停 campaign、告警，不计为失败。
+
+**并发（D16）**：`SEND_CONCURRENCY` 路 worker 共享令牌桶。D14 至多一次、C1（在途不释放）、C2（settle 计 `pending+claimed`）、暂停即停派发并释放未派发者、连续失败计数——全部在并发下保持，用 `-race` 测试证明。
+
+**回写**：发送结果经单写者按批提交（最多 200 条或 50 ms 一批），使数百封/秒时 SQLite 不成为瓶颈。
+
+**验证（不接真实 AWS）**：假 SES 增加可配置延迟与"真实限流"（超过设定速率即返回 Throttling、超过日配额即返回日配额错误），以及 `GetAccount`。真实 SES 的错误码与 `GetAccount` 字段映射标记为"未验证"，留给 `scripts/ses-smoke.sh`。
+
+---
+
 ## 附：被推翻的备选方案
 
 | 方案 | 被否原因 |
@@ -545,4 +580,6 @@ SEND_APPROVAL=manual   # send/schedule 落成 pending job，需 mailcheap approv
 | 队列优先 / 事件溯源（一切动作先落队列表） | 并发模型最统一，但对"查联系人""建草稿"这类同步小操作是过度设计 |
 | 保留 MongoDB，只把 QStash/Redis/Blob 内建 | 数据模型移植成本低，但"MongoDB 还是要运维"与"部署简单"的动机相冲 |
 | 云服务生态照搬（Mongo + QStash + Redis + Blob） | 改动最小，但三个动机全部落空 |
+| 协调节点 + 多工作节点（阶段 8 评估） | 速率是 SES 账号级的，多机不会更快且必须集中限速；多出租约、心跳、故障转移。单机并发已能用满配额，留作 D19 扩展点 |
+| Postgres + 多对等节点 `SKIP LOCKED`（阶段 8 评估） | 推翻"除 SES 外零外部依赖"，多一台数据库成本 |
 | chromedp / 纯 Go 画图 生成 OG 图 | 前者把镜像从 20 MB 推到 400 MB，与单二进制目标相冲；后者要重写排版并嵌入中文字体，收益不抵成本 |
