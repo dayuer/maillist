@@ -50,6 +50,10 @@ var backoff = []time.Duration{
 	time.Second, 5 * time.Second, 30 * time.Second, 2 * time.Minute, 10 * time.Minute,
 }
 
+// MaxAttempts is how many times a job is tried before it is dead: one first attempt and one per
+// backoff step.
+func MaxAttempts() int { return len(backoff) + 1 }
+
 // Job is one row of the queue.
 type Job struct {
 	ID        string

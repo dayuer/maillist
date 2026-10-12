@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
+	"mailcheap/internal/alerts"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/render"
 	"mailcheap/internal/core/rules"
@@ -28,6 +30,9 @@ var recordedTypes = map[sesmap.EventType]bool{
 type Handler struct {
 	store *store.DB
 	log   *slog.Logger
+	// alerts tells the operator about a spam complaint, which is the one SES event that is somebody's
+	// opinion of the newsletter rather than a fact about the delivery.
+	alerts *alerts.Notifier
 }
 
 // New returns a Handler over db.
@@ -36,6 +41,12 @@ func New(db *store.DB, log *slog.Logger) *Handler {
 		log = slog.Default()
 	}
 	return &Handler{store: db, log: log}
+}
+
+// WithAlerts gives the handler somewhere to send its alerts.
+func (h *Handler) WithAlerts(notifier *alerts.Notifier) *Handler {
+	h.alerts = notifier
+	return h
 }
 
 // Applied is what one event did.
@@ -99,8 +110,15 @@ func (h *Handler) ApplyTracking(ctx context.Context, messageID string, eventType
 	if eventType == sesmap.EventClick && render.IsLikelyScanner(userAgent, message.SentAt, now) {
 		return false, nil
 	}
-	if err := h.apply(ctx, message, sesmap.TrackingPlan(eventType, now)); err != nil {
+	plan := sesmap.TrackingPlan(eventType, now)
+	if err := h.apply(ctx, message, plan); err != nil {
 		return false, err
+	}
+	if plan.SuppressAs == model.SuppressComplaint && len(plan.Suppress) > 0 {
+		h.alerts.Send(ctx, alerts.Alert{
+			Key: "complaints", Title: "Spam complaint",
+			Detail: strings.Join(plan.Suppress, ", ") + " marked an email as spam. They are suppressed.",
+		})
 	}
 	return true, nil
 }
