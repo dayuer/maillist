@@ -328,6 +328,11 @@ func sendTest(ctx context.Context, sess *session, credential store.Credential, i
 	}
 	result, err := sess.deps.Mailer.Test(ctx, campaign.ID, in.To)
 	if err != nil {
+		// Nothing was sent, so the day must not stay charged for it — the engine refunds a step the
+		// same way when messages it had reserved could not be written.
+		if refundErr := sess.deps.Store.Refund(ctx, store.Day(time.Now()), credential.ID, 1); refundErr != nil {
+			sess.deps.Log.Error("refund the test send", "credential", credential.ID, "error", refundErr)
+		}
 		return sendTestOut{}, err
 	}
 	sess.note(ctx, credential, "campaign.test", campaign.ID, map[string]any{

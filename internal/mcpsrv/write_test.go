@@ -9,6 +9,7 @@ import (
 
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
+	"mailcheap/internal/creds"
 	"mailcheap/internal/store"
 )
 
@@ -125,6 +126,38 @@ func TestSendTestSendsOneMessageAndStaysOutOfTheReport(t *testing.T) {
 	counters, _, err := f.store.CampaignCountersOf(context.Background(), draft.ID)
 	if err != nil || counters.Recipients != 0 || counters.Sent != 0 {
 		t.Fatalf("the test copy reached the campaign's own counters: %+v %v", counters, err)
+	}
+}
+
+// 测试发送失败要退回那一封的预算：预算记在「发了」上，不是记在「试了」上。引擎在一步的消息
+// 写不进去时同样退（engine.go 的 refund），这里是同一件事的一封版。
+func TestAFailedTestSendGivesTheChargeBack(t *testing.T) {
+	f := newFixtureWithBudget(t, 1)
+	f.seedNewsletter(t, 1)
+	draft := f.seedCampaign(t, "Issue 12")
+	session := f.connect(t)
+
+	if message := callError(t, session, "send_test", map[string]any{
+		"campaign": draft.ID, "to": "not-an-address",
+	}); !strings.Contains(message, "invalid") {
+		t.Fatalf("a bad test address said %q", message)
+	}
+	credential, err := f.store.CredentialByHash(context.Background(), creds.Hash(f.token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved, err := f.store.Reserved(context.Background(), store.Day(time.Now()), credential.ID); err != nil {
+		t.Fatal(err)
+	} else if reserved != 0 {
+		t.Fatalf("a failed test send left %d of the day reserved", reserved)
+	}
+
+	// 预算真的回来了：额度是 1，第二次（有效的）测试发送应该成功，而不是「今日已花完」。
+	sent := call[sendTestOut](t, session, "send_test", map[string]any{
+		"campaign": draft.ID, "to": "checker@example.com",
+	})
+	if sent.MessageID == "" {
+		t.Fatalf("send_test after a failed one = %+v", sent)
 	}
 }
 
