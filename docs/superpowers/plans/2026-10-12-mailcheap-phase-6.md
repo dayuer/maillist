@@ -268,3 +268,16 @@ cmd/mailcheap/mcp.go  `mailcheap mcp --stdio | --http`
 2. **MCP 规范的完备性**：SDK 自带的 conformance 测试没有跑；本阶段验证的是「一个真客户端（SDK 的 Streamable 客户端、以及一个手写 JSON-RPC 的 stdio 客户端）能连上并调用」。
 3. **HTTP 会话的断线续传**：`StreamableHTTPOptions.EventStore` 没开，会话超时 10 分钟；跨断线重放事件不在本阶段范围内。
 4. **`send_test` 的例外**（D6-4）：它同步发送、绕过「发送属于 server」。用凭据预算兜底（每次计 1）。如果复核方认为它也该经 jobs，改法是把它变成 job + `get_job`，代价是失去「立刻知道发出去了没有」这个唯一的信息。
+
+### 5.6 镜像体积预算：25 MB → 30 MB
+
+阶段 5 的记录里，镜像导出后是 **22.3 MB**，预算是 **25 MB**。本阶段加上 MCP 之后：
+
+| 口径 | 阶段 5 | 阶段 6 | 差 |
+|---|---|---|---|
+| 二进制（linux/amd64，`-trimpath -ldflags="-s -w -buildid="`） | 21.3 MB | **24.5 MB**（25,682,044 字节） | +3.7 MB |
+| 镜像导出后（未压缩，CI 与冒烟用的口径） | 22.3 MB | **25.5 MB**（26,783,744 字节） | +3.2 MB |
+
+**这 3.7 MB 是 MCP SDK 的**，量过了：一个只 `import _ "…/go-sdk/mcp"` 的 hello-world，`-s -w` 之后从 1.2 MB 变成 7.7 MB（+6.5 MB）；在我们这个二进制里增量小一些（3.7 MB），因为它要的 net/http 与 crypto/tls 本来就已经链进来了。查过符号表：`golang-jwt` 被链接器丢掉了，`segmentio/encoding`（SDK 的快速 JSON）与 `crypto/tls` 留下了——后者我们本来就要（SES 走 HTTPS）。
+
+设计 §3 明确指定用这个 SDK（官方 Tier 1，v1.8.0），所以改的是预算数字，不是依赖。**这个数字是本 PR 提出的，请复核方定夺**：要压回去就得换一个 MCP 实现，那是改设计，按规矩得先问用户。
