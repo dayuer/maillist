@@ -325,3 +325,56 @@ func (db *DB) SetCampaignSentAt(ctx context.Context, id string, at time.Time) er
 		return err
 	})
 }
+
+// CampaignByArchiveSlug is the issue behind an archive page: the slug is unique per deployment (the
+// store enforces it), and only the three published states have a page. An unlisted issue still
+// resolves — it is not linked, but the address works, which is what upstream does.
+func (db *DB) CampaignByArchiveSlug(ctx context.Context, newsletterID, slug string) (model.Campaign, error) {
+	campaign, err := scanCampaign(db.sql.QueryRowContext(ctx,
+		"SELECT "+campaignColumns+` FROM campaigns
+         WHERE newsletter_id = ? AND archive_slug = ?
+           AND status IN ('sending', 'paused', 'sent')`, newsletterID, slug))
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Campaign{}, fmt.Errorf("issue %s: %w", slug, ErrNotFound)
+	}
+	return campaign, err
+}
+
+// NewsletterForArchiveSlug finds the newsletter an archive slug belongs to, for the application
+// domain's /p/{slug}: that path does not name the newsletter, so the slug has to.
+func (db *DB) NewsletterForArchiveSlug(ctx context.Context, slug string) (model.Newsletter, error) {
+	var id string
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT newsletter_id FROM campaigns
+          WHERE archive_slug = ? AND status IN ('sending', 'paused', 'sent') ORDER BY id LIMIT 1`, slug).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Newsletter{}, fmt.Errorf("issue %s: %w", slug, ErrNotFound)
+	}
+	if err != nil {
+		return model.Newsletter{}, err
+	}
+	newsletter, err := db.Newsletter(ctx, id)
+	if err != nil {
+		return model.Newsletter{}, err
+	}
+	if !newsletter.ArchiveEnabled {
+		// The archive switch is off: the issue has a slug from when it was on, and no page now.
+		return model.Newsletter{}, fmt.Errorf("newsletter %s: %w", newsletter.Slug, ErrNotFound)
+	}
+	return newsletter, nil
+}
+
+// AddWebViews counts readers who looked at an issue's page.
+//
+// The count is incremented here rather than by a beacon, because there is no beacon any more: the
+// page is rendered per request when there is no ISR layer to serve it from a cache (design §10, D11).
+func (db *DB) AddWebViews(ctx context.Context, campaignID string, n int) error {
+	if n <= 0 {
+		return nil
+	}
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE campaigns SET web_views = web_views + ? WHERE id = ?",
+			n, campaignID)
+		return err
+	})
+}
