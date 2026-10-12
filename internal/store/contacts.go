@@ -721,14 +721,15 @@ func (db *DB) MakeDormant(ctx context.Context, contactIDs []string) (int, error)
 // life since it (waiting), one (kept), or the list has moved on without them (dormant).
 func (db *DB) CleanupTotals(ctx context.Context, newsletterID string) (cleanup.Totals, error) {
 	var out cleanup.Totals
+	// coalesce on every sum: an empty result set sums to NULL, not to zero.
 	err := db.sql.QueryRowContext(ctx, `SELECT
-            sum(CASE WHEN status = 'active' AND NOT (last_chance_at < max(
+            coalesce(sum(CASE WHEN status = 'active' AND NOT (last_chance_at < max(
                 coalesce(last_engaged_at, ''), coalesce(last_open_at, ''), coalesce(last_click_at, ''),
-                coalesce(confirmed_at, ''), coalesce(subscribed_at, created_at))) THEN 1 ELSE 0 END),
-            sum(CASE WHEN status = 'active' AND last_chance_at < max(
+                coalesce(confirmed_at, ''), coalesce(subscribed_at, created_at))) THEN 1 ELSE 0 END), 0),
+            coalesce(sum(CASE WHEN status = 'active' AND last_chance_at < max(
                 coalesce(last_engaged_at, ''), coalesce(last_open_at, ''), coalesce(last_click_at, ''),
-                coalesce(confirmed_at, ''), coalesce(subscribed_at, created_at)) THEN 1 ELSE 0 END),
-            sum(CASE WHEN status = 'dormant' THEN 1 ELSE 0 END)
+                coalesce(confirmed_at, ''), coalesce(subscribed_at, created_at)) THEN 1 ELSE 0 END), 0),
+            coalesce(sum(CASE WHEN status = 'dormant' THEN 1 ELSE 0 END), 0)
         FROM contacts WHERE newsletter_id = ? AND last_chance_at IS NOT NULL`, newsletterID).Scan(
 		&out.Waiting, &out.Kept, &out.Dormant)
 	if err != nil {

@@ -29,9 +29,9 @@ var Limits = struct{ MinIssues, MaxIssues, MinDays, MaxDays int }{
 
 // Settings is one newsletter's cleanup configuration.
 type Settings struct {
-	Enabled bool
-	Issues  int
-	Days    int
+	Enabled bool `json:"enabled"`
+	Issues  int  `json:"issues"`
+	Days    int  `json:"days"`
 }
 
 // SettingsOf is upstream getCleanupSettings: the newsletter's own numbers when they are usable, the
