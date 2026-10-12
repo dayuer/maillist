@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/sign"
+	"nibwire/internal/core/sign"
 )
 
 const (
@@ -24,7 +24,7 @@ func testSigner(t *testing.T) *sign.Signer {
 
 // tests/tracking.test.mjs "links go through Mailcheap except unsubscribe links, and the pixel comes
 // first".
-func TestLinksGoThroughMailcheapExceptUnsubscribeLinksAndThePixelComesFirst(t *testing.T) {
+func TestLinksGoThroughNibwireExceptUnsubscribeLinksAndThePixelComesFirst(t *testing.T) {
 	s := testSigner(t)
 	html := strings.Join([]string{
 		`<html><body style="margin:0"><p><a href="https://example.org/?a=1&amp;b=2">Example</a>`,

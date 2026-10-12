@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/sign"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/sign"
 )
 
 const testAppURL = "https://mail.example.com"
@@ -359,10 +359,10 @@ func TestUntrackedKinds(t *testing.T) {
 }
 
 func TestFeedbackIDIdentifiesTheSender(t *testing.T) {
-	if got := FeedbackID("84f1a2b3c4d5e6f7a8b9c0d3", model.KindCampaign, "weekly"); got != "84f1a2b3c4d5e6f7a8b9c0d3:weekly:campaign:mailcheap" {
+	if got := FeedbackID("84f1a2b3c4d5e6f7a8b9c0d3", model.KindCampaign, "weekly"); got != "84f1a2b3c4d5e6f7a8b9c0d3:weekly:campaign:nibwire" {
 		t.Errorf("got %q", got)
 	}
-	if got := FeedbackID("", model.KindLastChance, "weekly"); got != "last-chance:weekly:last-chance:mailcheap" {
+	if got := FeedbackID("", model.KindLastChance, "weekly"); got != "last-chance:weekly:last-chance:nibwire" {
 		t.Errorf("got %q", got)
 	}
 }

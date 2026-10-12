@@ -1,4 +1,4 @@
-Mailcheap (Go) is a port of Mailcheap by Marc Lou, https://github.com/marclou/mailcheap
+Nibwire is a Go port of Mailcheap by Marc Lou, https://github.com/marclou/mailcheap
 (commit 67d13b0), used under the MIT License:
 
 Copyright (c) 2026 Marc Lou

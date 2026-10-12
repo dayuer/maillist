@@ -12,14 +12,14 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"mailcheap/internal/config"
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/creds"
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/store"
+	"nibwire/internal/config"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/creds"
+	"nibwire/internal/jobs"
+	"nibwire/internal/mailer"
+	"nibwire/internal/store"
 )
 
 // fixture is a deployment an agent can be pointed at: a database, a fake sender, a queue and one
@@ -55,7 +55,7 @@ func newFixtureFull(t *testing.T, scopes []creds.Scope, budget int) *fixture {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(ctx, filepath.Join(dir, "mailcheap.db"))
+	db, err := store.Open(ctx, filepath.Join(dir, "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

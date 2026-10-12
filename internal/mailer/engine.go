@@ -10,14 +10,14 @@ import (
 
 	"github.com/aws/smithy-go"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/providers"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/core/validate"
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/providers"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/core/validate"
+	"nibwire/internal/jobs"
+	"nibwire/internal/store"
 )
 
 // releaseTimeout bounds the bookkeeping a stopped batch still owes the database.

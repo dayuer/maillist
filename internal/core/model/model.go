@@ -5,7 +5,7 @@ package model
 import (
 	"time"
 
-	"mailcheap/internal/core/ids"
+	"nibwire/internal/core/ids"
 )
 
 // Format is how a campaign body is written. The upstream "rich" format (TipTap) is gone.

@@ -3,9 +3,9 @@ package rules
 import (
 	"strings"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/sign"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/sign"
 )
 
 // RecipientEmail is one message ready for the provider.

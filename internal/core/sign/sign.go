@@ -1,4 +1,4 @@
-// Package sign signs the links Mailcheap puts in emails. Each kind of link derives its own key
+// Package sign signs the links Nibwire puts in emails. Each kind of link derives its own key
 // from SESSION_SECRET with HKDF-SHA256 (empty salt) and a distinct info label, so one kind can
 // never stand in for another. Rotating the secret invalidates every link already sent.
 package sign
@@ -10,6 +10,8 @@ import (
 	"errors"
 )
 
+// The info labels keep the upstream project's name on purpose: they are part of every signature, and
+// the golden vectors in sign_test.go come from upstream mailcheap byte for byte (design D13).
 const (
 	InfoTracking    = "mailcheap-tracking-v1"
 	InfoUnsubscribe = "mailcheap-unsubscribe-v1"

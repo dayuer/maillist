@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/rules"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/rules"
 )
 
 // CampaignCounters are the issue's own counters (upstream campaign.stats).

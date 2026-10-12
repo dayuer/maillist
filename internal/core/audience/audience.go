@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // The upstream sort (AUDIENCE_SORT) walks the same keys as the Mongo query it replaced:

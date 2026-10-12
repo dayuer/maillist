@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // audienceOrder is core/audience.Less in SQL: last click, then last open, then the imported

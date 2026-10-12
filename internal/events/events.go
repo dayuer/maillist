@@ -10,11 +10,11 @@ import (
 	"log/slog"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/core/sesmap"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/core/sesmap"
+	"nibwire/internal/store"
 )
 
 // recordedTypes are the events worth a row: every send produces a delivery, and storing those would
@@ -86,7 +86,7 @@ func (h *Handler) ApplyEvent(ctx context.Context, raw json.RawMessage, now time.
 	return applied, nil
 }
 
-// ApplyTracking applies an open or a click from Mailcheap's own pixel and links.
+// ApplyTracking applies an open or a click from Nibwire's own pixel and links.
 func (h *Handler) ApplyTracking(ctx context.Context, messageID string, eventType sesmap.EventType,
 	userAgent string, now time.Time) (bool, error) {
 	message, err := h.store.Message(ctx, messageID)

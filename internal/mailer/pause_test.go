@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/jobs"
+	"nibwire/internal/core/model"
+	"nibwire/internal/jobs"
 )
 
-// 发送中把 campaign 改成 paused（`mailcheap campaign pause` 就是这一步）：
+// 发送中把 campaign 改成 paused（`nibwire campaign pause` 就是这一步）：
 // 批次里没轮到的消息释放回 pending，campaign 停在 paused——阶段 2 的不变量之一。
 func TestPausingMidBatchReleasesTheRest(t *testing.T) {
 	f := newFixture(t, 6)

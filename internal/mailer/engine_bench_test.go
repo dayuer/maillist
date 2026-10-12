@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/store"
 )
 
 // benchMessages builds n pending campaign messages without touching the contacts table: messages do
@@ -50,7 +50,7 @@ func benchMessages(tb testing.TB, db *store.DB, n int) []model.Message {
 // transaction per store.InsertChunkSize rows.
 func BenchmarkMessageInsert(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		db, err := store.Open(context.Background(), filepath.Join(b.TempDir(), "mailcheap.db"))
+		db, err := store.Open(context.Background(), filepath.Join(b.TempDir(), "nibwire.db"))
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -72,7 +72,7 @@ func TestMessageInsertBudget(t *testing.T) {
 		t.Skip("inserts 50,000 rows")
 	}
 	ctx := context.Background()
-	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

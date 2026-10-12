@@ -8,17 +8,17 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/checks"
-	"mailcheap/internal/core/content"
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/importer"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/schedule"
-	"mailcheap/internal/core/validate"
-	"mailcheap/internal/importsvc"
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/store"
-	"mailcheap/internal/uploads"
+	"nibwire/internal/core/checks"
+	"nibwire/internal/core/content"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/importer"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/schedule"
+	"nibwire/internal/core/validate"
+	"nibwire/internal/importsvc"
+	"nibwire/internal/jobs"
+	"nibwire/internal/store"
+	"nibwire/internal/uploads"
 )
 
 // The write tools (design §9). Every one of them records what it did, with the credential's name as
@@ -719,12 +719,12 @@ func (s *session) requireASender() error {
 	if running {
 		return nil
 	}
-	return errors.New("no mailcheap serve process is running, so nothing would send this. " +
-		"Start the server (mailcheap serve, or the container), then send again")
+	return errors.New("no nibwire serve process is running, so nothing would send this. " +
+		"Start the server (nibwire serve, or the container), then send again")
 }
 
 // checkCampaignIsSendable runs the pre-send checklist and stops on a blocking failure. It is the
-// same list `mailcheap campaign check` prints and the same one the engine enforces, so a tool call
+// same list `nibwire campaign check` prints and the same one the engine enforces, so a tool call
 // cannot get past a check the CLI would have stopped at.
 func (s *session) checkCampaignIsSendable(ctx context.Context, campaign model.Campaign) error {
 	if !s.deps.Config.SendingOn {

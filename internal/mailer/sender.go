@@ -4,7 +4,7 @@ package mailer
 import (
 	"context"
 
-	"mailcheap/internal/core/rules"
+	"nibwire/internal/core/rules"
 )
 
 // Sender delivers one recipient's email. Implemented by SESSender (production) and Fake (tests).

@@ -7,7 +7,7 @@
 # scripts/compose-smoke.sh runs exactly that. Nothing here belongs in production: the credentials
 # are the word "local".
 services:
-  mailcheap:
+  nibwire:
     environment:
       # The real SES client, pointed at the fake. The request is really built, really signed and
       # really answered — it just does not leave the machine. That is what makes this more than the
@@ -18,7 +18,7 @@ services:
       SES_SECRET_ACCESS_KEY: local
       SES_REGION: eu-west-1
     volumes:
-      - mailcheap-data:/data
+      - nibwire-data:/data
       # The campaign body and an image to upload. Read-only: the app never writes to them.
       - ../testdata/smoke:/seed:ro
 
@@ -26,7 +26,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.fakeses
-    image: mailcheap-fakeses:local
+    image: nibwire-fakeses:local
     environment:
       # The domain the app's pre-send check reads. Without it the identity list is empty and a send
       # refuses for the right reason.

@@ -2,7 +2,7 @@
 // the signature check that decides which one a file is, and the file plus row that make its URL
 // resolve.
 //
-// It is the shared half of `mailcheap upload` and of the MCP `upload_image` tool. The two differ
+// It is the shared half of `nibwire upload` and of the MCP `upload_image` tool. The two differ
 // only in where the bytes come from — a path on the operator's disk, a base64 field in a tool call —
 // and everything after that is the same: the signature decides the type, the file goes under
 // <data-dir>/uploads/ named <id>.<ext>, and the row is what the URL resolves against.
@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/store"
 )
 
 // MaxBytes is upstream MAX_UPLOAD_BYTES: the 4.5 MB a serverless function would take, rounded down.

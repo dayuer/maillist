@@ -9,8 +9,8 @@ import (
 
 	"github.com/aws/smithy-go"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/rules"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/rules"
 )
 
 // SentEmail is one recorded send.

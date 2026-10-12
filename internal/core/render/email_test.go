@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // The newsletter fixture of tests/render-email.test.mjs.

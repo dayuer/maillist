@@ -1,5 +1,5 @@
 // Package importsvc applies normalized import rows to a newsletter in chunks. It is the shared half
-// of `mailcheap contact import` and of the MCP `import_contacts` tool: the CLI reads a CSV from a
+// of `nibwire contact import` and of the MCP `import_contacts` tool: the CLI reads a CSV from a
 // path, the tool reads rows out of its arguments, and from there the two do exactly the same thing —
 // the same chunk size, the same dry-run arithmetic, the same suppression count.
 //
@@ -10,10 +10,10 @@ package importsvc
 import (
 	"context"
 
-	"mailcheap/internal/core/importer"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/importer"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/store"
 )
 
 // ChunkSize is one transaction's worth of rows. Small enough that a killed import leaves most of its

@@ -45,7 +45,7 @@ type Contribution struct {
 // day (or the starting count, when it happened before the range or is the import's own timestamp)
 // and a leave day.
 //
-// A contact who left counts until they left, and only when Mailcheap knows when that was. Pending
+// A contact who left counts until they left, and only when Nibwire knows when that was. Pending
 // and dormant contacts, and the ones imported as unsubscribed or bounced, have no such date and are
 // left out of every day — they are in neither list.
 func SubscriberContributions(in SubscriberInput) Contribution {
@@ -82,8 +82,8 @@ func SubscriberContributions(in SubscriberInput) Contribution {
 	for _, activity := range in.Suppressed {
 		// A suppression the contact had already come back from, or one written at the same moment
 		// they were created (an import's own row), is not a leave in this window.
-		if HasLeftInMailcheap(activity.UnsubscribedAt, activity.CreatedAt) ||
-			!HasLeftInMailcheap(activity.LeftAt, activity.CreatedAt) {
+		if HasLeftInNibwire(activity.UnsubscribedAt, activity.CreatedAt) ||
+			!HasLeftInNibwire(activity.LeftAt, activity.CreatedAt) {
 			continue
 		}
 		key, ok := joinedKey(activity, in.RangeStart, in.Loc)
@@ -92,10 +92,10 @@ func SubscriberContributions(in SubscriberInput) Contribution {
 	return contribution
 }
 
-// HasLeftInMailcheap is upstream hasLeftInMailcheap: a leave we recorded ourselves, with a date that
+// HasLeftInNibwire is upstream hasLeftInNibwire: a leave we recorded ourselves, with a date that
 // is not the moment the contact was imported. Anything inside the import window happened before
-// Mailcheap had the contact, on a day nobody knows.
-func HasLeftInMailcheap(leftAt *time.Time, createdAt time.Time) bool {
+// Nibwire had the contact, on a day nobody knows.
+func HasLeftInNibwire(leftAt *time.Time, createdAt time.Time) bool {
 	return leftAt != nil && leftAt.After(createdAt.Add(importWindow))
 }
 

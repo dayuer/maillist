@@ -8,7 +8,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"mailcheap/internal/creds"
+	"nibwire/internal/creds"
 )
 
 // tokenHashKey is how the authenticated token travels from the middleware to the server builder.

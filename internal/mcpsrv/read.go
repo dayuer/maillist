@@ -7,16 +7,16 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/checks"
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/core/stats"
-	"mailcheap/internal/core/validate"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/statsquery"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/checks"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/core/stats"
+	"nibwire/internal/core/validate"
+	"nibwire/internal/mailer"
+	"nibwire/internal/statsquery"
+	"nibwire/internal/store"
 )
 
 // The read tools (design §9). Every list takes PageArgs; the getters take a reference an operator

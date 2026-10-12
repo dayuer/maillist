@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/store"
+	"nibwire/internal/jobs"
+	"nibwire/internal/store"
 )
 
 func newQueue(t *testing.T) *jobs.Queue {
 	t.Helper()
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

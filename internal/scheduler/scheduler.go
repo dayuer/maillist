@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"time"
 
-	"mailcheap/internal/jobs"
+	"nibwire/internal/jobs"
 )
 
 // Handler runs one job. Returning an error hands the job back to the queue with its backoff.

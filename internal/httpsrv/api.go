@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/audit"
-	"mailcheap/internal/core/archive"
-	"mailcheap/internal/core/content"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/validate"
-	"mailcheap/internal/creds"
-	"mailcheap/internal/store"
+	"nibwire/internal/audit"
+	"nibwire/internal/core/archive"
+	"nibwire/internal/core/content"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/validate"
+	"nibwire/internal/creds"
+	"nibwire/internal/store"
 )
 
 // The v1 API is the second way in, after the CLI (design §11): an `api` credential, checked per

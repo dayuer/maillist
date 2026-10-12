@@ -8,7 +8,7 @@
 
 | 项 | 说明 |
 |---|---|
-| SES 发信域名 | 已在 SES 里 verified。DKIM 与 MAIL FROM 都要配好——`mailcheap domains` 会把要发布的记录逐条打出来 |
+| SES 发信域名 | 已在 SES 里 verified。DKIM 与 MAIL FROM 都要配好——`nibwire domains` 会把要发布的记录逐条打出来 |
 | IAM 凭据 | 一个 user 或 role，权限只需 `ses:SendEmail` 与 `ses:GetEmailIdentity`。**不要**给 `ses:SendRawEmail` 之外的任何东西 |
 | Configuration set | 一个 SES configuration set；它的 **event destination** 把 `Delivery`/`Bounce`/`Complaint` 发到 SNS |
 | SNS topic | 订阅到 `https://<你的域名>/api/webhooks/ses`，**已确认订阅**（确认是自动的：应用会去 GET 那个 SubscribeURL） |
@@ -24,8 +24,8 @@
 SES_REGION=eu-west-1 \
 SES_ACCESS_KEY_ID=AKIA… \
 SES_SECRET_ACCESS_KEY=… \
-SES_CONFIGURATION_SET=mailcheap \
-SES_SNS_TOPIC_ARN=arn:aws:sns:eu-west-1:123456789012:mailcheap-events \
+SES_CONFIGURATION_SET=nibwire \
+SES_SNS_TOPIC_ARN=arn:aws:sns:eu-west-1:123456789012:nibwire-events \
 APP_URL=https://news.example.com \
 TEST_RECIPIENT=you@your-domain.example \
 scripts/ses-smoke.sh
@@ -42,7 +42,7 @@ DRY_RUN=1 … scripts/ses-smoke.sh
 | 步骤 | 期望 |
 |---|---|
 | 1. 环境检查 | `ok the environment names everything the run needs`。缺任何一个都会在**改动任何东西之前**停下，并列出缺的名字 |
-| 2. `mailcheap domains` | 至少一行 `verified`，带 `DKIM SUCCESS`；如果没验证，脚本会停下并让你去发布 DNS 记录 |
+| 2. `nibwire domains` | 至少一行 `verified`，带 `DKIM SUCCESS`；如果没验证，脚本会停下并让你去发布 DNS 记录 |
 | 3. 建 newsletter / contact / campaign | 没有输出（都是 `--json` 之外的行） |
 | 4. `campaign check` | 十项里没有 `FAIL`。`domain` 一项必须是 `ok`——它问的就是第 2 步那个身份 |
 | 5. `campaign send` | `queued 1 recipients`；随后 `campaign report` 里 `sent 1` |
@@ -52,8 +52,8 @@ DRY_RUN=1 … scripts/ses-smoke.sh
 
 ## 没等到的时候先看哪里
 
-- **`Delivered` 一直是 0**：按这个顺序查——`campaign send` 用的 configuration set 是不是 `SES_CONFIGURATION_SET`；那个 configuration set 的 event destination 有没有把 `Delivery` 发到 `SES_SNS_TOPIC_ARN`；订阅确认了没有；webhook 有没有回 200（`docker compose logs mailcheap` 里每一次被拒的事件都有一行）。
-- **信没到**：先看 SES 控制台的发送统计与退信，再看 `mailcheap campaign report` 的 `bounced`/`failed`。沙箱环境下发给未验证地址是静默失败——脚本第 2 步只验证了发信域名，收信地址在沙箱里也得先验证。
+- **`Delivered` 一直是 0**：按这个顺序查——`campaign send` 用的 configuration set 是不是 `SES_CONFIGURATION_SET`；那个 configuration set 的 event destination 有没有把 `Delivery` 发到 `SES_SNS_TOPIC_ARN`；订阅确认了没有；webhook 有没有回 200（`docker compose logs nibwire` 里每一次被拒的事件都有一行）。
+- **信没到**：先看 SES 控制台的发送统计与退信，再看 `nibwire campaign report` 的 `bounced`/`failed`。沙箱环境下发给未验证地址是静默失败——脚本第 2 步只验证了发信域名，收信地址在沙箱里也得先验证。
 - **打开了但 `Opened` 是 0**：很多客户端默认拦图片。允许图片后重开一次。
 - **点了但 `Clicked` 是 0**：发送后 30 秒内的点击按扫描器处理（上游 `SCANNER_WINDOW_MS`），`curl` 一类的 User-Agent 也一律不计。用真正的浏览器点，且不要在发出后立刻点。
 - **退订了但状态没变**：`SESSION_SECRET` 如果在这封信发出之后被换过，信里所有链接的签名都会失效。换密钥等于让已发出的邮件里的链接全部作废——这是上游行为，不是 bug。

@@ -9,8 +9,8 @@ import (
 
 	"github.com/aws/smithy-go"
 
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/mailer"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/mailer"
 )
 
 // 真 SES 客户端打到假 SES 上：请求体是这里验证的，不是 Sender 接口后面的假记录。
@@ -32,7 +32,7 @@ func TestTheRealSESClientCanSendThroughTheFake(t *testing.T) {
 	sender, err := mailer.NewSES(context.Background(), mailer.SESOptions{
 		Region: "eu-west-1", Endpoint: server.URL,
 		AccessKeyID: "test", SecretKey: "test",
-	}, "mailcheap-test", true)
+	}, "nibwire-test", true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,7 @@
 package mcpsrv
 
 import (
-	"mailcheap/internal/creds"
+	"nibwire/internal/creds"
 )
 
 // tools is the MCP surface: every tool, the scope a call needs, and how it binds its handler.
@@ -30,7 +30,7 @@ var tools = []*tool{
 		add: func(sf *surface, t *tool) { addTool(sf, t, getCampaignReport) }},
 	{name: "get_stats", scope: creds.ScopeRead,
 		about: "Subscriber growth, sends by hour and the last 30 days' email rates, against the 30 " +
-			"before them. The same figures `mailcheap stats` prints.",
+			"before them. The same figures `nibwire stats` prints.",
 		add: func(sf *surface, t *tool) { addTool(sf, t, getStats) }},
 	{name: "list_contacts", scope: creds.ScopeRead,
 		about: "List a newsletter's contacts, most recently subscribed first.",

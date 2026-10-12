@@ -9,12 +9,12 @@ import (
 	"net/http"
 	"time"
 
-	"mailcheap/internal/config"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/core/sns"
-	"mailcheap/internal/events"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/store"
+	"nibwire/internal/config"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/core/sns"
+	"nibwire/internal/events"
+	"nibwire/internal/mailer"
+	"nibwire/internal/store"
 )
 
 // Server holds everything the handlers need. The admin surface (/api/v1, /mcp) is later phases;

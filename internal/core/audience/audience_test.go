@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // The fixture of tests/audience.test.mjs. "imported.clickRate"/"imported.openRate" are the flattened

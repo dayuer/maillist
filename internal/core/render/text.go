@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"mailcheap/internal/core/content"
+	"nibwire/internal/core/content"
 )
 
 var (

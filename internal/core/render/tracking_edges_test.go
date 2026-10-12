@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/sign"
+	"nibwire/internal/core/sign"
 )
 
 // 上游测试没覆盖的边角：双 href、含另一种引号的 URL、点段的退订路径。

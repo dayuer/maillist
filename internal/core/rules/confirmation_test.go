@@ -4,14 +4,14 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
 )
 
 const (
 	confirmContactID    = "64f1a2b3c4d5e6f7a8b9c0a1"
 	confirmNewsletterID = "64f1a2b3c4d5e6f7a8b9c0b1"
-	confirmAppURL       = "https://mailcheap.test"
+	confirmAppURL       = "https://nibwire.test"
 )
 
 func confirmationLetter(name string, confirmation model.Content) model.Newsletter {
@@ -28,11 +28,11 @@ func TestTheConfirmationEmailCarriesACleanLink(t *testing.T) {
 		t.Errorf("markdown = %q", content.Markdown)
 	}
 
-	email := confirmationEmail(t, content, "https://mailcheap.test/confirm?token=abc")
-	if !strings.Contains(email.HTML, `href="https://mailcheap.test/confirm?token=abc"`) {
+	email := confirmationEmail(t, content, "https://nibwire.test/confirm?token=abc")
+	if !strings.Contains(email.HTML, `href="https://nibwire.test/confirm?token=abc"`) {
 		t.Errorf("confirm link not filled: %s", email.HTML)
 	}
-	if !strings.Contains(email.Text, "Confirm my subscription (https://mailcheap.test/confirm?token=abc)") {
+	if !strings.Contains(email.Text, "Confirm my subscription (https://nibwire.test/confirm?token=abc)") {
 		t.Errorf("text = %q", email.Text)
 	}
 	if strings.Contains(email.HTML, "/c/") || strings.Contains(email.HTML, "/o/") {
@@ -50,7 +50,7 @@ func TestANewslettersOwnConfirmationEmailGoesOut(t *testing.T) {
 	custom := model.Content{
 		Subject:     " [Action Required] Confirm your Field notes subscription ",
 		PreviewText: "One click and you're in.",
-		Markdown: `<p style="text-align:center"><img src="https://mailcheap.test/email/banner.png" alt="Field notes" width="600" height="200"></p>
+		Markdown: `<p style="text-align:center"><img src="https://nibwire.test/email/banner.png" alt="Field notes" width="600" height="200"></p>
 
 Confirm your email to get the next issue:
 
@@ -68,17 +68,17 @@ Every Sunday, you'll get:
 		t.Errorf("previewText = %q", content.PreviewText)
 	}
 
-	email := confirmationEmail(t, content, "https://mailcheap.test/confirm?token=xyz")
+	email := confirmationEmail(t, content, "https://nibwire.test/confirm?token=xyz")
 	for label, want := range map[string]string{
-		"confirm link":  `href="https://mailcheap.test/confirm?token=xyz"`,
-		"banner image":  `src="https://mailcheap.test/email/banner.png"`,
+		"confirm link":  `href="https://nibwire.test/confirm?token=xyz"`,
+		"banner image":  `src="https://nibwire.test/email/banner.png"`,
 		"markdown list": "<li>One idea about building things</li>",
 	} {
 		if !strings.Contains(email.HTML, want) {
 			t.Errorf("%s missing: %s", label, email.HTML)
 		}
 	}
-	if !strings.Contains(email.Text, "Confirm my subscription (https://mailcheap.test/confirm?token=xyz)") {
+	if !strings.Contains(email.Text, "Confirm my subscription (https://nibwire.test/confirm?token=xyz)") {
 		t.Errorf("text = %q", email.Text)
 	}
 	if strings.Contains(email.HTML, ConfirmURLPlaceholder) || strings.Contains(email.Text, ConfirmURLPlaceholder) {

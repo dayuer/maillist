@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/fakessesrv"
+	"nibwire/internal/fakessesrv"
 )
 
 func main() {

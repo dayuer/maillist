@@ -12,19 +12,19 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
+	"nibwire/internal/core/ids"
 )
 
 // TestMain lets this test binary act as the child writer of TestConcurrentProcessWrites.
 func TestMain(m *testing.M) {
-	if path := os.Getenv("MAILCHEAP_TEST_CHILD_DB"); path != "" {
+	if path := os.Getenv("NIBWIRE_TEST_CHILD_DB"); path != "" {
 		os.Exit(runChildWriter(path))
 	}
 	os.Exit(m.Run())
 }
 
 // TestStoreChild never runs in the normal suite: TestMain turns the process into the child writer
-// when MAILCHEAP_TEST_CHILD_DB is set and exits before m.Run() ever gets here.
+// when NIBWIRE_TEST_CHILD_DB is set and exits before m.Run() ever gets here.
 func TestStoreChild(t *testing.T) {
 	t.Skip("runs as the child writer through TestMain")
 }
@@ -67,7 +67,7 @@ func TestConcurrentProcessWrites(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts a subprocess")
 	}
-	path := filepath.Join(t.TempDir(), "mailcheap.db")
+	path := filepath.Join(t.TempDir(), "nibwire.db")
 	ctx := context.Background()
 	db, err := Open(ctx, path)
 	if err != nil {
@@ -76,7 +76,7 @@ func TestConcurrentProcessWrites(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	child := exec.Command(os.Args[0], "-test.run=TestStoreChild") //nolint:gosec // re-running this test binary as the child writer
-	child.Env = append(os.Environ(), "MAILCHEAP_TEST_CHILD_DB="+path)
+	child.Env = append(os.Environ(), "NIBWIRE_TEST_CHILD_DB="+path)
 	child.Stderr = os.Stderr
 	if err := child.Start(); err != nil {
 		t.Fatal(err)

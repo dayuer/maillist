@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/store"
 )
 
 const testAppURL = "https://mail.example.com"
@@ -40,7 +40,7 @@ func newFixture(t *testing.T, contacts int) *fixture {
 func newFixtureWith(t *testing.T, contacts int, options ...FakeOption) *fixture {
 	t.Helper()
 	ctx := context.Background()
-	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

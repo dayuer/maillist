@@ -1,4 +1,4 @@
--- Images uploaded through `mailcheap upload`.
+-- Images uploaded through `nibwire upload`.
 --
 -- The bytes live in <data-dir>/uploads/<id>.<ext>; this table is what makes a URL resolvable and
 -- lets an operator see what a newsletter is using.

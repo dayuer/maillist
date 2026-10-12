@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
 )
 
 // sendingCampaign makes a campaign whose messages are claimable: a claim only takes messages of a
