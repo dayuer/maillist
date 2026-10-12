@@ -17,6 +17,9 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid= -X main.version=$
 # `docker compose exec mailcheap mailcheap contact list` works.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/mailcheap /usr/local/bin/mailcheap
+# The licence travels with every copy of the binary: BSL 1.1 for this work, and the MIT notice that
+# the upstream port requires to be kept.
+COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/mailcheap/
 # /data has to exist and belong to the user the process runs as. Docker creates a mount point that
 # does not exist in the image as root, and a fresh named volume copies the ownership of the
 # directory it mounts over — so without this the app cannot open its database: it runs as nonroot
