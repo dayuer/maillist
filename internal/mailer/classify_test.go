@@ -2,9 +2,7 @@ package mailer
 
 import (
 	"context"
-	"log/slog"
 	"testing"
-	"time"
 
 	"nibwire/internal/core/model"
 	"nibwire/internal/core/rules"
@@ -19,12 +17,9 @@ func (pausingSender) Classify(error) rules.ErrorAction { return rules.ErrorPause
 func TestTheEngineFollowsTheChannelsOwnErrorReading(t *testing.T) {
 	f := newFixture(t, 2)
 	ctx := context.Background()
-	engine := NewEngine(f.db, pausingSender{f.fake}, f.signer, Config{
-		AppURL: testAppURL, SendingOn: true, SendRatePerSec: 1000,
-		Limits: model.Limits{MaxEmailBytes: 100_000, BounceRate: 0.02, ComplaintRate: 0.0008,
-			MaxSendsPerDay: 50_000, WelcomeEmailsPer10Minute: 100},
-		PollInterval: 10 * time.Millisecond, SendConcurrency: 1,
-	}, slog.New(slog.NewTextHandler(newLogCapture(t), nil)))
+	cfg := f.engine.cfg
+	cfg.SendConcurrency = 1
+	engine := NewEngine(f.db, pausingSender{f.fake}, f.signer, cfg, f.engine.log)
 	t.Cleanup(engine.Close)
 
 	if _, err := engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
@@ -34,8 +29,12 @@ func TestTheEngineFollowsTheChannelsOwnErrorReading(t *testing.T) {
 	for _, contact := range f.contacts {
 		f.fake.FailWith(contact.Email, "MessageRejected", "Illegal address")
 	}
-	if _, err := engine.SendBatch(ctx, nil); err != nil {
+	result, err := engine.SendBatch(ctx, nil)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if result.Failed != 0 || result.Sent != 0 {
+		t.Fatalf("result = %+v, want nothing sent and nothing counted as failed", result)
 	}
 	campaign, err := f.db.Campaign(ctx, f.campaign.ID)
 	if err != nil {
@@ -43,5 +42,9 @@ func TestTheEngineFollowsTheChannelsOwnErrorReading(t *testing.T) {
 	}
 	if campaign.Status != model.CampaignPaused {
 		t.Fatalf("status = %s, want paused: the engine read the error as SES would", campaign.Status)
+	}
+	// A pause releases the messages rather than failing them: both are back in the queue.
+	if claimed, unknown, pending := claimedCount(t, f.db); claimed != 0 || unknown != 0 || pending != 2 {
+		t.Fatalf("claimed = %d, unknown = %d, pending = %d, want 0/0/2", claimed, unknown, pending)
 	}
 }

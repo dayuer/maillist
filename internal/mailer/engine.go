@@ -623,6 +623,8 @@ type errorOutcome struct {
 }
 
 // handleSendError classifies a failed send through the channel's own reading (ClassifySES for SES).
+// Only campaign messages are classified: a message outside a campaign (welcome, confirmation, test)
+// always fails, since there is no campaign to pause.
 func (e *Engine) handleSendError(ctx context.Context, message model.Message, loaded store.MessageContext,
 	cause error) (outcome errorOutcome, stop bool) {
 	action := rules.ErrorFail
