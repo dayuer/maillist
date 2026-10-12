@@ -121,8 +121,8 @@ func (db *DB) Campaign(ctx context.Context, id string) (model.Campaign, error) {
 }
 
 // Campaigns lists a newsletter's campaigns, most recently active first. An empty newsletterID lists
-// every newsletter's.
-func (db *DB) Campaigns(ctx context.Context, newsletterID string, limit int) ([]model.Campaign, error) {
+// every newsletter's. offset skips that many rows, for a caller that pages through them.
+func (db *DB) Campaigns(ctx context.Context, newsletterID string, limit, offset int) ([]model.Campaign, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -134,6 +134,10 @@ func (db *DB) Campaigns(ctx context.Context, newsletterID string, limit int) ([]
 	}
 	query += ` ORDER BY coalesce(sent_at, started_at, scheduled_at, updated_at) DESC, id DESC LIMIT ?`
 	args = append(args, limit)
+	if offset > 0 {
+		query += " OFFSET ?"
+		args = append(args, offset)
+	}
 
 	rows, err := db.sql.QueryContext(ctx, query, args...)
 	if err != nil {

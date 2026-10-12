@@ -99,7 +99,7 @@ func TestCampaignRoundTrip(t *testing.T) {
 	if _, err := db.Campaign(ctx, ids.New()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
-	if list, err := db.Campaigns(ctx, newsletter.ID, 10); err != nil || len(list) != 1 {
+	if list, err := db.Campaigns(ctx, newsletter.ID, 10, 0); err != nil || len(list) != 1 {
 		t.Fatalf("list = %d %v", len(list), err)
 	}
 }
