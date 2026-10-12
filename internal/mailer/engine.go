@@ -172,13 +172,16 @@ func (c Charge) system() bool { return c.CredentialID == "" }
 
 // Engine sends queued messages through a Sender.
 type Engine struct {
-	store   *store.DB
-	sender  Sender
-	signer  *sign.Signer
-	bucket  *Bucket
-	control *ratectl.Controller
-	cfg     Config
-	log     *slog.Logger
+	store  *store.DB
+	sender Sender
+	// classify reads a failed send. It is the channel's own reading when the sender is a Channel
+	// (or any Classifier), and SES's otherwise — which is what every sender was before channels.
+	classify func(error) rules.ErrorAction
+	signer   *sign.Signer
+	bucket   *Bucket
+	control  *ratectl.Controller
+	cfg      Config
+	log      *slog.Logger
 }
 
 // NewEngine builds an engine. The bucket is shared by every caller, so the rate is a process-wide
@@ -195,8 +198,12 @@ func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log
 	if log == nil {
 		log = slog.Default()
 	}
+	classify := ClassifySES
+	if classifier, ok := sender.(Classifier); ok {
+		classify = classifier.Classify
+	}
 	return &Engine{
-		store: db, sender: sender, signer: signer, control: cfg.RateControl,
+		store: db, sender: sender, classify: classify, signer: signer, control: cfg.RateControl,
 		bucket: NewBucket(float64(cfg.SendRatePerSec)), cfg: cfg, log: log,
 	}
 }
@@ -615,13 +622,12 @@ type errorOutcome struct {
 	retry  bool
 }
 
-// handleSendError classifies a failed send the way upstream does, from both the error code and the
-// message (rules.SendErrorAction needs both).
+// handleSendError classifies a failed send through the channel's own reading (ClassifySES for SES).
 func (e *Engine) handleSendError(ctx context.Context, message model.Message, loaded store.MessageContext,
 	cause error) (outcome errorOutcome, stop bool) {
 	action := rules.ErrorFail
 	if message.CampaignID != "" {
-		action = rules.SendErrorAction(errorCode(cause), cause.Error())
+		action = e.classify(cause)
 	}
 	// Every write below runs on the detached context. We know what became of this message, so the
 	// record of it must not be lost to a shutdown that arrived while it was being written: a message
