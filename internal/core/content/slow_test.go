@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"mailcheap/internal/core/slowinput"
 )
 
 // Translated from tests/slow-inputs.test.mjs. That file sits under phase 3 in the plan as an HTTP
@@ -149,5 +151,22 @@ func assertNoUnsafeMarkup(t *testing.T, html, label string) {
 	}
 	if strings.Contains(html, "<!--") {
 		t.Errorf("%s: a comment survived cleaning", label)
+	}
+}
+
+// Markdown 的渲染有预算：过不去就退回纯文本（上游 marked 的一秒行为）。
+//
+// 这是阶段 7 才补上的一半。CommonMark 解析器在被切开的链接、嵌套引用这类形状上是平方的：实测
+// 100 KB 的 "[a](" 要 3.06 秒，同样的字节数换成散文是 1 毫秒。这里量的是「等待」——解析器自己的
+// 预算一到，调用方就拿到纯文本。
+func TestMarkdownRenderingStaysWithinItsBudget(t *testing.T) {
+	for label, markdown := range slowinput.MarkdownShapes() {
+		elapsed := timed(t, label+"/markdown", func() { _ = MarkdownToHTML(markdown, true) })
+		if elapsed > budget(MarkdownBudget+slowInputMax) {
+			t.Errorf("%s: %s, want under %s", label, elapsed, budget(MarkdownBudget+slowInputMax))
+		}
+		// 这里不断言输出里没有危险标签：渲染器按上游语义放行原始 HTML（html.WithUnsafe），
+		// 清洗是 CleanContent 的事，那一条由 TestCleaningIsLinearOnSlowInputs 负责。归档页
+		// 两者都走，所以它的 slow 测试会同时断言时间与「没有能跑的标签」。
 	}
 }
