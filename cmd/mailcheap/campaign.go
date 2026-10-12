@@ -73,6 +73,11 @@ func runCampaignCreate(cmd *cobra.Command, _ []string) error {
 	if len(body) > validate.MaxBodyBytes {
 		return fmt.Errorf("%s is %d bytes; the limit is %d", path, len(body), validate.MaxBodyBytes)
 	}
+	// The same gate the API and MCP use: a body a reader's page cannot render in a second is refused
+	// here rather than stored, because storing it commits every future request to rendering it.
+	if err := content.CheckRenderable(model.Format(format), string(body)); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
 
 	return withApp(cmd, func(ctx context.Context, a *app.App) error {
 		newsletter, err := newsletterByRef(ctx, a, ref)

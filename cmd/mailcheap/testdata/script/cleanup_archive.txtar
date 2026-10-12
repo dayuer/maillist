@@ -42,7 +42,25 @@ stdout '"moved": 0'
 mailcheap cleanup --newsletter field-notes --run
 stdout 'moved 0 to dormant'
 
+writebodies .
+
+# 写入时的闸门：解析器吃不下的正文被拒绝，且不入库。CLI 与 MCP/API 走的是同一处 core 逻辑。
+! mailcheap campaign create --newsletter field-notes --subject 'Too complex' --file pathological.md
+stderr 'too complex'
+mailcheap campaign list
+! stdout 'Too complex'
+
+# 大而普通的正文照收：闸门拒绝的是结构，不是长度。
+mailcheap campaign create --newsletter field-notes --subject 'Long but ordinary' --file long.md
+stdout '^[0-9a-f]{24}$'
+
 -- issue.md --
 # Hello
 
 Read [this](https://example.com/read).
+
+-- long.md --
+CAPTURELONG
+
+-- pathological.md --
+CAPTUREPATHOLOGICAL

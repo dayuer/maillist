@@ -62,7 +62,10 @@ func TestRenderingMarkdownIsLinearOnSlowInputs(t *testing.T) {
 	for label, shape := range slowinput.MarkdownShapes() {
 		small := campaignWith(model.FormatMarkdown, shape(smallInputSize))
 		large := campaignWith(model.FormatMarkdown, shape(largeInputSize))
+		// 两个尺寸都预热：解析结果被记住（content.Cache），所以这里量的是「每个读者付的那部分」
+		// ——清洗、免疫与渲染——而不是一次冷解析。冷解析有自己的闸门与预算测试。
 		_ = RenderIssueBody(small, newsletter)
+		_ = RenderIssueBody(large, newsletter)
 
 		var rendered Body
 		smallTime := timed(t, label+" small", func() { _ = RenderIssueBody(small, newsletter) })

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rogpeppe/go-internal/testscript"
@@ -64,6 +66,25 @@ func freeAddrForChild() string {
 func TestScripts(t *testing.T) {
 	testscript.Run(t, testscript.Params{
 		Dir: "testdata/script",
+		// A txtar file cannot build a 100 KB body out of one repeated fragment, and the point of these
+		// two is exactly that they are large: one is a shape the parser cannot finish, the other is
+		// prose of the same size.
+		Cmds: map[string]func(*testscript.TestScript, bool, []string){
+			"writebodies": func(ts *testscript.TestScript, neg bool, args []string) {
+				if neg {
+					ts.Fatalf("writebodies takes no negation")
+				}
+				dir := ts.Getenv("WORK")
+				for name, content := range map[string]string{
+					"pathological.md": strings.Repeat("[a](", 25_000),
+					"long.md":         strings.Repeat("Some ordinary words. ", 4000),
+				} {
+					if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+						ts.Fatalf("write %s: %v", name, err)
+					}
+				}
+			},
+		},
 		Setup: func(env *testscript.Env) error {
 			// A fixed secret, and the fake SES log the scripts assert on.
 			env.Setenv("SESSION_SECRET", "test-session-secret-with-at-least-32-characters")
