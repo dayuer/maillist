@@ -1,6 +1,7 @@
 package ratectl
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -146,5 +147,46 @@ func TestAnUnlimitedAccountIsNotACeiling(t *testing.T) {
 	c.SetQuota(unlimited, t0)
 	if got := c.Remaining24h(); got < 1<<30 {
 		t.Fatalf("remaining = %d, want an effectively unlimited number", got)
+	}
+}
+
+// 配额轮询在自己的 goroutine 里写，发送 worker 在自己的 goroutine 里报限流/成功并读速率——一个对象，
+// 两个方向。这条在 -race 下跑：没有锁时它是最先翻车的那条。
+func TestTheControllerIsSafeToUseFromSeveralGoroutines(t *testing.T) {
+	c := New(defaultConfig())
+	now := t0
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(3)
+		go func() { // the poller: a fresh reading every time round
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				reading := quota()
+				reading.MaxSendRate = float64(100 + j)
+				c.SetQuota(reading, now)
+			}
+		}()
+		go func() { // the workers: throttles and successes
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				c.OnThrottle(now)
+				c.OnSuccess(now)
+			}
+		}()
+		go func() { // the dispatcher, the CLI and the v1 API all read it
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				_ = c.Rate(now)
+				_ = c.Remaining24h()
+				_, _ = c.Quota()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// And it is still a controller afterwards: whatever the interleaving, the rate stayed between the
+	// floor and the target (500 × 0.9 for the highest reading used above), which is the whole contract.
+	if rate := c.Rate(now); rate < 1 || rate > 270 {
+		t.Fatalf("rate = %v after the storm", rate)
 	}
 }
