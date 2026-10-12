@@ -384,3 +384,19 @@ func (db *DB) AddWebViews(ctx context.Context, campaignID string, n int) error {
 func (db *DB) CampaignMessageKinds(ctx context.Context, campaignID string) (map[string]model.MessageKind, error) {
 	return db.ReachedContacts(ctx, campaignID)
 }
+
+// SetCampaignArchiveSlug stores the address an issue's page will live at, once it is going out.
+//
+// It is a setter of its own rather than an UpdateCampaign because the caller is the send: it has the
+// id and the slug, and rewriting every column of a campaign from a partial copy is how a concurrent
+// edit gets lost.
+func (db *DB) SetCampaignArchiveSlug(ctx context.Context, id, slug string) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, "UPDATE campaigns SET archive_slug = ?, updated_at = ? WHERE id = ?",
+			slug, formatTime(time.Now()), id)
+		if err != nil {
+			return err
+		}
+		return requireOneRow(result, "campaign", id)
+	})
+}

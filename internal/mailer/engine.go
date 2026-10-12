@@ -17,6 +17,7 @@ import (
 	"mailcheap/internal/core/providers"
 	"mailcheap/internal/core/rules"
 	"mailcheap/internal/core/sign"
+	"mailcheap/internal/core/slug"
 	"mailcheap/internal/core/validate"
 	"mailcheap/internal/jobs"
 	"mailcheap/internal/store"
@@ -606,6 +607,12 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 			return QueueResult{Reason: "No active contacts to send to"}, nil
 		}
 	} else {
+		// The archive page's address is decided as the issue goes out (upstream assignArchiveSlug), so
+		// the page exists before the first email links to it.
+		if err := e.assignArchiveSlug(ctx, &campaign, newsletter); err != nil {
+			return QueueResult{}, err
+		}
+
 		// With the list cleanup on, the audience limit counts issue recipients only and is applied
 		// while the audience is walked (core/cleanup.SplitAudience), so the query must return the
 		// whole list and let the walk stop where the limit is.
@@ -682,6 +689,33 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		return QueueResult{}, err
 	}
 	return QueueResult{Recipients: recipients, LastChance: lastChance, Queued: true}, nil
+}
+
+// assignArchiveSlug gives an issue the address its archive page will live at, unless it already has
+// one. Upstream does this when the issue goes out (lib/archive-slugs.js): the address comes from the
+// subject as it reads now, and the page therefore exists before the first email points at it.
+//
+// A newsletter with no archive is left alone — a slug it will never serve is just a field that looks
+// meaningful. The slugify fallback is "issue", so a campaign whose subject is punctuation still has a
+// page rather than an empty address.
+func (e *Engine) assignArchiveSlug(ctx context.Context, campaign *model.Campaign,
+	newsletter model.Newsletter) error {
+	if !newsletter.ArchiveEnabled || campaign.ArchiveSlug != "" {
+		return nil
+	}
+	slug := slug.Slug(campaign.Subject, 80)
+	if slug == "" {
+		slug = "issue"
+	}
+	unique, err := e.store.UniqueArchiveSlug(ctx, slug)
+	if err != nil {
+		return err
+	}
+	if err := e.store.SetCampaignArchiveSlug(ctx, campaign.ID, unique); err != nil {
+		return err
+	}
+	campaign.ArchiveSlug = unique
+	return nil
 }
 
 // stepMessages is one step's messages: the issue for most of the audience, the last-chance email for
