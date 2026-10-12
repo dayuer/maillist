@@ -10,14 +10,14 @@ import (
 )
 
 const (
-	testMessageID = "64f1a2b3c4d5e6f7a8b9c0d1"
-	sesMessageID  = "0100019000000abc-11112222-3333-4444-5555-666677778888-000000"
+	testMessageID     = "64f1a2b3c4d5e6f7a8b9c0d1"
+	providerMessageID = "0100019000000abc-11112222-3333-4444-5555-666677778888-000000"
 )
 
 // mailJSON is the "mail" fixture of tests/ses-events.test.mjs.
 const mailJSON = `{
 	"timestamp": "2026-10-04T10:00:00.000Z",
-	"messageId": "` + sesMessageID + `",
+	"messageId": "` + providerMessageID + `",
 	"destination": ["Reader@Example.com"],
 	"headers": [{"name": "List-Unsubscribe", "value": "<https://mail.example.com/api/unsubscribe>"}],
 	"tags": {"message_id": ["` + testMessageID + `"], "kind": ["campaign"], "ses:configuration-set": ["nibwire"]}
@@ -115,8 +115,8 @@ func TestDeliveriesSetDeliveredAtOnce(t *testing.T) {
 	if plan.Type != EventDelivery {
 		t.Errorf("type = %s", plan.Type)
 	}
-	if plan.SESMessageID != sesMessageID {
-		t.Errorf("sesMessageId = %q", plan.SESMessageID)
+	if plan.ProviderMessageID != providerMessageID {
+		t.Errorf("sesMessageId = %q", plan.ProviderMessageID)
 	}
 	if plan.MessageID != testMessageID {
 		t.Errorf("messageId = %q", plan.MessageID)
@@ -367,7 +367,7 @@ func TestIdentityNotificationsMapLikeEventPublishing(t *testing.T) {
 // tests/ses-events.test.mjs "message ids from tags must be own, valid ObjectId strings".
 func TestMessageIDsFromTagsMustBeValidIDs(t *testing.T) {
 	withTags := func(tags string) string {
-		return `{"timestamp": "2026-10-04T10:00:00.000Z", "messageId": "` + sesMessageID + `",
+		return `{"timestamp": "2026-10-04T10:00:00.000Z", "messageId": "` + providerMessageID + `",
 			"destination": ["Reader@Example.com"], "tags": ` + tags + `}`
 	}
 	for tags, want := range map[string]string{
@@ -393,7 +393,7 @@ func TestMessageIDsFromTagsMustBeValidIDs(t *testing.T) {
 func TestMissingOrInvalidTimestampsFallBackToNow(t *testing.T) {
 	now := time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC)
 	raw := sesEvent(t, "Open", `{"timestamp": "nope"}`, `{"timestamp": "garbage",
-		"messageId": "`+sesMessageID+`", "destination": ["Reader@Example.com"]}`)
+		"messageId": "`+providerMessageID+`", "destination": ["Reader@Example.com"]}`)
 	plan, ok := EventPlan(raw, now)
 	if !ok {
 		t.Fatal("must still map")
@@ -406,8 +406,8 @@ func TestMissingOrInvalidTimestampsFallBackToNow(t *testing.T) {
 	if !ok {
 		t.Fatal("must still map")
 	}
-	if withoutMail.SESMessageID != "" || withoutMail.Email != "" {
-		t.Errorf("sesMessageId = %q, email = %q", withoutMail.SESMessageID, withoutMail.Email)
+	if withoutMail.ProviderMessageID != "" || withoutMail.Email != "" {
+		t.Errorf("sesMessageId = %q, email = %q", withoutMail.ProviderMessageID, withoutMail.Email)
 	}
 }
 
@@ -456,13 +456,13 @@ func TestTrackingPlanCountsClicksAsOpens(t *testing.T) {
 // The MessageTags upstream writes (lib/sending.js getMessageTags) let an event name its own kind.
 func TestKindComesFromTheKindTag(t *testing.T) {
 	raw := sesEvent(t, "Open", `{}`, `{"timestamp": "2026-10-04T10:00:00.000Z",
-		"messageId": "`+sesMessageID+`", "destination": [],
+		"messageId": "`+providerMessageID+`", "destination": [],
 		"tags": {"message_id": ["`+testMessageID+`"], "kind": ["last-chance"]}}`)
 	if got := planOf(t, raw).Kind; got != model.KindLastChance {
 		t.Errorf("kind = %q", got)
 	}
 	unknown := sesEvent(t, "Open", `{}`, `{"timestamp": "2026-10-04T10:00:00.000Z",
-		"messageId": "`+sesMessageID+`", "destination": [],
+		"messageId": "`+providerMessageID+`", "destination": [],
 		"tags": {"kind": ["unheard-of"]}}`)
 	if got := planOf(t, unknown).Kind; got != "" {
 		t.Errorf("kind = %q", got)

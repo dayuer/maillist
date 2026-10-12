@@ -31,8 +31,22 @@ type DB struct {
 	closeOnce func()
 }
 
-// Open opens (creating if needed) the database at path, applies the pragmas, and migrates it.
+// Open opens (creating if needed) and migrates the database at path.
 func Open(ctx context.Context, path string) (*DB, error) {
+	db, err := openRaw(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.Migrate(ctx); err != nil {
+		db.closeOnce()
+		return nil, err
+	}
+	return db, nil
+}
+
+// openRaw opens the database and starts its writer without migrating it. Open is the only caller
+// outside tests; a test uses it to build a database as an older release left it.
+func openRaw(ctx context.Context, path string) (*DB, error) {
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)" +
 		"&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)"
 	handle, err := sql.Open("sqlite", dsn)
@@ -56,10 +70,6 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	// time, and the phase 4 `db migrate` command needs the same path while a server is up.
 	// It outlives every request, so it deliberately runs on a background context.
 	go db.writer() //nolint:gosec // G118: the writer lives as long as the database, not as long as a request
-	if err := db.Migrate(ctx); err != nil {
-		db.closeOnce()
-		return nil, err
-	}
 	return db, nil
 }
 

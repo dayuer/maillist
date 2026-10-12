@@ -151,9 +151,9 @@ type QueueResult struct {
 
 // TestResult is one test email.
 type TestResult struct {
-	MessageID    string
-	SESMessageID string
-	SentAt       time.Time
+	MessageID         string
+	ProviderMessageID string
+	SentAt            time.Time
 }
 
 // Charge says whose daily budget a step spends (design §11, layer 2). The zero value is the system
@@ -686,8 +686,8 @@ func (e *Engine) handleSendError(ctx context.Context, message model.Message, loa
 
 // delivery is what a successful send produced.
 type delivery struct {
-	sesMessageID string
-	sentAt       time.Time
+	providerMessageID string
+	sentAt            time.Time
 }
 
 // deliver renders and sends one message. content overrides the campaign body for test sends.
@@ -751,11 +751,11 @@ func (e *Engine) deliver(ctx context.Context, message model.Message, loaded stor
 	// RecoverClaimed turns that into unknown, which is "we do not know" and never "send it again".
 	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
 	defer cancel()
-	sesMessageID, err := e.sender.Send(sendCtx, email, tags)
+	providerMessageID, err := e.sender.Send(sendCtx, email, tags)
 	if err != nil {
 		return delivery{}, err
 	}
-	return delivery{sesMessageID: sesMessageID, sentAt: now}, nil
+	return delivery{providerMessageID: providerMessageID, sentAt: now}, nil
 }
 
 // contentFor picks the body of a message: the campaign, or the newsletter's welcome or confirmation
@@ -801,7 +801,7 @@ func (e *Engine) contentFor(message model.Message, loaded store.MessageContext,
 func (e *Engine) recordSent(ctx context.Context, message model.Message, loaded store.MessageContext,
 	sent delivery) error {
 	return e.writeBack(ctx, func(writeCtx context.Context) error {
-		if err := e.store.MarkMessageSent(writeCtx, message.ID, sent.sesMessageID, sent.sentAt); err != nil {
+		if err := e.store.MarkMessageSent(writeCtx, message.ID, sent.providerMessageID, sent.sentAt); err != nil {
 			return err
 		}
 		if loaded.Campaign != nil {
@@ -1323,13 +1323,13 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 		}
 		return TestResult{}, err
 	}
-	if err := e.store.MarkMessageSent(ctx, message.ID, sent.sesMessageID, sent.sentAt); err != nil {
+	if err := e.store.MarkMessageSent(ctx, message.ID, sent.providerMessageID, sent.sentAt); err != nil {
 		return TestResult{}, err
 	}
 	if err := e.store.SetCampaignTestSentAt(ctx, campaignID, sent.sentAt); err != nil {
 		return TestResult{}, err
 	}
-	return TestResult{MessageID: message.ID, SESMessageID: sent.sesMessageID, SentAt: sent.sentAt}, nil
+	return TestResult{MessageID: message.ID, ProviderMessageID: sent.providerMessageID, SentAt: sent.sentAt}, nil
 }
 
 // sendTimeout bounds one call to SES. The request runs detached from the batch's context (see

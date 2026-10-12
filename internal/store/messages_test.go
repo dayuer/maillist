@@ -161,7 +161,7 @@ func TestMessageLifecycleWritesBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != model.MessageSent || got.SESMessageID != "0100abc" ||
+	if got.Status != model.MessageSent || got.ProviderMessageID != "0100abc" ||
 		got.SentAt == nil || !got.SentAt.Equal(sentAt) {
 		t.Fatalf("sent message = %+v", got)
 	}

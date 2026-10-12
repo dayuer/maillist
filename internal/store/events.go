@@ -13,20 +13,20 @@ import (
 // produces a delivery, and storing those would fill the database within months (upstream
 // RECORDED_EVENT_TYPES).
 type Event struct {
-	ID           string
-	Type         string
-	SESMessageID string
-	MessageID    string
-	CampaignID   string
-	Email        string
-	OccurredAt   time.Time
-	CreatedAt    time.Time
-	Data         json.RawMessage
+	ID                string
+	Type              string
+	ProviderMessageID string
+	MessageID         string
+	CampaignID        string
+	Email             string
+	OccurredAt        time.Time
+	CreatedAt         time.Time
+	Data              json.RawMessage
 }
 
 // EventsFor lists a campaign's events, oldest first.
 func (db *DB) EventsFor(ctx context.Context, campaignID string) ([]Event, error) {
-	rows, err := db.sql.QueryContext(ctx, `SELECT id, type, ses_message_id, message_id, campaign_id,
+	rows, err := db.sql.QueryContext(ctx, `SELECT id, type, provider_message_id, message_id, campaign_id,
             email, occurred_at, data, created_at
         FROM events WHERE campaign_id = ? ORDER BY occurred_at, id`, campaignID)
 	if err != nil {
@@ -41,7 +41,7 @@ func (db *DB) EventsFor(ctx context.Context, campaignID string) ([]Event, error)
 			createdAt  string
 			data       string
 		)
-		if err := rows.Scan(&event.ID, &event.Type, &event.SESMessageID, &event.MessageID,
+		if err := rows.Scan(&event.ID, &event.Type, &event.ProviderMessageID, &event.MessageID,
 			&event.CampaignID, &event.Email, &occurredAt, &data, &createdAt); err != nil {
 			return nil, err
 		}
@@ -67,9 +67,9 @@ func (db *DB) InsertEvent(ctx context.Context, e Event) error {
 	}
 	return db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO events
-            (id, type, ses_message_id, message_id, campaign_id, email, occurred_at, data, created_at)
+            (id, type, provider_message_id, message_id, campaign_id, email, occurred_at, data, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			e.ID, e.Type, e.SESMessageID, e.MessageID, e.CampaignID, e.Email,
+			e.ID, e.Type, e.ProviderMessageID, e.MessageID, e.CampaignID, e.Email,
 			formatTime(e.OccurredAt), string(e.Data), formatTime(e.CreatedAt))
 		return err
 	})

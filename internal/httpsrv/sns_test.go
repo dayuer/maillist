@@ -91,12 +91,12 @@ func (s *testServer) postWebhook(t *testing.T, body []byte) *http.Response {
 }
 
 // sesEvent builds the SES event JSON an SNS notification carries.
-func sesNotification(t *testing.T, sesMessageID, eventType string, detail map[string]any) []byte {
+func sesNotification(t *testing.T, providerMessageID, eventType string, detail map[string]any) []byte {
 	t.Helper()
 	event := map[string]any{
 		"eventType": eventType,
 		"mail": map[string]any{
-			"timestamp": "2026-10-12T12:00:00.000Z", "messageId": sesMessageID,
+			"timestamp": "2026-10-12T12:00:00.000Z", "messageId": providerMessageID,
 			"destination": []string{"reader@example.com"},
 			"tags":        map[string]any{"message_id": []string{}},
 		},
@@ -126,7 +126,7 @@ func TestWebhookRejectsUnknownTopicAndBadSignature(t *testing.T) {
 		t.Errorf("unknown topic = %d, want 403", got)
 	}
 
-	tampered := sesNotification(t, message.SESMessageID, "Bounce", map[string]any{
+	tampered := sesNotification(t, message.ProviderMessageID, "Bounce", map[string]any{
 		"bounceType": "Permanent", "bounceSubType": "General",
 	})
 	tampered = []byte(strings.Replace(string(tampered), "Permanent", "Transient", 1))
@@ -146,7 +146,7 @@ func TestWebhookAppliesAHardBounce(t *testing.T) {
 	server := newTestServer(t)
 	message := server.seedMessage(t)
 
-	body := sesNotification(t, message.SESMessageID, "Bounce", map[string]any{
+	body := sesNotification(t, message.ProviderMessageID, "Bounce", map[string]any{
 		"bounceType": "Permanent", "bounceSubType": "General",
 		"bouncedRecipients": []map[string]string{{"emailAddress": message.Email, "diagnosticCode": "smtp; 550 5.1.1"}},
 		"timestamp":         "2026-10-12T12:05:00.000Z",
@@ -198,13 +198,13 @@ func TestWebhookComplaintOutranksAnEarlierBounce(t *testing.T) {
 	server := newTestServer(t)
 	message := server.seedMessage(t)
 
-	bounce := sesNotification(t, message.SESMessageID, "Bounce", map[string]any{
+	bounce := sesNotification(t, message.ProviderMessageID, "Bounce", map[string]any{
 		"bounceType": "Permanent", "bounceSubType": "General",
 		"bouncedRecipients": []map[string]string{{"emailAddress": message.Email}},
 	})
 	_ = server.postWebhook(t, bounce).Body.Close()
 
-	complaint := sesNotification(t, message.SESMessageID, "Complaint", map[string]any{
+	complaint := sesNotification(t, message.ProviderMessageID, "Complaint", map[string]any{
 		"complainedRecipients":  []map[string]string{{"emailAddress": message.Email}},
 		"complaintFeedbackType": "abuse",
 	})

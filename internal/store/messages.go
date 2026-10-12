@@ -18,7 +18,7 @@ const InsertChunkSize = 1000
 
 // messageColumns is the SELECT list every message query shares, in scanMessage order.
 const messageColumns = `id, kind, campaign_id, newsletter_id, contact_id, email, provider, status,
-    ses_message_id, error, claimed_at, sent_at, delivered_at, opened_at, clicked_at, bounced_at,
+    provider_message_id, error, claimed_at, sent_at, delivered_at, opened_at, clicked_at, bounced_at,
     complained_at, created_at`
 
 // markReservedDayTx records, in the same transaction as the reservation, which day a campaign's
@@ -103,7 +103,7 @@ func insertMessagesTx(ctx context.Context, tx *sql.Tx, chunk []model.Message) (i
 		builder.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 		args = append(args,
 			m.ID, string(m.Kind), m.CampaignID, m.NewsletterID, m.ContactID, m.Email,
-			m.Provider, string(m.Status), m.SESMessageID, m.Error,
+			m.Provider, string(m.Status), m.ProviderMessageID, m.Error,
 			formatTimePtr(m.ClaimedAt), formatTimePtr(m.SentAt), formatTimePtr(m.DeliveredAt),
 			formatTimePtr(m.OpenedAt), formatTimePtr(m.ClickedAt), formatTimePtr(m.BouncedAt),
 			formatTimePtr(m.ComplainedAt), formatTime(m.CreatedAt))
@@ -288,7 +288,7 @@ func scanMessage(row interface{ Scan(...any) error }) (model.Message, error) {
 		createdAt  string
 	)
 	err := row.Scan(&m.ID, &kind, &m.CampaignID, &m.NewsletterID, &m.ContactID, &m.Email, &m.Provider,
-		&status, &m.SESMessageID, &m.Error, &claimedAt, &sentAt, &delivered, &openedAt, &clickedAt,
+		&status, &m.ProviderMessageID, &m.Error, &claimedAt, &sentAt, &delivered, &openedAt, &clickedAt,
 		&bouncedAt, &complained, &createdAt)
 	if err != nil {
 		return model.Message{}, err
@@ -326,11 +326,11 @@ func (db *DB) Message(ctx context.Context, id string) (model.Message, error) {
 }
 
 // MarkMessageSent writes back a message SES accepted.
-func (db *DB) MarkMessageSent(ctx context.Context, id, sesMessageID string, sentAt time.Time) error {
+func (db *DB) MarkMessageSent(ctx context.Context, id, providerMessageID string, sentAt time.Time) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx,
-			"UPDATE messages SET status = ?, ses_message_id = ?, sent_at = ?, error = '' WHERE id = ?",
-			string(model.MessageSent), sesMessageID, formatTime(sentAt), id)
+			"UPDATE messages SET status = ?, provider_message_id = ?, sent_at = ?, error = '' WHERE id = ?",
+			string(model.MessageSent), providerMessageID, formatTime(sentAt), id)
 		if err != nil {
 			return err
 		}
@@ -428,7 +428,7 @@ func (db *DB) InsertSignupMessage(ctx context.Context, message model.Message, ne
 		inserted = false
 		args := []any{
 			message.ID, string(message.Kind), message.CampaignID, message.NewsletterID, message.ContactID,
-			message.Email, message.Provider, string(message.Status), message.SESMessageID, message.Error,
+			message.Email, message.Provider, string(message.Status), message.ProviderMessageID, message.Error,
 			formatTimePtr(message.ClaimedAt), formatTimePtr(message.SentAt), formatTimePtr(message.DeliveredAt),
 			formatTimePtr(message.OpenedAt), formatTimePtr(message.ClickedAt), formatTimePtr(message.BouncedAt),
 			formatTimePtr(message.ComplainedAt), formatTime(message.CreatedAt),
@@ -599,23 +599,23 @@ func (db *DB) SetMessageError(ctx context.Context, id, message string) error {
 	})
 }
 
-// MessageBySESID loads the message SES's own id names, which is how most events arrive.
-func (db *DB) MessageBySESID(ctx context.Context, sesMessageID string) (model.Message, error) {
+// MessageByProviderID loads the message a channel's own id names, which is how most events arrive.
+func (db *DB) MessageByProviderID(ctx context.Context, providerMessageID string) (model.Message, error) {
 	message, err := scanMessage(db.sql.QueryRowContext(ctx,
-		"SELECT "+messageColumns+" FROM messages WHERE ses_message_id = ?", sesMessageID))
+		"SELECT "+messageColumns+" FROM messages WHERE provider_message_id = ?", providerMessageID))
 	if errors.Is(err, sql.ErrNoRows) {
-		return model.Message{}, fmt.Errorf("message with ses id %s: %w", sesMessageID, ErrNotFound)
+		return model.Message{}, fmt.Errorf("message with ses id %s: %w", providerMessageID, ErrNotFound)
 	}
 	return message, err
 }
 
-// AdoptSESMessageID writes SES's id onto a message that got an event before the send was written
-// back, so later events find it by id.
-func (db *DB) AdoptSESMessageID(ctx context.Context, id, sesMessageID string) error {
+// AdoptProviderMessageID writes the channel's id onto a message that got an event before the send
+// was written back, so later events find it by id.
+func (db *DB) AdoptProviderMessageID(ctx context.Context, id, providerMessageID string) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"UPDATE messages SET ses_message_id = ? WHERE id = ? AND ses_message_id = ''",
-			sesMessageID, id)
+			"UPDATE messages SET provider_message_id = ? WHERE id = ? AND provider_message_id = ''",
+			providerMessageID, id)
 		return err
 	})
 }

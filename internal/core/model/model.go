@@ -183,24 +183,24 @@ type Contact struct {
 }
 
 type Message struct {
-	ID           string
-	Kind         MessageKind
-	CampaignID   string // "" for welcome/confirmation
-	NewsletterID string
-	ContactID    string
-	Email        string
-	Provider     string
-	Status       MessageStatus
-	SESMessageID string
-	Error        string
-	ClaimedAt    *time.Time
-	SentAt       *time.Time
-	DeliveredAt  *time.Time
-	OpenedAt     *time.Time
-	ClickedAt    *time.Time
-	BouncedAt    *time.Time
-	ComplainedAt *time.Time
-	CreatedAt    time.Time
+	ID                string
+	Kind              MessageKind
+	CampaignID        string // "" for welcome/confirmation
+	NewsletterID      string
+	ContactID         string
+	Email             string
+	Provider          string
+	Status            MessageStatus
+	ProviderMessageID string
+	Error             string
+	ClaimedAt         *time.Time
+	SentAt            *time.Time
+	DeliveredAt       *time.Time
+	OpenedAt          *time.Time
+	ClickedAt         *time.Time
+	BouncedAt         *time.Time
+	ComplainedAt      *time.Time
+	CreatedAt         time.Time
 }
 
 // Limits are the sending thresholds. SES reviews an account at 5% bounces or 0.1% complaints; pause
