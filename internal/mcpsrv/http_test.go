@@ -2,6 +2,7 @@ package mcpsrv
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/creds"
 	"mailcheap/internal/store"
+	"mailcheap/internal/uploads"
 )
 
 // postMCP sends one initialize request, which is the smallest thing that gets past the transport's
@@ -84,6 +86,57 @@ func TestAValidTokenReachesTheTransport(t *testing.T) {
 	}
 	if recorder.Header().Get("Mcp-Session-Id") == "" {
 		t.Errorf("no session id in %v", recorder.Header())
+	}
+}
+
+// 端点的请求体上限是 10 MiB，且必须容得下工具自己承诺的额度：upload_image 收一张 4 MiB 的图片
+// （base64 之后约 5.6 MiB，加上 JSON 信封），而 SDK 传输层的默认上限是 4 MiB——不抬它，一个走
+// HTTP 的 agent 连自己权限内的图片都传不上来。
+func TestTheEndpointAllowsTheLargestImageAndRefusesMoreThanTenMiB(t *testing.T) {
+	f := newFixture(t)
+	server := httptest.NewServer(New(f.deps).HTTPHandler())
+	defer server.Close()
+
+	// 一张顶满 uploads.MaxBytes 的 PNG，走真 HTTP（进程内 transport 不过这条限制）。
+	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, uploads.MaxBytes-8)...)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   server.URL,
+		HTTPClient: &http.Client{Transport: bearerRoundTripper{token: f.token}},
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-agent", Version: "1"}, nil)
+	session, err := client.Connect(context.Background(), transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "upload_image",
+		Arguments: map[string]any{
+			"filename": "big.png",
+			"data":     "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
+		},
+	})
+	if err != nil {
+		t.Fatalf("uploading the largest allowed image over HTTP: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("upload_image failed: %s", textOf(result))
+	}
+
+	// 过了 10 MiB 还是 413：端点是公网的，不该替一个匿名连接把内存押在解码器上。SDK 在读的时候
+	// 拦（Content-Length、chunked 与 HTTP/2 一视同仁），这里给的是带 Content-Length 的过限请求。
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18",` +
+		`"capabilities":{},"clientInfo":{"name":"probe","version":"1"},"pad":"` +
+		strings.Repeat("a", 10<<20) + `"}}`
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	request.Header.Set("Authorization", "Bearer "+f.token)
+	recorder := httptest.NewRecorder()
+	New(f.deps).HTTPHandler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("an oversized body answered %d, want 413: %s", recorder.Code, recorder.Body.String())
 	}
 }
 

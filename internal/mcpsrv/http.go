@@ -24,6 +24,13 @@ const sessionTimeout = 10 * time.Minute
 // The credential is checked on **every** request, not once per session. A streamable session spans
 // many requests, and the token is looked up in the database for each of them (D8) — which is what
 // makes revoking a row stop the calls that follow, in a session that is already open.
+// maxRequestBytes is the endpoint's body limit. The transport's own default is 4 MiB, which is less
+// than upload_image's own allowance: a 4 MiB picture is ~5.6 MiB of base64 before the JSON envelope,
+// so an agent working over HTTP could not upload what the tool promises. 10 MiB fits that with room
+// for the envelope, and a body past it is refused with 413 — by the transport, during the read, so
+// Content-Length, chunked and HTTP/2 are all capped the same way.
+const maxRequestBytes = 10 << 20
+
 func (s *Server) HTTPHandler() http.Handler {
 	inner := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		hash, _ := r.Context().Value(tokenHashKey{}).(string)
@@ -33,7 +40,9 @@ func (s *Server) HTTPHandler() http.Handler {
 			return nil
 		}
 		return s.For(hash)
-	}, &mcp.StreamableHTTPOptions{Logger: s.deps.Log, SessionTimeout: sessionTimeout})
+	}, &mcp.StreamableHTTPOptions{
+		Logger: s.deps.Log, SessionTimeout: sessionTimeout, MaxRequestBodyBytes: maxRequestBytes,
+	})
 	return s.authenticate(inner)
 }
 
