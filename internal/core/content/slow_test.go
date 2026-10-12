@@ -160,7 +160,8 @@ func assertNoUnsafeMarkup(t *testing.T, html, label string) {
 // 100 KB 的 "[a](" 要 3.06 秒，同样的字节数换成散文是 1 毫秒。这里量的是「等待」——解析器自己的
 // 预算一到，调用方就拿到纯文本。
 func TestMarkdownRenderingStaysWithinItsBudget(t *testing.T) {
-	for label, markdown := range slowinput.MarkdownShapes() {
+	for label, shape := range slowinput.MarkdownShapes() {
+		markdown := shape(slowinput.Spec)
 		elapsed := timed(t, label+"/markdown", func() { _ = MarkdownToHTML(markdown, true) })
 		if elapsed > budget(MarkdownBudget+slowInputMax) {
 			t.Errorf("%s: %s, want under %s", label, elapsed, budget(MarkdownBudget+slowInputMax))

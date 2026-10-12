@@ -5,31 +5,28 @@ import (
 	"testing"
 	"time"
 
+	"mailcheap/internal/core/content"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/slowinput"
 )
 
-// tests/slow-inputs.test.mjs 的归档那一半：500 KB 的恶意正文必须在常数时间内渲染完，而且渲染出来的
+// tests/slow-inputs.test.mjs 的归档那一半：500 KB 的恶意正文必须在线性时间内渲染完，而且渲染出来的
 // 东西里没有能跑的标签。
 //
-// 上游给的是 200 ms；带 -race 的构建为同样的工作付几倍的钱，所以预算在那里放宽，实测值两边都写进
-// 日志（阶段 4 定下的做法）。
-
-// slowInputMax is the budget for one shape in a normal build, and markdownInputMax is upstream's
-// second number (MAX_MARKDOWN_MS): a Markdown shape may spend the parser's whole budget before the
-// fallback shows it as text, so its own limit has to be above that.
+// 规格是「与输入大小成正比」，所以量的也是这个：四倍的输入不能超过八倍的时间。线性的约 4×，平方的
+// 约 16×，8× 把两者分开，且不关心机器快不快、跑不跑 -race（阶段 4 在 htmlToText 上定下的做法——
+// 绝对墙钟预算在共享 runner 上会偶发失败）。
+//
+// Markdown 那几种形状另有一条预算断言：解析器的预算是 1 秒，超了就退回纯文本，所以它们的耗时是
+// 常数而不是线性——那条断言测的是「有没有真的退回」。
 const (
-	slowInputMax     = 200 * time.Millisecond
-	markdownInputMax = 2000 * time.Millisecond
+	smallInputSize = slowinput.Small
+	largeInputSize = slowinput.Spec
+	// ratioLimit sits between linear (4x) and quadratic (16x).
+	ratioLimit = 8.0
+	// tooQuickToJudge is when the smaller input is too fast for a ratio to mean anything.
+	tooQuickToJudge = 200 * time.Microsecond
 )
-
-// budget widens the limit for a race-instrumented build.
-func budget(limit time.Duration) time.Duration {
-	if raceEnabled {
-		return limit * 10
-	}
-	return limit
-}
 
 func timed(t *testing.T, label string, run func()) time.Duration {
 	t.Helper()
@@ -40,33 +37,48 @@ func timed(t *testing.T, label string, run func()) time.Duration {
 	return elapsed
 }
 
-// 归档页的三条路（Markdown、HTML 的 frame、作者与 SEO 的文本处理）都必须在常数时间内走完。
-func TestTheArchiveRendersSlowInputsInLinearTime(t *testing.T) {
+// 恶意 HTML：frame 一路（渲染成邮件、保住设计、放进 iframe）在四倍输入下不能超过八倍耗时。
+func TestFramingIsLinearOnSlowInputs(t *testing.T) {
 	newsletter := model.Newsletter{Slug: "field-notes", Name: "Field notes", FromName: "Jane Doe", ArchiveEnabled: true}
+	for label, shape := range slowinput.Shapes() {
+		small := campaignWith(model.FormatHTML, shape(smallInputSize))
+		large := campaignWith(model.FormatHTML, shape(largeInputSize))
+		_ = RenderIssueBody(small, newsletter) // warm the renderers
 
-	// 预热：第一次调用会付一次解析器的初始化。
-	_ = RenderIssueBody(campaignWith(model.FormatMarkdown, slowinput.TagSoup(9)[:20_000]), newsletter)
-
-	for label, input := range slowinput.Shapes() {
-		body := RenderIssueBody(campaignWith(model.FormatHTML, input), newsletter)
-		if body.Kind != KindFrame {
-			t.Errorf("%s: an HTML issue should be framed", label)
+		smallTime := timed(t, label+" small", func() { _ = RenderIssueBody(small, newsletter) })
+		largeTime := timed(t, label+" large", func() { _ = RenderIssueBody(large, newsletter) })
+		if smallTime < tooQuickToJudge {
+			continue
 		}
-		elapsed := timed(t, label+"/frame", func() {
-			_ = RenderIssueBody(campaignWith(model.FormatHTML, input), newsletter)
-		})
-		if elapsed > budget(slowInputMax) {
-			t.Errorf("%s: framing took %s, want under %s", label, elapsed, budget(slowInputMax))
+		if ratio := float64(largeTime) / float64(smallTime); ratio > ratioLimit {
+			t.Errorf("%s: %d bytes took %.1fx the time of %d bytes, want under %.0fx",
+				label, largeInputSize, ratio, smallInputSize, ratioLimit)
 		}
 	}
+}
 
-	for label, markdown := range slowinput.MarkdownShapes() {
+// 恶意 Markdown：article 一路同样线性，输出里没有能跑的标签，而且渲染器自己的预算被守住了。
+func TestRenderingMarkdownIsLinearOnSlowInputs(t *testing.T) {
+	newsletter := model.Newsletter{Slug: "field-notes", Name: "Field notes", ArchiveEnabled: true}
+	for label, shape := range slowinput.MarkdownShapes() {
+		small := campaignWith(model.FormatMarkdown, shape(smallInputSize))
+		large := campaignWith(model.FormatMarkdown, shape(largeInputSize))
+		_ = RenderIssueBody(small, newsletter)
+
 		var rendered Body
-		elapsed := timed(t, label+"/article", func() {
-			rendered = RenderIssueBody(campaignWith(model.FormatMarkdown, markdown), newsletter)
-		})
-		if elapsed > budget(markdownInputMax) {
-			t.Errorf("%s: rendering took %s, want under %s", label, elapsed, budget(markdownInputMax))
+		smallTime := timed(t, label+" small", func() { _ = RenderIssueBody(small, newsletter) })
+		largeTime := timed(t, label+" large", func() { rendered = RenderIssueBody(large, newsletter) })
+		if smallTime >= tooQuickToJudge {
+			if ratio := float64(largeTime) / float64(smallTime); ratio > ratioLimit {
+				t.Errorf("%s: %d bytes took %.1fx the time of %d bytes, want under %.0fx",
+					label, largeInputSize, ratio, smallInputSize, ratioLimit)
+			}
+		}
+		// 解析器的预算：超过它就该退回纯文本，而不是把这一次渲染拖下去。给它一点余量，因为
+		// 解析器放弃之后还要清洗与渲染剩下的部分。
+		if largeTime > content.MarkdownBudget+2*time.Second {
+			t.Errorf("%s: %s for %d bytes, want the parser's %.1fs budget and change",
+				label, largeTime, largeInputSize, content.MarkdownBudget.Seconds())
 		}
 		if rendered.Kind != KindArticle {
 			t.Errorf("%s: a Markdown issue should be an article", label)
@@ -76,17 +88,26 @@ func TestTheArchiveRendersSlowInputsInLinearTime(t *testing.T) {
 	}
 }
 
-// SEO 也只是字符串处理，同样不该被 500 KB 拖住（它给每个 issue 的标题与描述做绝对化与转义）。
-func TestTheSEOHandlesSlowInputs(t *testing.T) {
+// SEO 也只是字符串处理，同样不该被大输入拖住。
+func TestSEOIsLinearOnSlowInputs(t *testing.T) {
 	newsletter := model.Newsletter{Slug: "field-notes", Name: "Field notes", ArchiveEnabled: true}
-	for label, input := range slowinput.MarkdownShapes() {
-		campaign := campaignWith(model.FormatMarkdown, input)
-		campaign.PreviewText = input[:1000]
-		elapsed := timed(t, label+"/seo", func() {
-			_ = IssueSEO(newsletter, campaign, "https://mail.example.com", "news.example.com=field-notes")
+	for label, shape := range slowinput.MarkdownShapes() {
+		small := campaignWith(model.FormatMarkdown, shape(smallInputSize))
+		large := campaignWith(model.FormatMarkdown, shape(largeInputSize))
+		small.PreviewText, large.PreviewText = small.Body[:1000], large.Body[:1000]
+
+		smallTime := timed(t, label+" small", func() {
+			_ = IssueSEO(newsletter, small, "https://mail.example.com", "news.example.com=field-notes")
 		})
-		if elapsed > budget(slowInputMax) {
-			t.Errorf("%s: seo took %s, want under %s", label, elapsed, budget(slowInputMax))
+		largeTime := timed(t, label+" large", func() {
+			_ = IssueSEO(newsletter, large, "https://mail.example.com", "news.example.com=field-notes")
+		})
+		if smallTime < tooQuickToJudge {
+			continue
+		}
+		if ratio := float64(largeTime) / float64(smallTime); ratio > ratioLimit {
+			t.Errorf("%s: %d bytes took %.1fx the time of %d bytes, want under %.0fx",
+				label, largeInputSize, ratio, smallInputSize, ratioLimit)
 		}
 	}
 }

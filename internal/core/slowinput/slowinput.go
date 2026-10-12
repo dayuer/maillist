@@ -9,12 +9,16 @@ package slowinput
 
 import "strings"
 
-// Size is how large each shape is: upstream's 500 KB, the biggest a body may be.
-const Size = 500_000
+// The two sizes the linearity tests compare: upstream's spec size (500 KB, the biggest a body may be)
+// and a quarter of it. Four times the input must not take eight times the time.
+const (
+	Small = 125_000
+	Spec  = 4 * Small
+)
 
-// Repeat is a unit repeated to Size.
-func Repeat(unit string) string {
-	return strings.Repeat(unit, Size/len(unit))
+// Repeat is a unit repeated to fill size bytes.
+func Repeat(unit string, size int) string {
+	return strings.Repeat(unit, size/len(unit))
 }
 
 // Nested is upstream's nested: a script tag cut open depth times.
@@ -31,52 +35,61 @@ var pieces = []string{"<", ">", "</", "<!--", "-->", "<script", "</script>", "<s
 
 // TagSoup is a deterministic mix of the pieces: adversarial rather than uniform. The generator is a
 // stand-in for upstream's seeded random, because what matters is a repeatable shape.
-func TagSoup(seed int) string {
+func TagSoup(seed, size int) string {
 	state := seed
 	next := func() int {
 		state = (state*1103515245 + 12345) & 0x7fffffff
 		return state
 	}
 	var b strings.Builder
-	b.Grow(Size + 64)
-	for b.Len() < Size {
+	b.Grow(size + 64)
+	for b.Len() < size {
 		b.WriteString(pieces[next()%len(pieces)])
 	}
 	return b.String()
 }
 
-// Shapes is upstream's SHAPES: the HTML bodies.
-func Shapes() map[string]string {
-	return map[string]string{
-		"nested <scr<script>ipt>":   Nested(Size / 8),
-		"unclosed <script ":         Repeat("<script "),
-		"unclosed <style>":          Repeat("<style>"),
-		"unclosed comments":         Repeat("<!-- >"),
-		"unclosed <link ":           Repeat("<link "),
-		"unclosed <a ":              Repeat("<a "),
-		"a run of <":                Repeat("<"),
-		"unclosed <div ":            Repeat("<div "),
-		"unclosed <body ":           Repeat("<body "),
-		"unclosed <title>":          Repeat("<title>"),
-		"unclosed <head ":           Repeat("<head "),
-		"unclosed email-only parts": Repeat("<a data-email-only>"),
-		"tag soup":                  TagSoup(1),
-		"tag soup with attributes":  TagSoup(2),
-		"tag soup with box markers": TagSoup(3),
+// Shape builds one adversarial input of a given size.
+type Shape func(size int) string
+
+// Shapes is upstream's SHAPES: the HTML bodies, at whatever size is asked for.
+func Shapes() map[string]Shape {
+	repeat := func(unit string) Shape {
+		return func(size int) string { return Repeat(unit, size) }
+	}
+	return map[string]Shape{
+		"nested <scr<script>ipt>":   func(size int) string { return Nested(size / 8) },
+		"unclosed <script ":         repeat("<script "),
+		"unclosed <style>":          repeat("<style>"),
+		"unclosed comments":         repeat("<!-- >"),
+		"unclosed <link ":           repeat("<link "),
+		"unclosed <a ":              repeat("<a "),
+		"a run of <":                repeat("<"),
+		"unclosed <div ":            repeat("<div "),
+		"unclosed <body ":           repeat("<body "),
+		"unclosed <title>":          repeat("<title>"),
+		"unclosed <head ":           repeat("<head "),
+		"unclosed email-only parts": repeat("<a data-email-only>"),
+		"tag soup":                  func(size int) string { return TagSoup(1, size) },
+		"tag soup with attributes":  func(size int) string { return TagSoup(2, size) },
+		"tag soup with box markers": func(size int) string { return TagSoup(3, size) },
 	}
 }
 
 // MarkdownShapes is upstream's MARKDOWN_SHAPES: the same hostility, written as Markdown.
-func MarkdownShapes() map[string]string {
+func MarkdownShapes() map[string]Shape {
 	html := Shapes()
-	return map[string]string{
+	repeat := func(unit string) Shape {
+		return func(size int) string { return Repeat(unit, size) }
+	}
+	return map[string]Shape{
 		"nested <scr<script>ipt>": html["nested <scr<script>ipt>"],
 		"unclosed <script ":       html["unclosed <script "],
-		"a run of *a":             Repeat("*a"),
-		"a run of *a and spaces":  Repeat("*a "),
-		"unclosed boxes":          Repeat(":::box\n"),
-		"nested quotes":           Repeat("> "),
-		"a run of [a](":           Repeat("[a]("),
+		"a run of *a":             repeat("*a"),
+		"a run of *a and spaces":  repeat("*a "),
+		"unclosed boxes":          repeat(":::box\n"),
+		"nested quotes":           repeat("> "),
+		"a run of [a](":           repeat("[a]("),
 		"a run of <":              html["a run of <"],
 		"tag soup":                html["tag soup"],
 	}
