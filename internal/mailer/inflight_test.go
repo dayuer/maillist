@@ -14,10 +14,20 @@ import (
 // sends the same mail again, which is exactly what D14 ("prefer losing to duplicating") forbids. The
 // invariant is that every message ends up sent or unknown — never pending, with SES having seen it.
 //
-// The fake is in its WithContextCancellation mode, so it stands in for a real client: the request is
-// recorded as accepted and only then is the context's error reported.
+// What the test pins is that agreement, not how many requests were in the air when the shutdown
+// landed. That number is a race: the dispatcher and the cancellation are two goroutines, and on a
+// loaded machine a third — even a fourth — hand-out wins it (CI saw three, where a laptop sees two).
+// Both outcomes are correct, and the assertions below hold either way; asserting the number was a
+// flake, not a finding (phase-9 follow-up, issue #67).
+//
+// The fake is in its WithContextCancellation mode, so a request that arrives to a cancelled context
+// is recorded and *then* reported as unanswered — the case being guarded. Under the detached send
+// context that never fires today, which is the fix itself: if a send were run on the batch's context,
+// this fake would report the cancellation for mail SES already had, and the assertions below would
+// fail with exactly the arithmetic they exist to catch.
 func TestAnInFlightSendIsNeverReleasedToPending(t *testing.T) {
-	f := newFixtureWith(t, 4, WithContextCancellation())
+	const messages = 4
+	f := newFixtureWith(t, messages, WithContextCancellation())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
@@ -31,6 +41,8 @@ func TestAnInFlightSendIsNeverReleasedToPending(t *testing.T) {
 			cancel()
 		}
 	}
+	// The cancellation is issued from inside the second attempt, which is recorded before it is
+	// answered, and the first attempt is recorded by then: whatever else happens, SES saw two.
 	if _, err := f.engine.SendBatch(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -38,12 +50,12 @@ func TestAnInFlightSendIsNeverReleasedToPending(t *testing.T) {
 	// From here the assertions read with a live context: the batch's is cancelled, by design.
 	check := context.Background()
 
-	// What SES accepted and what the database says must agree: the in-flight message is one of the
-	// two the fake recorded, so it has to be sent here as well.
 	accepted := f.fake.SentCount()
-	if accepted != 2 {
-		t.Fatalf("the fake accepted %d sends, want 2 (the in-flight one included)", accepted)
+	if accepted < 2 || accepted > messages {
+		t.Fatalf("the fake accepted %d sends, want between 2 and %d", accepted, messages)
 	}
+	// What SES accepted and what the database says must agree: every message the fake recorded is one
+	// the database has to call sent, the in-flight one included.
 	var sent, pending, unknown int
 	for status, target := range map[string]*int{
 		string(model.MessageSent): &sent, "pending": &pending, "unknown": &unknown,
@@ -59,8 +71,8 @@ func TestAnInFlightSendIsNeverReleasedToPending(t *testing.T) {
 	if unknown != 0 {
 		t.Fatalf("unknown = %d, want 0: nothing here was left unresolved", unknown)
 	}
-	if pending != 4-accepted {
-		t.Fatalf("pending = %d, want %d: only the messages that were never sent", pending, 4-accepted)
+	if pending != messages-accepted {
+		t.Fatalf("pending = %d, want %d: only the messages that were never sent", pending, messages-accepted)
 	}
 	var claimed int
 	if err := f.db.Row(check, "SELECT count(*) FROM messages WHERE status = 'claimed'").Scan(&claimed); err != nil {
