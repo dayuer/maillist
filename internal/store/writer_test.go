@@ -129,7 +129,7 @@ func TestAStepKilledInTheMiddleIsWrittenAndChargedTogetherOrNotAtAll(t *testing.
 		t.Fatal(err)
 	}
 
-	child := exec.Command(os.Args[0], "-test.run=TestStoreChild")
+	child := exec.Command(os.Args[0], "-test.run=TestStoreChild") //nolint:gosec // re-running this test binary as the child writer
 	child.Env = append(os.Environ(),
 		"NIBWIRE_TEST_CHILD_DB="+path,
 		"NIBWIRE_TEST_CHILD_MODE=reserve-step",
