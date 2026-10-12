@@ -62,6 +62,13 @@ nibwire stats --newsletter field-notes --tz Not/A_Zone --json
 stdout '"label": "UTC"'
 stdout '"name": "UTC"'
 
+# --tz 是全局的（设计 §8）：写在子命令前面也要生效，而且每个子命令的 --help 都看得到它——"全局"要是只在
+# 一个命令上解析得了，它就只是 stats 的 flag 加了一句说明。
+nibwire --tz Asia/Nicosia stats --newsletter field-notes --json
+stdout '"label": "GMT\+3"'
+nibwire campaign --help
+stdout '--tz string'
+
 -- issue.md --
 # Hello
 

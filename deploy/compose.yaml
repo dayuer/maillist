@@ -26,6 +26,12 @@ services:
       # The database, its -wal and -shm, and the uploaded images. Back it up with
       # `nibwire db backup`, not with cp (design §4.3).
       - nibwire-data:/data
+    # A stop has to be graceful, and the 10 s docker allows by default is shorter than the work: a
+    # send already on the wire is finished and written back rather than abandoned, because abandoning
+    # it leaves a message SES may have accepted looking unsent (design D14). Worst case is one send's
+    # 30 s deadline plus its 10 s write-back. Kubernetes deployments want the same number:
+    # terminationGracePeriodSeconds: 60.
+    stop_grace_period: 60s
     healthcheck:
       test: ["CMD", "nibwire", "health"]
       interval: 30s

@@ -200,6 +200,11 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 			return errors.New("aborted")
 		}
 
+		// Whether a server is sending is decided here and acted on a moment later, so a serve process
+		// starting inside that gap means two senders for a moment. That is accepted rather than fixed:
+		// the claim is atomic, so nobody gets two copies, and the only cost is the rate ceiling briefly
+		// counting both. Closing the window means sending being a job and nothing else — the CLI never
+		// draining its own queue — which is a design change (audit M7, phase 9 #40).
 		serverIsSending, err := a.Store.ServeIsRunning(ctx, time.Now().UTC())
 		if err != nil {
 			return err
