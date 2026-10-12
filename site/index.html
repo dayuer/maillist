@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nibwire — Your newsletter, without the per-subscriber tax</title>
+<meta name="description" content="Nibwire sends your newsletter through Amazon SES for a $29/mo including 50,000 emails. Source available, export anytime.">
+<link rel="canonical" href="https://nibwire.com/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta property="og:title" content="Your newsletter, without the per-subscriber tax">
+<meta property="og:description" content="See how far your newsletter budget goes on Nibwire.">
+<meta property="og:url" content="https://nibwire.com/">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css?v=1791798100">
+</head>
+<body>
+
+<header class="wrap top">
+  <a class="brand" href="/" aria-label="Nibwire home">
+    <svg width="28" height="28" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="currentColor"/><path d="M8 22V10l16 12V10" fill="none" stroke="#f9f6ef" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="24" cy="10" r="2.6" fill="#2f8f5b"/></svg>
+    Nibwire
+  </a>
+  <nav aria-label="Main">
+    <a href="#compare">Compare</a>
+    <a href="#pricing">Pricing</a>
+    <a href="#faq">FAQ</a>
+    <a href="https://github.com/dayuer/nibwire">GitHub</a>
+    <a class="btn btn-sm" href="#join">Get early access</a>
+  </nav>
+</header>
+
+<main>
+
+<div class="wrap hero">
+  <div>
+    <p class="kicker rise">Renewal coming up? Run the numbers first.</p>
+    <h1 class="rise rise-2">Your newsletter, without the <em>per&#8209;subscriber tax.</em></h1>
+    <p class="lede rise rise-3">Nibwire sends your newsletter through Amazon SES from your own domain. $29 a month includes 50,000 emails — a weekly issue to 10,000 readers — and your whole list leaves with you whenever you want.</p>
+    <div class="rise rise-4">
+      <form class="signup" method="post" action="/subscribe/waitlist">
+        <label class="sr-only" for="email-top">Email address</label>
+        <input id="email-top" name="email" type="email" required autocomplete="email" placeholder="you@yournewsletter.com">
+        <input class="honeypot" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <button class="btn btn-money" type="submit">Get early access</button>
+      </form>
+      <p class="fine">Founding members lock their price for 12 months. We'll move your list for you.</p>
+    </div>
+  </div>
+
+  <form id="calc" class="calc rise rise-3" aria-labelledby="calc-title">
+    <h2 id="calc-title">What would Nibwire cost you?</h2>
+
+    <div class="calc-inputs">
+      <div>
+        <label class="mini-label" for="spend">You pay today, per month</label>
+        <div class="money-input">
+          <span aria-hidden="true">$</span>
+          <input id="spend" type="number" inputmode="decimal" min="0" max="100000" step="1" value="120">
+        </div>
+      </div>
+      <div>
+        <label class="mini-label" for="freq">You send</label>
+        <select id="freq" class="select">
+          <option value="1">Monthly</option>
+          <option value="2">Twice a month</option>
+          <option value="4.33" selected>Weekly</option>
+          <option value="8.66">Twice a week</option>
+          <option value="22">Daily</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field">
+      <div class="field-label">
+        <label for="subs">Your subscribers</label>
+        <output id="subs-out" class="num" for="subs">10,000</output>
+      </div>
+      <input id="subs" type="range" min="0" max="7" step="1" value="3">
+    </div>
+
+    <div class="quote" aria-live="polite">
+      <div class="q-row"><span>Emails per month</span><span class="num" id="need-out">43,300</span></div>
+      <div class="q-row"><span><b id="plan-name">Starter</b> plan <small id="plan-incl">includes 50,000</small></span><span class="num" id="plan-base">$29</span></div>
+      <div class="q-row"><span>Extra emails <small id="over-note">none</small></span><span class="num" id="over-cost">$0</span></div>
+    </div>
+
+    <div class="calc-foot">
+      <div class="total">
+        <span>Nibwire total</span>
+        <strong id="total-out" class="num">$29/mo</strong>
+      </div>
+      <div class="save" id="save">
+        <span id="save-label">You keep, per year</span>
+        <strong id="save-amt" class="num">$1,092</strong>
+      </div>
+    </div>
+    <p class="calc-note">Your <span id="spend-echo" class="num">$120</span> would send up to <strong id="budget-out" class="num">292,000</strong> emails on Nibwire. Extra emails cost $0.50 per 1,000; we pick the cheapest plan.</p>
+  </form>
+</div>
+
+<section class="band" aria-labelledby="hood">
+  <div class="wrap">
+    <div class="section-head">
+      <h2 id="hood">Boring infrastructure. On purpose.</h2>
+      <p>Nibwire is a small, well-tested program that does one job: get your issue into inboxes and tell you what happened.</p>
+    </div>
+    <dl class="spec">
+      <div><dt>Sent by Amazon SES, from your domain</dt><dd>The same delivery network behind a large share of the world's transactional email. DKIM, SPF and DMARC on your own domain, so the reputation you build is yours.</dd></div>
+      <div><dt>Your list is a file you can take</dt><dd>Everything lives in one SQLite database: subscribers, issues, opens, clicks, unsubscribes. Download it any day. No export request, no waiting.</dd></div>
+      <div><dt>Source available</dt><dd>Read every line that touches your subscribers. If you ever want to run it yourself, it's a single binary.</dd></div>
+      <div><dt>Works with Claude and other AI agents</dt><dd>A built-in MCP server lets your assistant draft, schedule and report on issues — with a human approval step before anything goes out.</dd></div>
+      <div><dt>Confirmed opt-in and clean lists</dt><dd>Double opt-in, one-click unsubscribe, automatic suppression of bounces and complaints. The things that keep you out of spam folders.</dd></div>
+      <div><dt>Open and click tracking</dt><dd>Per-issue and per-subscriber stats, plus a re-engagement flow that quietly retires people who stopped reading.</dd></div>
+    </dl>
+  </div>
+</section>
+
+<section id="compare" aria-labelledby="compare-title">
+  <div class="wrap">
+    <div class="section-head">
+      <h2 id="compare-title">The honest comparison</h2>
+      <p>All-in-one creator platforms do a lot. Nibwire does one thing. If you rely on the extras, stay where you are.</p>
+    </div>
+    <div style="overflow-x:auto">
+    <table class="compare">
+      <thead><tr><th scope="col"><span class="sr-only">Feature</span></th><th scope="col">Typical per-subscriber platform</th><th scope="col">Nibwire Hosted</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Weekly issue, 10,000 subscribers</th><td>Often $100+/mo on growth plans</td><td class="num win">$29/mo</td></tr>
+        <tr><th scope="row">Price grows with your list</th><td>Steps up at every tier</td><td class="win">Only with sending: $0.50 per 1,000 extra emails</td></tr>
+        <tr><th scope="row">Leaving</th><td>Usually a subscriber CSV</td><td class="win">The whole database, any time</td></tr>
+        <tr><th scope="row">Source code</th><td class="no">Usually closed</td><td class="win">Available to read and self-host</td></tr>
+        <tr><th scope="row">AI agent access (MCP)</th><td>Varies, often paid plans</td><td class="win">Every plan</td></tr>
+        <tr><th scope="row">Paid subscriptions</th><td>Usually</td><td class="no">Not yet</td></tr>
+        <tr><th scope="row">Ad network &amp; recommendations</th><td>Often</td><td class="no">No</td></tr>
+        <tr><th scope="row">Website builder, podcasts</th><td>Often</td><td class="no">No — a signup page and your emails</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<section class="band" aria-labelledby="move">
+  <div class="wrap">
+    <div class="section-head">
+      <h2 id="move">Switching takes an afternoon</h2>
+      <p>For founding members, we do it with you.</p>
+    </div>
+    <ol class="steps">
+      <li><h3>Export your list</h3><p>Download the subscriber CSV from your current platform. Unsubscribes and statuses come along.</p></li>
+      <li><h3>We import and set up your domain</h3><p>We add the DNS records with you and import your list, keeping engagement history so your best readers get mail first.</p></li>
+      <li><h3>Send your next issue</h3><p>Write it as usual, or have your AI assistant draft it. Same readers, smaller bill.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="pricing" aria-labelledby="pricing-title">
+  <div class="wrap">
+    <div class="section-head">
+      <h2 id="pricing-title">Founding prices</h2>
+      <p>You pay for the emails you send, not for how many people are on your list. Locked for 12 months for everyone who joins before launch.</p>
+    </div>
+    <div class="plans plans-4">
+      <div class="plan">
+        <p class="tag">&nbsp;</p>
+        <h3>Bring your own SES</h3>
+        <p class="price num">$9<small>/mo</small></p>
+        <p class="for">You have an AWS account. We run Nibwire; Amazon bills you for sending.</p>
+        <ul><li>Any volume</li><li>About $0.10 per 1,000 emails, paid to AWS</li><li>Full database export</li></ul>
+      </div>
+      <div class="plan feature">
+        <p class="tag">Most creators</p>
+        <h3>Starter</h3>
+        <p class="price num">$29<small>/mo</small></p>
+        <p class="for">50,000 emails a month — a weekly issue to about 11,000 readers.</p>
+        <ul><li>Sending included</li><li>Your own domain, set up with you</li><li>Then $0.50 per 1,000</li></ul>
+      </div>
+      <div class="plan">
+        <p class="tag">&nbsp;</p>
+        <h3>Growth</h3>
+        <p class="price num">$99<small>/mo</small></p>
+        <p class="for">250,000 emails a month — weekly to about 57,000 readers.</p>
+        <ul><li>Everything in Starter</li><li>Hands-on migration and warm-up</li><li>Then $0.50 per 1,000</li></ul>
+      </div>
+      <div class="plan">
+        <p class="tag">&nbsp;</p>
+        <h3>Scale</h3>
+        <p class="price num">$299<small>/mo</small></p>
+        <p class="for">1,000,000 emails a month — weekly to about 230,000 readers.</p>
+        <ul><li>Everything in Growth</li><li>Dedicated sending account</li><li>Then $0.50 per 1,000</li></ul>
+      </div>
+    </div>
+    <p class="plans-note">Prefer to run it yourself? The source is on <a href="https://github.com/dayuer/nibwire">GitHub</a>, free for your own newsletters.</p>
+  </div>
+</section>
+
+<section id="faq" class="band" aria-labelledby="faq-title">
+  <div class="wrap">
+    <div class="section-head"><h2 id="faq-title">Questions</h2></div>
+    <div class="faq">
+      <details><summary>Is Nibwire available today?</summary><p>The software runs today and the source is public. The hosted service opens to the early-access list first, in small batches, so every migration gets attention. Join and we'll email you when your spot opens.</p></details>
+      <details><summary>Will my emails land in the inbox?</summary><p>Deliverability comes from your domain's authentication and your list's health more than from the platform. Nibwire sends through Amazon SES, signs mail with your domain, and suppresses bounces and complaints automatically. When you move, we warm your domain up by sending to your most engaged readers first.</p></details>
+      <details><summary>What does "source available" mean?</summary><p>The code is public under the Business Source License 1.1. You can read it, change it, and run it for your own newsletters for free. What you can't do is resell it as a hosted service. Each release converts to the AGPLv3 after four years.</p></details>
+      <details><summary>Can I leave?</summary><p>Yes, and it's easy. Your data is one SQLite file you can download any time, and you can run that same file on your own server with the open binary.</p></details>
+      <details><summary>What happens to the email I give you here?</summary><p>We use it to tell you about early access and nothing else. It's stored on Nibwire itself — this waitlist runs on the product. Every email has a one-click unsubscribe.</p></details>
+      <details><summary>I'm on Substack, Kit or Mailchimp. Does this work for me?</summary><p>If you can export a CSV of subscribers, yes. Nibwire doesn't do paid subscriptions yet, so if most of your revenue is paid subs, wait for that.</p></details>
+    </div>
+  </div>
+</section>
+
+<section id="join" class="closing" aria-labelledby="join-title">
+  <div class="wrap">
+    <div class="closing-inner">
+      <div>
+        <h2 id="join-title">Keep the readers. Drop the markup.</h2>
+        <p>Join before your next renewal and lock the founding price for a year.</p>
+      </div>
+      <div>
+        <form class="signup" method="post" action="/subscribe/waitlist">
+          <label class="sr-only" for="email-bottom">Email address</label>
+          <input id="email-bottom" name="email" type="email" required autocomplete="email" placeholder="you@yournewsletter.com">
+          <input class="honeypot" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+          <button class="btn btn-money" type="submit">Get early access</button>
+        </form>
+        <p class="fine">No spam. One-click unsubscribe in every email.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>© 2026 Nibwire</span>
+    <nav aria-label="Footer">
+      <a href="/privacy.html">Privacy</a>
+      <a href="https://github.com/dayuer/nibwire">GitHub</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="/calc.js?v=1791798100" defer></script>
+</body>
+</html>
