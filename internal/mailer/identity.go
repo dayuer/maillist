@@ -2,12 +2,16 @@ package mailer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2/types"
+	"github.com/aws/smithy-go"
+
+	"nibwire/internal/core/rules"
 )
 
 // DNSRecord is one record SES asks the operator to publish (lib/ses.js dnsRecords).
@@ -31,7 +35,14 @@ type Identity struct {
 // IdentityReader is where the sending identities come from. Tests inject a StaticIdentity;
 // production gets SESIdentity.
 type IdentityReader interface {
+	// Identities is the account-wide list: what `nibwire domains` and the MCP tool of the same name
+	// show, with the DNS records still to publish.
 	Identities(ctx context.Context) ([]Identity, error)
+	// VerifiedDomain answers the one question the pre-send check asks: would SES accept mail from
+	// this domain? With SES_TENANT_NAME set it asks about that domain alone instead of enumerating the
+	// account, which is what lets an operator narrow a tenant's keys to its own identities (phase 9
+	// #57).
+	VerifiedDomain(ctx context.Context, domain string) (bool, error)
 }
 
 // identityCacheTTL, identityReadTimeout and identityPageSize are lib/ses.js CACHE_TTL_MS,
@@ -47,6 +58,9 @@ const (
 type SESIdentity struct {
 	client *sesv2.Client
 	region string
+	// tenantName is SES_TENANT_NAME: when it is set, the pre-send check asks about one domain rather
+	// than listing the account, because a tenant's keys are the ones that may be narrowed.
+	tenantName string
 
 	mu        sync.Mutex
 	cached    []Identity
@@ -60,10 +74,66 @@ func NewSESIdentity(ctx context.Context, options SESOptions) (*SESIdentity, erro
 	if err != nil {
 		return nil, err
 	}
-	return &SESIdentity{client: sesv2.NewFromConfig(cfg), region: options.Region}, nil
+	return &SESIdentity{
+		client: sesv2.NewFromConfig(cfg), region: options.Region, tenantName: options.TenantName,
+	}, nil
+}
+
+// VerifiedDomain answers whether SES would accept mail from this domain.
+//
+// Without a tenant it is the account-wide list, filtered: the list is cached for five minutes, so
+// this is the map lookup the dashboard did. With a tenant it is one GetEmailIdentity for the domain
+// in hand and nothing else (phase 9 #57) — enumerating the account is the thing a narrowed tenant
+// key is not allowed to do, and a check that cannot run with narrowed keys is a check nobody can
+// keep enabled.
+func (s *SESIdentity) VerifiedDomain(ctx context.Context, domain string) (bool, error) {
+	if domain == "" {
+		return false, nil
+	}
+	if s.tenantName != "" {
+		return s.tenantVerifiedDomain(ctx, domain)
+	}
+	identities, err := s.Identities(ctx)
+	if err != nil {
+		return false, err
+	}
+	return rules.DomainVerified(VerifiedDomains(identities), domain), nil
+}
+
+// tenantVerifiedDomain asks about one identity. A domain this tenant does not have is the answer
+// "not verified", which is what the check asked; anything else is a failure the operator has to see
+// rather than a domain quietly reported as unverified.
+func (s *SESIdentity) tenantVerifiedDomain(ctx context.Context, domain string) (bool, error) {
+	// A read only, like the list: a timed-out read could have been applied, and the SDK would retry it.
+	readCtx, cancel := context.WithTimeout(ctx, identityReadTimeout)
+	defer cancel()
+
+	got, err := s.client.GetEmailIdentity(readCtx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
+	if err != nil {
+		if isNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return got.VerifiedForSendingStatus, nil
+}
+
+// isNotFound is SES's NotFoundException, whether the SDK modelled it or only the code came through.
+func isNotFound(err error) bool {
+	var missing *types.NotFoundException
+	if errors.As(err, &missing) {
+		return true
+	}
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NotFoundException"
 }
 
 // Identities returns every domain identity, from cache while it is fresh.
+//
+// It walks NextToken to the end. ListEmailIdentities answers at most PageSize identities, and an
+// account that several tenants share has more than one page of them: the domain this deployment
+// sends from sitting on page two is a domain the pre-send check would otherwise call unverified and
+// refuse, with nothing in the answer to say why (phase 9 #56).
 func (s *SESIdentity) Identities(ctx context.Context) ([]Identity, error) {
 	s.mu.Lock()
 	if s.cached != nil && time.Now().Before(s.expiresAt) {
@@ -73,15 +143,42 @@ func (s *SESIdentity) Identities(ctx context.Context) ([]Identity, error) {
 	}
 	s.mu.Unlock()
 
+	// A budget per page rather than one for the whole account: how long this takes now depends on how
+	// many identities there are, and one five-second deadline over all of them would turn a large
+	// account into a read that always fails instead of one that answers slowly.
+	var out []Identity
+	var next *string
+	for {
+		page, token, err := s.identitiesPage(ctx, next)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page...)
+		if token == "" {
+			break
+		}
+		next = &token
+	}
+
+	s.mu.Lock()
+	s.cached, s.expiresAt = out, time.Now().Add(identityCacheTTL)
+	s.mu.Unlock()
+	return out, nil
+}
+
+// identitiesPage reads one page of identities and the details of each, under one read budget, and
+// returns the token of the next page ("" when this was the last).
+func (s *SESIdentity) identitiesPage(ctx context.Context, next *string) ([]Identity, string, error) {
 	// Reads only: a read that timed out could still have been applied, and the SDK would retry it.
 	readCtx, cancel := context.WithTimeout(ctx, identityReadTimeout)
 	defer cancel()
 
 	list, err := s.client.ListEmailIdentities(readCtx, &sesv2.ListEmailIdentitiesInput{
-		PageSize: pointer(int32(identityPageSize)),
+		PageSize:  pointer(int32(identityPageSize)),
+		NextToken: next,
 	})
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out := make([]Identity, 0, len(list.EmailIdentities))
 	for _, info := range list.EmailIdentities {
@@ -91,15 +188,11 @@ func (s *SESIdentity) Identities(ctx context.Context) ([]Identity, error) {
 		domain := deref(info.IdentityName)
 		got, err := s.client.GetEmailIdentity(readCtx, &sesv2.GetEmailIdentityInput{EmailIdentity: &domain})
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		out = append(out, IdentityFromSES(domain, got, s.region))
 	}
-
-	s.mu.Lock()
-	s.cached, s.expiresAt = out, time.Now().Add(identityCacheTTL)
-	s.mu.Unlock()
-	return out, nil
+	return out, deref(list.NextToken), nil
 }
 
 // Invalidate drops the cache, so `domains --fresh` asks SES again after the operator publishes DNS.
@@ -156,6 +249,15 @@ func (s StaticIdentity) Identities(context.Context) ([]Identity, error) {
 		out = append(out, Identity{Domain: domain, VerifiedForSend: true, DKIMStatus: "SUCCESS"})
 	}
 	return out, nil
+}
+
+// VerifiedDomain is the same list, asked about one domain: a stand-in has no tenant to narrow for.
+func (s StaticIdentity) VerifiedDomain(_ context.Context, domain string) (bool, error) {
+	identities, err := s.Identities(context.Background())
+	if err != nil {
+		return false, err
+	}
+	return rules.DomainVerified(VerifiedDomains(identities), domain), nil
 }
 
 // VerifiedDomains is the shorthand every caller of the pre-send check wants: just the domains.
