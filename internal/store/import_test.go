@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"mailcheap/internal/core/importer"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/importer"
+	"nibwire/internal/core/model"
 )
 
 func ptr[T any](value T) *T { return &value }

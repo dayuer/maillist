@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // The email shell is the upstream template string, split at its interpolation points. It is built

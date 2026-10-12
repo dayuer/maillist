@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/sign"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/sign"
 )
 
 const testAppURL = "https://mail.example.com"
@@ -148,20 +148,48 @@ func TestIssuesLinkToTheirArchivePage(t *testing.T) {
 		t.Errorf("a draft must link to the slug its subject gives: %s", got.HTML)
 	}
 
-	if got := IssueWebURL(testAppURL, issue, testNewsletter); got != "" {
+	if got := IssueWebURL(testAppURL, "", issue, testNewsletter); got != "" {
 		t.Errorf("archive off: %q", got)
 	}
 	unlisted := issue
 	unlisted.ArchiveListed = false
-	if got := IssueWebURL(testAppURL, unlisted, archived); got != "" {
+	if got := IssueWebURL(testAppURL, "", unlisted, archived); got != "" {
 		t.Errorf("unlisted: %q", got)
 	}
 	welcome, ok := WelcomeContent(model.Newsletter{WelcomeEnabled: true, Welcome: model.Content{Subject: "Welcome", Markdown: "Hi"}})
 	if !ok {
 		t.Fatal("welcome content expected")
 	}
-	if got := IssueWebURL(testAppURL, model.Campaign{ID: issue.ID, Subject: welcome.Subject}, archived); got != "" {
+	if got := IssueWebURL(testAppURL, "", model.Campaign{ID: issue.ID, Subject: welcome.Subject}, archived); got != "" {
 		t.Errorf("welcome email has no page: %q", got)
+	}
+}
+
+// 审计 F2：启用 ARCHIVE_HOSTS 时，Read-online 链接必须是归档域名上的 /p/{slug}。
+//
+// 修复前这里一律拼 APP_URL + "/archive/<slug>/p/<post>"，于是 newsletter 有自己的域名时，邮件上的
+// 链接指向一个在生产里不存在的地址（那条路径只属于应用域名）。
+func TestIssueWebURLUsesTheArchiveHost(t *testing.T) {
+	hosts := "news.example.com=weekly"
+	weekly := testNewsletter
+	weekly.Slug = "weekly"
+	weekly.ArchiveEnabled = true
+	issue := testCampaign
+	issue.ID = "84f1a2b3c4d5e6f7a8b9c0d3"
+	issue.ArchiveSlug = "issue-12-is-out"
+	issue.ArchiveListed = true
+
+	if got := IssueWebURL(testAppURL, hosts, issue, weekly); got != "https://news.example.com/p/issue-12-is-out" {
+		t.Errorf("with an archive host: %q", got)
+	}
+	// 没有归档域名的一期（这个 newsletter 没开归档）没有页面。
+	if got := IssueWebURL(testAppURL, hosts, issue, testNewsletter); got != "" {
+		t.Errorf("archive off: %q", got)
+	}
+	monthly := weekly
+	monthly.Slug = "monthly"
+	if got := IssueWebURL(testAppURL, hosts, issue, monthly); got != testAppURL+"/archive/monthly/p/issue-12-is-out" {
+		t.Errorf("without an archive host: %q", got)
 	}
 }
 
@@ -230,21 +258,37 @@ func TestCampaignsPauseAboveTheBounceOrComplaintLimit(t *testing.T) {
 	}
 }
 
-// tests/sending.test.mjs "SES errors map to retry later, pause the campaign, or fail one message".
+// tests/sending.test.mjs "SES errors map to retry later, pause the campaign, or fail one message",
+// with the phase 8 split of "too fast" from "out of allowance".
 func TestSESErrorsMapToRetryPauseOrFail(t *testing.T) {
 	for _, tc := range []struct {
 		code, message string
 		want          ErrorAction
 	}{
-		{"TooManyRequestsException", "TooManyRequestsException", ErrorRetry},
+		{"TooManyRequestsException", "TooManyRequestsException", ErrorThrottle},
+		{"ThrottlingException", "Maximum sending rate exceeded", ErrorThrottle},
+		{"Throttling", "Throttling", ErrorThrottle},
 		{"", "Sending is off (SENDING_ENABLED is not true)", ErrorRetry},
 		{"SendingPausedException", "SendingPausedException", ErrorPause},
+		// 租户：SendEmail 的错误表里没有租户专用的码——租户不存在就是 NotFoundException（"The resource
+		// you attempted to access doesn't exist"，HTTP 404），租户被停用就是 SendingPausedException。
+		// 两个都已经在 pause 那一类里，这一条把租户这个用法钉住。
+		{"NotFoundException", "The tenant t-123 does not exist", ErrorPause},
+		{"SendingPausedException", "Sending from tenant t-123 is disabled", ErrorPause},
 		{"AccountSuspendedException", "AccountSuspendedException", ErrorPause},
 		{"LimitExceededException", "LimitExceededException", ErrorPause},
 		{"MessageRejected", "Email address is not verified. The following identities failed", ErrorPause},
 		{"MessageRejected", "Message contains a virus", ErrorFail},
 		{"BadRequestException", "BadRequestException", ErrorFail},
 		{"", "", ErrorFail},
+		// A spent 24-hour allowance, however SES spells it: same codes, different message, and the
+		// difference between slowing down and stopping until tomorrow.
+		{"Throttling", "Daily message quota exceeded", ErrorQuota},
+		{"ThrottlingException", "You have exceeded your daily message quota", ErrorQuota},
+		{"LimitExceededException", "Sending quota exceeded", ErrorQuota},
+		{"TooManyRequestsException", "The sending quota for this account has been reached", ErrorQuota},
+		// "quota" alone says nothing about the day: a rate message stays a rate message.
+		{"Throttling", "Rate exceeded for this quota period", ErrorThrottle},
 	} {
 		if got := SendErrorAction(tc.code, tc.message); got != tc.want {
 			t.Errorf("SendErrorAction(%q, %q) = %q, want %q", tc.code, tc.message, got, tc.want)
@@ -359,22 +403,10 @@ func TestUntrackedKinds(t *testing.T) {
 }
 
 func TestFeedbackIDIdentifiesTheSender(t *testing.T) {
-	if got := FeedbackID("84f1a2b3c4d5e6f7a8b9c0d3", model.KindCampaign, "weekly"); got != "84f1a2b3c4d5e6f7a8b9c0d3:weekly:campaign:mailcheap" {
+	if got := FeedbackID("84f1a2b3c4d5e6f7a8b9c0d3", model.KindCampaign, "weekly"); got != "84f1a2b3c4d5e6f7a8b9c0d3:weekly:campaign:nibwire" {
 		t.Errorf("got %q", got)
 	}
-	if got := FeedbackID("", model.KindLastChance, "weekly"); got != "last-chance:weekly:last-chance:mailcheap" {
-		t.Errorf("got %q", got)
-	}
-}
-
-func TestSlugifyFoldsAccents(t *testing.T) {
-	if got := Slugify("Issue 12: L'équipe", 80); got != "issue-12-l-equipe" {
-		t.Errorf("got %q", got)
-	}
-	if got := Slugify(strings.Repeat("a", 100), 80); got != strings.Repeat("a", 80) {
-		t.Errorf("got %q", got)
-	}
-	if got := Slugify("Hello --- ", 80); got != "hello" {
+	if got := FeedbackID("", model.KindLastChance, "weekly"); got != "last-chance:weekly:last-chance:nibwire" {
 		t.Errorf("got %q", got)
 	}
 }

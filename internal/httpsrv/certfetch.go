@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"mailcheap/internal/core/sns"
+	"nibwire/internal/core/sns"
 )
 
 // certFetchTimeout and maxCertificateBytes bound the one outbound request the verifier makes.

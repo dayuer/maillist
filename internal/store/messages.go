@@ -8,17 +8,66 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
-// InsertChunkSize keeps a bulk insert short: one transaction per 1000 rows, never one big one
-// (design §5.2).
+// InsertChunkSize bounds one INSERT statement, not a transaction. A step's messages go in with the
+// reservation that pays for them, in one transaction, however many statements that takes: writing
+// them in separate transactions is a leak with no way to notice it (see ReserveAndInsert).
 const InsertChunkSize = 1000
 
 // messageColumns is the SELECT list every message query shares, in scanMessage order.
 const messageColumns = `id, kind, campaign_id, newsletter_id, contact_id, email, provider, status,
     ses_message_id, error, claimed_at, sent_at, delivered_at, opened_at, clicked_at, bounced_at,
     complained_at, created_at`
+
+// markReservedDayTx records, in the same transaction as the reservation, which day a campaign's
+// audience was reserved for.
+//
+// It is what lets a later resume tell "already paid for today" from "not paid for today". Without it
+// the only two options are charging twice on the same day or not charging at all on a later one.
+func markReservedDayTx(ctx context.Context, tx *sql.Tx, day string, messages []model.Message) error {
+	seen := map[string]bool{}
+	for _, message := range messages {
+		if message.CampaignID == "" || seen[message.CampaignID] {
+			continue
+		}
+		seen[message.CampaignID] = true
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE campaigns SET reserved_day = ? WHERE id = ?", day, message.CampaignID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReserveForResume charges today's ledger for the messages a campaign already has, and records that
+// today is the day it did, in one transaction.
+//
+// This is the cross-day resume. The audience was reserved on the day the campaign was queued (D15),
+// so today's ledger has never seen these messages; resuming without charging them would let the
+// day's total — the global one and the credential's — go over MAX_SENDS_PER_DAY, which is what a
+// managed deployment splits an account's quota with. Nothing is written to the messages table: they
+// exist. fits=false means today cannot take it, and the whole step is refused rather than partly
+// sent (the caller says how much of the day is left).
+func (db *DB) ReserveForResume(ctx context.Context, day, credentialID, campaignID string, n, globalMax,
+	credentialMax int) (bool, error) {
+	fits := false
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		fits = false
+		ok, err := reserveTx(ctx, tx, day, credentialID, n, globalMax, credentialMax)
+		if err != nil || !ok {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE campaigns SET reserved_day = ? WHERE id = ?", day, campaignID); err != nil {
+			return err
+		}
+		fits = true
+		return nil
+	})
+	return fits, err
+}
 
 // InsertMessages adds messages in chunks, ignoring rows that already exist (one email per contact
 // per campaign). It returns how many rows were actually inserted.
@@ -82,26 +131,40 @@ func insertMessagesTx(ctx context.Context, tx *sql.Tx, chunk []model.Message) (i
 // what makes a retry safe: a job that runs again after inserting and before moving the campaign on
 // reserves nothing the second time.
 //
-// fits=false means the budget is spent: nothing is written and nothing is reserved. The caller
-// writes the rest of messages with InsertMessages.
+// fits=false means the budget is spent: nothing is written and nothing is reserved.
+//
+// Every message it was given is written before it returns, so there is no "the rest" for a caller to
+// write: an error or a crash leaves nothing behind, rather than a step half written and half paid for.
 func (db *DB) ReserveAndInsert(ctx context.Context, day, credentialID string, n, globalMax, credentialMax int,
 	messages []model.Message) (fits bool, inserted int, err error) {
 	if n <= 0 || len(messages) == 0 {
 		return true, 0, nil
 	}
-	chunk := messages[:min(InsertChunkSize, len(messages))]
 	err = db.Write(ctx, func(tx *sql.Tx) error {
 		fits, inserted = false, 0
 		ok, err := reserveTx(ctx, tx, day, credentialID, n, globalMax, credentialMax)
 		if err != nil || !ok {
 			return err
 		}
-		count, err := insertMessagesTx(ctx, tx, chunk)
-		if err != nil {
-			return err
+		// The whole step, chunk by chunk, inside the transaction that reserved it. Writing the first
+		// chunk here and the rest afterwards is a leak nobody can notice afterwards: a process that
+		// dies between the two has charged the day for messages that do not exist, and the ledger — a
+		// count per day and pool, with nothing saying which messages it paid for — cannot be
+		// reconciled. One transaction makes "what if it dies in between" unaskable.
+		for start := 0; start < len(messages); start += InsertChunkSize {
+			chunk := messages[start:min(start+InsertChunkSize, len(messages))]
+			count, err := insertMessagesTx(ctx, tx, chunk)
+			if err != nil {
+				return err
+			}
+			inserted += count
+			if err := markReservedDayTx(ctx, tx, day, chunk); err != nil {
+				return err
+			}
 		}
-		inserted = count
-		if err := refundTx(ctx, tx, day, credentialID, n-count); err != nil {
+		// A row that already existed was not charged for: the reservation was for the whole step, and
+		// this corrects it down to what was actually new.
+		if err := refundTx(ctx, tx, day, credentialID, n-inserted); err != nil {
 			return err
 		}
 		fits = true

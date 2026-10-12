@@ -1,0 +1,68 @@
+# domains、db、health、approve 四条命令。
+#
+# domains reads the stand-in identity list: nothing in this repository talks to AWS.
+
+env NIBWIRE_FAKE_SES_DOMAINS=example.net,other.example
+nibwire init
+exists nibwire.db
+
+# --- domains ------------------------------------------------------------------------------------
+nibwire domains
+stdout 'example.net   verified'
+stdout 'DKIM SUCCESS'
+nibwire domains --json
+stdout '"Domain": "other.example"'
+stdout '"VerifiedForSend": true'
+
+# --- health -------------------------------------------------------------------------------------
+nibwire health
+stdout '^ok\n$'
+nibwire health --json
+stdout '"status": "ok"'
+
+# --- db -----------------------------------------------------------------------------------------
+nibwire db migrate
+stdout 'migration\(s\) applied'
+stdout '0001_init.sql'
+stdout '0002_serve_heartbeat.sql'
+stdout '0003_uploads.sql'
+stdout '0004_campaign_reserved_day.sql'
+
+nibwire newsletter create --name 'Field notes' --slug field-notes --from-email jane@example.net --postal-address '1 Main St, Paris'
+nibwire db backup --to snapshot.db
+stdout 'backed up to snapshot.db'
+exists snapshot.db
+
+# 改一点东西，再恢复回去。
+nibwire newsletter create --name 'Second' --slug second --from-email jane@example.net --postal-address '1 Main St, Paris'
+nibwire newsletter list
+stdout 'second'
+nibwire db restore --from snapshot.db --yes
+stdout 'restored'
+# 覆盖前的旧库落在哪儿，输出里就有（testscript 没有 glob，所以断言那一行）。
+stdout 'the previous file is at .*nibwire\.db\.bak-'
+nibwire newsletter list
+! stdout 'second'
+stdout 'field-notes'
+
+# 而 -wal/-shm 不会被留下：旧日志重放到恢复后的库上会得到混合状态。
+exists nibwire.db
+! exists nibwire.db-wal
+! exists nibwire.db-shm
+
+# 不是数据库的文件不能当备份。
+! nibwire db restore --from issue.md --yes
+stderr 'is not a database'
+
+# --- approve ------------------------------------------------------------------------------------
+# 没有在等批准的 job 时，approve 说清楚它是什么状态。
+nibwire campaign create --newsletter field-notes --subject 'Issue 12' --file issue.md
+nibwire campaign schedule --subject 'Issue 12' --at 'in 2h'
+stdout 'scheduled'
+! nibwire approve 000000000000000000000000
+stderr 'no job'
+
+-- issue.md --
+# Hello
+
+Read [this](https://example.com).

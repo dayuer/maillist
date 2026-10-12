@@ -9,12 +9,13 @@ import (
 	"net/http"
 	"time"
 
-	"mailcheap/internal/config"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/core/sns"
-	"mailcheap/internal/events"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/store"
+	"nibwire/internal/alerts"
+	"nibwire/internal/config"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/core/sns"
+	"nibwire/internal/events"
+	"nibwire/internal/mailer"
+	"nibwire/internal/store"
 )
 
 // Server holds everything the handlers need. The admin surface (/api/v1, /mcp) is later phases;
@@ -27,12 +28,19 @@ type Server struct {
 	// Mailer queues the welcome and confirmation emails a signup calls for.
 	Mailer  *mailer.Engine
 	Limiter *MemoryLimiter
+	// ArchiveViews remembers which address has already been counted for which issue today: the view
+	// counter is a one-per-key limiter, because that is the same shape (design D11).
+	ArchiveViews *MemoryLimiter
 	// Verifier checks SNS signatures. Production passes sns.NewVerifier(CertificateFetcher(nil));
 	// the tests pass one that trusts a key they generated.
 	Verifier *sns.Verifier
 	// Subscribe confirms an SNS subscription; it is a field so tests can stand in for SNS.
 	Subscribe Subscriber
-	Log       *slog.Logger
+	// Alerts tells the operator about something a person has to look at: a signup flood, an API key
+	// that is filling the list. Optional — a deployment with no alerts configured leaves it nil, and
+	// Send is a no-op rather than a nil dereference.
+	Alerts *alerts.Notifier
+	Log    *slog.Logger
 	// trustedProxies are the networks whose X-Forwarded-For is believed. Empty means "believe
 	// nobody", which is the safe default.
 	trustedProxies []*net.IPNet
@@ -57,7 +65,8 @@ func New(cfg config.Config, db *store.DB, signer *sign.Signer, handler *events.H
 	}
 	server := &Server{
 		Config: cfg, Store: db, Signer: signer, Events: handler, Mailer: engine,
-		Limiter: NewMemoryLimiter(), Verifier: verifier, Subscribe: HTTPSubscriber(nil),
+		Limiter: NewMemoryLimiter(), ArchiveViews: NewMemoryLimiter(),
+		Verifier: verifier, Subscribe: HTTPSubscriber(nil),
 		Log: log, now: time.Now, trustedProxies: trusted,
 	}
 	server.handler = server.routes()
@@ -99,6 +108,20 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /keep", s.handleKeep)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /uploads/{name}", s.handleUpload)
+
+	// The archive. On a newsletter's own domain these are the paths it serves (design §10); under the
+	// application's the same pages live at /archive/{slug}, and /p/{slug} redirects to whichever of
+	// the two the newsletter uses.
+	mux.HandleFunc("GET /{$}", s.serveArchive)
+	mux.HandleFunc("GET /p/{slug}", s.shortIssuePath)
+	mux.HandleFunc("GET /authors/{author}", s.serveArchive)
+	mux.HandleFunc("GET /sitemap.xml", s.serveArchive)
+	mux.HandleFunc("GET /robots.txt", s.serveArchive)
+	mux.HandleFunc("GET /archive/{slug}", s.serveArchive)
+	mux.HandleFunc("GET /archive/{slug}/p/{post}", s.serveArchive)
+	mux.HandleFunc("GET /archive/{slug}/authors/{author}", s.serveArchive)
+	mux.HandleFunc("GET /archive/{slug}/sitemap.xml", s.serveArchive)
+	mux.HandleFunc("GET /archive/{slug}/robots.txt", s.serveArchive)
 	mux.HandleFunc("POST /api/v1/contacts", s.handleAPIContactsPost)
 	mux.HandleFunc("GET /api/v1/campaigns", s.handleAPICampaignsGet)
 	mux.HandleFunc("POST /api/v1/campaigns", s.handleAPICampaignsPost)

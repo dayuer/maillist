@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // SuppressedEmail is one row of the global suppression list.

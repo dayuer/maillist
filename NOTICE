@@ -1,3 +1,19 @@
+Nibwire
+Copyright (c) 2026 dayuer
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU
+Affero General Public License as published by the Free Software Foundation, version 3 only
+(SPDX: AGPL-3.0-only); see LICENSE. It is distributed WITHOUT ANY WARRANTY; without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+The copyright holder also offers the same code under a separate commercial licence, for those who
+cannot or do not want to meet the AGPL's terms; see COMMERCIAL-LICENSE.md.
+
+The upstream project this port follows remains available under the MIT License from its own
+repository. Its copyright and permission notice, which the MIT License requires to be kept, follows.
+
+-----------------------------------------------------------------------------------------------------
+
 Mailcheap (Go) is a port of Mailcheap by Marc Lou, https://github.com/marclou/mailcheap
 (commit 67d13b0), used under the MIT License:
 

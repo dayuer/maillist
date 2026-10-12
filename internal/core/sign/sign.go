@@ -1,4 +1,4 @@
-// Package sign signs the links Mailcheap puts in emails. Each kind of link derives its own key
+// Package sign signs the links Nibwire puts in emails. Each kind of link derives its own key
 // from SESSION_SECRET with HKDF-SHA256 (empty salt) and a distinct info label, so one kind can
 // never stand in for another. Rotating the secret invalidates every link already sent.
 package sign
@@ -10,6 +10,14 @@ import (
 	"errors"
 )
 
+// The four info labels keep the old product name, and that is deliberate.
+//
+// They are not decoration: they are the HKDF info, so every signature this program has ever produced
+// is a function of these exact strings. Renaming them would not break the build or any test that did
+// not compare a signature — it would silently stop every link in every email already sent from
+// verifying, which for an unsubscribe link means a reader cannot leave and for a confirm link means a
+// subscriber cannot join. They are also upstream's values byte for byte (design D13), which is what
+// the golden vectors in this package's tests are: the reason the port is comparable at all.
 const (
 	InfoTracking    = "mailcheap-tracking-v1"
 	InfoUnsubscribe = "mailcheap-unsubscribe-v1"

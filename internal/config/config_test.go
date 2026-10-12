@@ -30,11 +30,16 @@ func TestSessionSecretNeeds32Characters(t *testing.T) {
 	}
 }
 
-// Intentional tightening, not a straight port of tests/config.test.mjs: upstream readSendRate uses
-// Number.parseInt, so "5.5" → 5 and " 7 " → 7; Go's strconv.Atoi rejects both and falls back to 10.
-// Being stricter here (never a silent half-read value) is deliberate.
-func TestSendRateOutsideOneToFourteenFallsBackToTen(t *testing.T) {
-	for v, want := range map[string]int{"": 10, "1": 1, "14": 14, "0": 10, "15": 10, "abc": 10, "5.5": 10, " 7 ": 10} {
+// SEND_RATE_PER_SECOND 是运营方自己的上限，不设就是没有上限：速率跟随账号（D17）。
+//
+// It used to default to 10 and cap at 14, which was a guess about an account the deployment can read
+// for itself. The parse is still stricter than upstream's Number.parseInt on purpose — "5.5" and " 7 "
+// are refused rather than half-read — and a refused value falls back to no ceiling rather than to a
+// number nobody asked for.
+func TestTheSendRateCapIsOptional(t *testing.T) {
+	for v, want := range map[string]int{
+		"": 0, "0": 0, "-1": 0, "abc": 0, "5.5": 0, " 7 ": 0, "1": 1, "5000": 5000, "5001": 0,
+	} {
 		c, err := Load(with("SEND_RATE_PER_SECOND", v))
 		if err != nil {
 			t.Fatal(err)
@@ -45,10 +50,79 @@ func TestSendRateOutsideOneToFourteenFallsBackToTen(t *testing.T) {
 	}
 }
 
+// 并发与 headroom：越界的值回退到默认并记日志，而不是让进程起不来。
+func TestTheConcurrencyAndHeadroomSettings(t *testing.T) {
+	c, err := Load(strong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SendConcurrency != 16 || c.Limits.SendRateHeadroom != 0.9 {
+		t.Fatalf("defaults = %d workers, headroom %v", c.SendConcurrency, c.Limits.SendRateHeadroom)
+	}
+	for v, want := range map[string]int{"0": 16, "257": 16, "abc": 16, "": 16, "1": 1, "256": 256} {
+		c, err := Load(with("SEND_CONCURRENCY", v))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.SendConcurrency != want {
+			t.Errorf("SEND_CONCURRENCY=%q → %d, want %d", v, c.SendConcurrency, want)
+		}
+	}
+	for v, want := range map[string]float64{
+		"": 0.9, "0.05": 0.9, "1.5": 0.9, "abc": 0.9, "0.5": 0.5, "1": 1,
+	} {
+		c, err := Load(with("SEND_RATE_HEADROOM", v))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Limits.SendRateHeadroom != want {
+			t.Errorf("SEND_RATE_HEADROOM=%q → %v, want %v", v, c.Limits.SendRateHeadroom, want)
+		}
+	}
+}
+
+// SES_TENANT_NAME 按 SES 的 CreateTenant 规则校验，不合法就在启动时拒绝。
+//
+// It is worth refusing rather than warning because the name travels in every request: a typo is not a
+// request that fails, it is a deployment that can never send anything, and the first place anyone
+// looks is the message.
+func TestTheTenantNameMustBeOneSESWouldAccept(t *testing.T) {
+	c, err := Load(with("SES_TENANT_NAME", "t-123"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SESTenantName != "t-123" {
+		t.Fatalf("tenant = %q", c.SESTenantName)
+	}
+	// Unset is the ordinary case, and so is a value that is only whitespace: no tenant.
+	for _, value := range []string{"", "   "} {
+		c, err := Load(with("SES_TENANT_NAME", value))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.SESTenantName != "" {
+			t.Errorf("SES_TENANT_NAME=%q → %q, want no tenant", value, c.SESTenantName)
+		}
+	}
+	// A stray space around a correct name is still a correct name: the operator pasted it.
+	if c, err := Load(with("SES_TENANT_NAME", " t-123 ")); err != nil || c.SESTenantName != "t-123" {
+		t.Errorf("a padded name = %q %v", c.SESTenantName, err)
+	}
+	// What SES refuses, this refuses — at startup, naming the setting and the rule.
+	for _, value := range []string{
+		"t 123", "t.123", "t/123", "té", strings.Repeat("t", 65),
+	} {
+		_, err := Load(with("SES_TENANT_NAME", value))
+		if err == nil || !strings.Contains(err.Error(), "SES_TENANT_NAME") {
+			t.Errorf("SES_TENANT_NAME=%q was accepted (%v)", value, err)
+		}
+	}
+}
+
 func TestDefaultsAreSafe(t *testing.T) {
 	c, _ := Load(with("APP_URL", "https://mail.example.com/"))
 	if c.SendingOn || c.SendApproval != "auto" || c.AppURL != "https://mail.example.com" ||
-		c.DBPath != "/data/mailcheap.db" || c.MCPHTTPAddr != "127.0.0.1:8081" || c.Limits.MaxSendsPerDay != 50_000 {
+		c.DBPath != "/data/nibwire.db" || c.MCPHTTPAddr != "127.0.0.1:8081" || c.Limits.MaxSendsPerDay != 50_000 {
 		t.Fatalf("unexpected defaults %+v", c)
 	}
 }
@@ -80,7 +154,7 @@ func TestSendingOnNeedsSomewhereToSend(t *testing.T) {
 	if _, err := Load(env); err == nil {
 		t.Fatal("SENDING_ENABLED=true with no SES_REGION, endpoint or fake was accepted")
 	}
-	for _, key := range []string{"SES_REGION", "SES_ENDPOINT", "MAILCHEAP_FAKE_SES_LOG"} {
+	for _, key := range []string{"SES_REGION", "SES_ENDPOINT", "NIBWIRE_FAKE_SES_LOG"} {
 		env := with("SENDING_ENABLED", "true")
 		env[key] = "something"
 		if _, err := Load(env); err != nil {
@@ -93,10 +167,10 @@ func TestSendingOnNeedsSomewhereToSend(t *testing.T) {
 	}
 }
 
-// MAILCHEAP_FAKE_SES_DOMAINS is the stand-in identity list the end-to-end script drives the
+// NIBWIRE_FAKE_SES_DOMAINS is the stand-in identity list the end-to-end script drives the
 // unverified branch with; commas and blanks are the operator's, not ours.
 func TestFakeSESDomains(t *testing.T) {
-	c, err := Load(with("MAILCHEAP_FAKE_SES_DOMAINS", " example.net , other.example,"))
+	c, err := Load(with("NIBWIRE_FAKE_SES_DOMAINS", " example.net , other.example,"))
 	if err != nil {
 		t.Fatal(err)
 	}

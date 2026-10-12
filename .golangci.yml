@@ -12,9 +12,9 @@ linters:
           files:
             - "**/internal/core/**"
           deny:
-            - pkg: "mailcheap/internal/store"
+            - pkg: "nibwire/internal/store"
               desc: "core is pure logic; adapters call store"
-            - pkg: "mailcheap/internal/mailer"
+            - pkg: "nibwire/internal/mailer"
               desc: "core is pure logic; adapters call mailer"
             - pkg: "database/sql"
               desc: "core does no I/O"

@@ -30,7 +30,13 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 // reach it (design §10).
 var readerOnlyPrefixes = []string{
 	"/o/", "/c/", "/unsubscribe", "/api/unsubscribe", "/confirm", "/keep", "/subscribe/", "/healthz",
+	// The archive itself: its pages, and the two files crawlers ask for.
+	"/p/", "/authors/", "/sitemap.xml", "/robots.txt",
 }
+
+// readerOnlyPaths are the same, for a path that is a prefix of everything: the archive's front page is
+// "/", and a HasPrefix check on it would let the whole admin surface through.
+var readerOnlyPaths = []string{"/"}
 
 // archiveSlug maps an ARCHIVE_HOSTS entry's host to the newsletter slug it serves.
 func (s *Server) archiveSlug(host string) (string, bool) {
@@ -56,6 +62,12 @@ func (s *Server) withArchiveHost(next http.Handler) http.Handler {
 			allowed := false
 			for _, prefix := range readerOnlyPrefixes {
 				if strings.HasPrefix(r.URL.Path, prefix) {
+					allowed = true
+					break
+				}
+			}
+			for _, path := range readerOnlyPaths {
+				if r.URL.Path == path {
 					allowed = true
 					break
 				}

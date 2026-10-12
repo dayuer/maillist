@@ -5,17 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 const (
 	MinSessionSecretLength = 32
-	DefaultSendRate        = 10
-	MaxSendRate            = 14
 	DefaultMaxSendsPerDay  = 50_000
+
+	// DefaultSendConcurrency is how many sends are in flight at once. It is a starting point, not a
+	// number that is right for every account: what a deployment needs is the account's rate times how
+	// long one send takes, so an account allowed 450 a second against 80 ms of latency needs at least
+	// 36. `nibwire quota` prints what the current pair comes to (docs/ses-smoke.md).
+	DefaultSendConcurrency = 16
+	// MaxSendConcurrency is where a typo stops being a typo: below this, more workers than there is
+	// memory for one send each is the only cost.
+	MaxSendConcurrency = 256
+	// DefaultSendHeadroom is the fraction of the account's rate to aim at (D17).
+	DefaultSendHeadroom = 0.9
+	// MaxSendRateCap bounds SEND_RATE_PER_SECOND. It replaced a hard 14: a deployment was never really
+	// limited to fourteen a second, and saying so only made the biggest accounts slow.
+	MaxSendRateCap = 5000
 )
 
 type Config struct {
@@ -26,8 +39,10 @@ type Config struct {
 	SendingOn     bool
 	SendApproval  string // "auto" or "manual"
 	MCPHTTPAddr   string
-	SESRegion     string
-	SESConfigSet  string
+	// SendConcurrency is SEND_CONCURRENCY: how many sends may be in flight at once (D16).
+	SendConcurrency int
+	SESRegion       string
+	SESConfigSet    string
 	// SESEndpoint replaces the SES service address (SES_ENDPOINT). The compose smoke stack points it
 	// at a fake SES; empty means the real one for the region.
 	SESEndpoint string
@@ -36,8 +51,13 @@ type Config struct {
 	// task role — which is the better answer on AWS.
 	SESAccessKeyID     string
 	SESSecretAccessKey string
-	SESTopicARN        string
-	ArchiveHosts       string
+	// SESTenantName is SES_TENANT_NAME: the SES tenant every send goes through. Empty is the ordinary
+	// case — the account itself. A tenant is how one account keeps several senders' reputations apart,
+	// so a deployment that runs several of them sets it; the tenant has to exist in SES first, with the
+	// sending identity and the configuration set associated with it.
+	SESTenantName string
+	SESTopicARN   string
+	ArchiveHosts  string
 	// TrustedProxies are the networks whose X-Forwarded-For may be believed (TRUSTED_PROXIES).
 	// Empty means none: the peer address is used, which is the safe default and the right one for a
 	// process serving traffic directly.
@@ -49,13 +69,13 @@ type Config struct {
 	// endpoint instead.
 	FakeSESLog string
 	// FakeSESDomains is the stand-in identity list used alongside FakeSESLog: the domains the
-	// pre-send check and `mailcheap domains` see. Production reads SES.
+	// pre-send check and `nibwire domains` see. Production reads SES.
 	FakeSESDomains []string
 	Limits         model.Limits
 }
 
 // LoadFile reads a KEY=VALUE file, which is how `--config` works: the file is the deployment's
-// settings and the environment still wins, so a one-off `MAX_SENDS_PER_DAY=10 mailcheap campaign
+// settings and the environment still wins, so a one-off `MAX_SENDS_PER_DAY=10 nibwire campaign
 // send` overrides it without editing it. Within the file, the last mention of a key wins.
 //
 // The format is the one every container stack already uses: one KEY=VALUE per line, blank lines and
@@ -125,45 +145,65 @@ func Load(env map[string]string) (Config, error) {
 	// deployment that was never finished. SENDING_ENABLED is false by default, so a fresh deployment
 	// still starts; it is only the half-configured one that is refused, and it is refused at startup.
 	if env["SENDING_ENABLED"] == "true" &&
-		env["SES_REGION"] == "" && env["SES_ENDPOINT"] == "" && env["MAILCHEAP_FAKE_SES_LOG"] == "" {
+		env["SES_REGION"] == "" && env["SES_ENDPOINT"] == "" && env["NIBWIRE_FAKE_SES_LOG"] == "" {
 		problems = append(problems, "SENDING_ENABLED=true, but there is no SES to send through: set "+
 			"SES_REGION (and SES_ACCESS_KEY_ID/SES_SECRET_ACCESS_KEY, or an instance role), or point "+
-			"SES_ENDPOINT at a local fake SES, or set MAILCHEAP_FAKE_SES_LOG to write sends to a file.")
+			"SES_ENDPOINT at a local fake SES, or set NIBWIRE_FAKE_SES_LOG to write sends to a file.")
+	}
+	// A tenant name that SES would refuse is a deployment that cannot send, and it is much better to
+	// hear about it at startup than from the first message: the name travels in every request, so a
+	// typo is not a request that fails but a deployment that never works.
+	tenantName := strings.TrimSpace(env["SES_TENANT_NAME"])
+	if tenantName != "" && !tenantNamePattern.MatchString(tenantName) {
+		problems = append(problems, fmt.Sprintf(
+			"SES_TENANT_NAME %q is not a tenant name: SES allows up to 64 letters, numbers, hyphens "+
+				"and underscores only (see docs/ses-smoke.md).", tenantName))
 	}
 	if len(problems) > 0 {
-		return Config{}, errors.New("mailcheap can't start. " + strings.Join(problems, " "))
+		return Config{}, errors.New("nibwire can't start. " + strings.Join(problems, " "))
 	}
-	dataDir := or(env["MAILCHEAP_DATA_DIR"], "/data")
+	dataDir := or(env["NIBWIRE_DATA_DIR"], "/data")
 	return Config{
-		SessionSecret:      env["SESSION_SECRET"],
-		AppURL:             strings.TrimSuffix(or(env["APP_URL"], "http://localhost:8080"), "/"),
-		DataDir:            dataDir,
-		DBPath:             or(env["MAILCHEAP_DB"], dataDir+"/mailcheap.db"),
-		SendingOn:          env["SENDING_ENABLED"] == "true",
-		SendApproval:       approval,
-		MCPHTTPAddr:        or(env["MCP_HTTP_ADDR"], "127.0.0.1:8081"),
+		SessionSecret: env["SESSION_SECRET"],
+		AppURL:        strings.TrimSuffix(or(env["APP_URL"], "http://localhost:8080"), "/"),
+		DataDir:       dataDir,
+		DBPath:        or(env["NIBWIRE_DB"], dataDir+"/nibwire.db"),
+		SendingOn:     env["SENDING_ENABLED"] == "true",
+		SendApproval:  approval,
+		MCPHTTPAddr:   or(env["MCP_HTTP_ADDR"], "127.0.0.1:8081"),
+		SendConcurrency: intIn(env["SEND_CONCURRENCY"], 1, MaxSendConcurrency,
+			DefaultSendConcurrency),
 		SESRegion:          env["SES_REGION"],
 		SESConfigSet:       env["SES_CONFIGURATION_SET"],
 		SESEndpoint:        env["SES_ENDPOINT"],
 		SESAccessKeyID:     env["SES_ACCESS_KEY_ID"],
 		SESSecretAccessKey: env["SES_SECRET_ACCESS_KEY"],
+		SESTenantName:      tenantName,
 		SESTopicARN:        env["SES_SNS_TOPIC_ARN"],
 		ArchiveHosts:       env["ARCHIVE_HOSTS"],
 		TrustedProxies:     splitList(env["TRUSTED_PROXIES"]),
 		AlertFrom:          env["ALERT_FROM"],
 		AdminEmail:         env["ADMIN_EMAIL"],
-		FakeSESLog:         env["MAILCHEAP_FAKE_SES_LOG"],
-		FakeSESDomains:     splitList(env["MAILCHEAP_FAKE_SES_DOMAINS"]),
+		FakeSESLog:         env["NIBWIRE_FAKE_SES_LOG"],
+		FakeSESDomains:     splitList(env["NIBWIRE_FAKE_SES_DOMAINS"]),
 		Limits: model.Limits{
-			BounceRate:               0.02,
-			ComplaintRate:            0.0008,
-			MaxEmailBytes:            100_000,
-			SendRatePerSecond:        intIn(env["SEND_RATE_PER_SECOND"], 1, MaxSendRate, DefaultSendRate),
+			BounceRate:    0.02,
+			ComplaintRate: 0.0008,
+			MaxEmailBytes: 100_000,
+			// 0 is "no ceiling of our own": the rate follows the account (D17). It used to default to
+			// 10 and cap at 14, which is a guess about an account the deployment can see.
+			SendRatePerSecond:        intIn(env["SEND_RATE_PER_SECOND"], 1, MaxSendRateCap, 0),
+			SendRateHeadroom:         floatIn(env["SEND_RATE_HEADROOM"], 0.1, 1, DefaultSendHeadroom),
 			WelcomeEmailsPer10Minute: 100,
 			MaxSendsPerDay:           intIn(env["MAX_SENDS_PER_DAY"], 1, 10_000_000, DefaultMaxSendsPerDay),
 		},
 	}, nil
 }
+
+// tenantNamePattern is SES's rule for a tenant name, from the CreateTenant reference: "The name can
+// contain up to 64 alphanumeric characters, including letters, numbers, hyphens (-) and underscores
+// (_) only."
+var tenantNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 func or(v, fallback string) string {
 	if v == "" {
@@ -194,6 +234,17 @@ func intIn(v string, lo, hi, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// floatIn is intIn for a fraction, with the same convention: anything out of range falls back rather
+// than failing the process, because a badly spelled setting should not be a deployment that will not
+// start.
+func floatIn(v string, lo, hi, fallback float64) float64 {
+	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil || f < lo || f > hi {
+		return fallback
+	}
+	return f
 }
 
 func environ() map[string]string {

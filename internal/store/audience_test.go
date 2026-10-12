@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/audience"
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/audience"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
 )
 
 // 200 random contacts: the SQL and the pure comparator must agree on every position. This is the

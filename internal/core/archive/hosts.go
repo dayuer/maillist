@@ -81,3 +81,28 @@ func (u URLs) Author(authorSlug string) string { return u.base + "/authors/" + a
 
 // AbsoluteAuthor is Author as an address a browser can follow from anywhere.
 func (u URLs) AbsoluteAuthor(authorSlug string) string { return u.absolute + "/authors/" + authorSlug }
+
+// hostPaths are the archive's own paths on a newsletter's domain. Next.js served them as
+// /sitemap and /robots because of a rewrite; this port gives the domain the files themselves, and
+// keeps upstream's two mappings for the links it prints.
+var hostPaths = map[string]string{"/sitemap": "/sitemap.xml", "/robots": "/robots.txt"}
+
+// HostURL is upstream getArchiveHostUrl: where an application-domain /archive path lives once the
+// newsletter routes its own domain here, or ok = false when it has no domain (or the path is not an
+// archive path at all).
+func HostURL(pathname, search, hostsValue string) (string, bool) {
+	rest, found := strings.CutPrefix(pathname, "/archive/")
+	if !found {
+		return "", false
+	}
+	slug, path, _ := strings.Cut(rest, "/")
+	host, ok := HostForSlug(slug, hostsValue)
+	if !ok {
+		return "", false
+	}
+	path = "/" + path
+	if mapped, ok := hostPaths[strings.TrimSuffix(path, "/")]; ok {
+		path = mapped
+	}
+	return "https://" + host + path + search, true
+}

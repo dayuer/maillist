@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/store"
+	"nibwire/internal/store"
 )
 
 // 最小但合法的四种图片文件头，以及一张 1×1 的完整 PNG。
@@ -76,7 +76,7 @@ func TestValidateRefusesWhatIsNotAnImage(t *testing.T) {
 func TestSaveWritesTheFileAndTheRow(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(ctx, filepath.Join(dir, "mailcheap.db"))
+	db, err := store.Open(ctx, filepath.Join(dir, "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

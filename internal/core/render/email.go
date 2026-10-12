@@ -5,8 +5,8 @@ package render
 import (
 	"strings"
 
-	"mailcheap/internal/core/content"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/content"
+	"nibwire/internal/core/model"
 )
 
 // Placeholders a generated email prints instead of its own copy, so editing the campaign changes

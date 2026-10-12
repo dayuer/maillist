@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
 )
 
 var readyNewsletter = model.Newsletter{

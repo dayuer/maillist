@@ -1,0 +1,44 @@
+# audit list：每次写与每次发送都留一行。
+
+nibwire init
+exists nibwire.db
+
+nibwire audit list
+stdout '0 entries'
+
+nibwire newsletter create --name 'Field notes' --slug field-notes --from-name 'Jane Doe' --from-email jane@example.net --postal-address '1 Main St, Paris'
+nibwire newsletter update field-notes --name 'Field Notes Weekly'
+nibwire contact add reader@example.com --newsletter field-notes
+nibwire suppression add noisy@example.com --reason manual
+nibwire credentials create --kind api --name site --scopes read
+nibwire campaign create --newsletter field-notes --subject 'Issue 12' --file issue.md
+nibwire campaign test --subject 'Issue 12' --to checker@example.com
+
+nibwire audit list
+stdout 'newsletter.create'
+stdout 'newsletter.update'
+stdout 'contact.add'
+stdout 'suppression.add'
+stdout 'credential.create'
+stdout 'campaign.create'
+stdout 'campaign.test'
+
+# 凭据的 token 不进审计。明文只出现一次，而且不是在这里。
+nibwire audit list
+! stdout 'mc_[A-Za-z0-9_-]{43}'
+
+nibwire audit list --action campaign.test --json
+stdout '"Action": "campaign.test"'
+stdout '"ActorKind": "cli"'
+stdout '"ParamsDigest": "'
+
+# 换个 action 就没有别的行了。
+nibwire audit list --action campaign.test
+stdout '1 entries'
+nibwire audit list --actor api
+stdout '0 entries'
+
+-- issue.md --
+# Hello
+
+Read [this](https://example.com).

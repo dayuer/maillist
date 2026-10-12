@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/creds"
+	"nibwire/internal/store"
 )
 
 // 一个 agent 用写 tool 建出来的东西，和 CLI 建出来的是同一批行——所以这里每一项都从库里读回来核对。
@@ -124,6 +126,38 @@ func TestSendTestSendsOneMessageAndStaysOutOfTheReport(t *testing.T) {
 	counters, _, err := f.store.CampaignCountersOf(context.Background(), draft.ID)
 	if err != nil || counters.Recipients != 0 || counters.Sent != 0 {
 		t.Fatalf("the test copy reached the campaign's own counters: %+v %v", counters, err)
+	}
+}
+
+// 测试发送失败要退回那一封的预算：预算记在「发了」上，不是记在「试了」上。引擎在一步的消息
+// 写不进去时同样退（engine.go 的 refund），这里是同一件事的一封版。
+func TestAFailedTestSendGivesTheChargeBack(t *testing.T) {
+	f := newFixtureWithBudget(t, 1)
+	f.seedNewsletter(t, 1)
+	draft := f.seedCampaign(t, "Issue 12")
+	session := f.connect(t)
+
+	if message := callError(t, session, "send_test", map[string]any{
+		"campaign": draft.ID, "to": "not-an-address",
+	}); !strings.Contains(message, "invalid") {
+		t.Fatalf("a bad test address said %q", message)
+	}
+	credential, err := f.store.CredentialByHash(context.Background(), creds.Hash(f.token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved, err := f.store.Reserved(context.Background(), store.Day(time.Now()), credential.ID); err != nil {
+		t.Fatal(err)
+	} else if reserved != 0 {
+		t.Fatalf("a failed test send left %d of the day reserved", reserved)
+	}
+
+	// 预算真的回来了：额度是 1，第二次（有效的）测试发送应该成功，而不是「今日已花完」。
+	sent := call[sendTestOut](t, session, "send_test", map[string]any{
+		"campaign": draft.ID, "to": "checker@example.com",
+	})
+	if sent.MessageID == "" {
+		t.Fatalf("send_test after a failed one = %+v", sent)
 	}
 }
 
@@ -285,5 +319,177 @@ func TestScheduleCampaignQueuesForTheChosenTime(t *testing.T) {
 		"campaign": "Issue 12", "at": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339),
 	}); !strings.Contains(message, "future") {
 		t.Fatalf("scheduling in the past said %q", message)
+	}
+}
+
+// run_cleanup 报出「下一个发送会做什么」，并且只在 dry_run=false 时才动库。
+func TestRunCleanupReportsAndMoves(t *testing.T) {
+	f := newFixture(t)
+	newsletter := f.seedNewsletter(t, 0)
+	session := f.connect(t)
+	ctx := context.Background()
+
+	// 打开清理：两个忽略的期、30 天没有动静就算冷。
+	loaded, err := f.store.Newsletter(ctx, newsletter.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.CleanupEnabled, loaded.CleanupIssues, loaded.CleanupDays = true, 2, 30
+	if err := f.store.UpdateNewsletter(ctx, loaded); err != nil {
+		t.Fatal(err)
+	}
+	// 一个冷了的人，和一个警告过 15 天还没回应的人。
+	cold := model.Contact{
+		ID: ids.New(), NewsletterID: newsletter.ID, Email: "cold@example.com",
+		Status: model.ContactActive, IgnoredIssues: 3,
+		CreatedAt: time.Now().UTC().AddDate(0, 0, -400), SubscribedAt: ptrTime(time.Now().UTC().AddDate(0, 0, -400)),
+	}
+	expired := cold
+	expired.ID, expired.Email = ids.New(), "expired@example.com"
+	warned := time.Now().UTC().AddDate(0, 0, -15)
+	expired.LastChanceAt = &warned
+	for _, contact := range []model.Contact{cold, expired} {
+		if err := f.store.CreateContact(ctx, contact); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	preview := call[runCleanupOut](t, session, "run_cleanup", map[string]any{
+		"newsletter": "field-notes", "dry_run": true,
+	})
+	if !preview.Settings.Enabled || preview.WouldSend.LastChance != 1 || preview.WouldSend.Dormant != 1 {
+		t.Fatalf("preview = %+v", preview)
+	}
+	if preview.Moved != 0 {
+		t.Errorf("a dry run moved %d contacts", preview.Moved)
+	}
+	if contact, err := f.store.Contact(ctx, expired.ID); err != nil || contact.Status != model.ContactActive {
+		t.Fatalf("a dry run changed a status: %q %v", contact.Status, err)
+	}
+
+	ran := call[runCleanupOut](t, session, "run_cleanup", map[string]any{"newsletter": "field-notes"})
+	if ran.Moved != 1 {
+		t.Fatalf("ran = %+v", ran)
+	}
+	if contact, err := f.store.Contact(ctx, expired.ID); err != nil || contact.Status != model.ContactDormant {
+		t.Fatalf("status = %q %v", contact.Status, err)
+	}
+	if contact, err := f.store.Contact(ctx, cold.ID); err != nil || contact.Status != model.ContactActive {
+		t.Fatalf("the cold contact was moved too early: %q %v", contact.Status, err)
+	}
+
+	// 一次运行留一行审计，actor 还是这个凭据。
+	entries, err := f.store.AuditLog(ctx, store.AuditFilter{Action: "cleanup.run"})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %v %v", entries, err)
+	}
+	if entries[0].ActorName != "mcp:newsletter-bot" {
+		t.Errorf("actor = %q", entries[0].ActorName)
+	}
+}
+
+// ptrTime is the one-liner the fixtures use for an optional timestamp.
+func ptrTime(at time.Time) *time.Time { return &at }
+
+// 写入时的闸门：解析器吃不下的正文在三个入口都被拒，且不入库（core/content.CheckRenderable）。
+func TestCampaignsRefuseMarkdownThatCannotBeRendered(t *testing.T) {
+	f := newFixture(t)
+	f.seedNewsletter(t, 1)
+	session := f.connect(t)
+	ctx := context.Background()
+
+	pathological := strings.Repeat("[a](", 25_000) // 100 KB of link openers
+	if message := callError(t, session, "create_campaign", map[string]any{
+		"newsletter": "field-notes", "subject": "Too complex", "markdown": pathological,
+	}); !strings.Contains(message, "too complex") {
+		t.Fatalf("create_campaign said %q", message)
+	}
+	// 什么都没写进去：拒绝发生在保存之前。
+	campaigns, err := f.store.Campaigns(ctx, "", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, campaign := range campaigns {
+		if campaign.Subject == "Too complex" {
+			t.Fatalf("a refused body was stored: %+v", campaign)
+		}
+	}
+
+	// 更新同一个闸门：先建一份正常的，再试着把正文换成病态的。
+	draft := call[campaignOut](t, session, "create_campaign", map[string]any{
+		"newsletter": "field-notes", "subject": "Ordinary", "markdown": "# Hello",
+	})
+	if message := callError(t, session, "update_campaign", map[string]any{
+		"campaign": draft.ID, "markdown": pathological,
+	}); !strings.Contains(message, "too complex") {
+		t.Fatalf("update_campaign said %q", message)
+	}
+	after, err := f.store.Campaign(ctx, draft.ID)
+	if err != nil || after.Body != "# Hello" {
+		t.Fatalf("the body changed anyway: %q %v", after.Body, err)
+	}
+
+	// 大而普通的正文照收：闸门拒绝的是结构，不是长度。
+	if _, err := f.store.Campaign(ctx, draft.ID); err != nil {
+		t.Fatal(err)
+	}
+	big := call[campaignOut](t, session, "create_campaign", map[string]any{
+		"newsletter": "field-notes", "subject": "Long but ordinary",
+		"markdown": strings.Repeat("Some ordinary words. ", 4000),
+	})
+	if big.ID == "" {
+		t.Fatal("100 KB of prose was refused")
+	}
+}
+
+// send 的状态门槛与引擎一致：不传 limit 是一次全新的发送，只认 draft/scheduled/paused；传了
+// limit 是补发（QueueStep），只认已发完的。拦在门口的调用不建 job、不写审计——那是发送，不是尝试。
+func TestSendChecksTheStatusTheEngineWouldCheck(t *testing.T) {
+	f := newFixture(t)
+	f.seedNewsletter(t, 2)
+	campaign := f.seedCampaign(t, "Issue 12")
+	session := f.connect(t)
+
+	// 草稿不传 limit：合法，入队。
+	sent := call[sendOut](t, session, "send_campaign", map[string]any{"campaign": campaign.ID})
+	if sent.JobID == "" {
+		t.Fatalf("send_campaign on a draft = %+v", sent)
+	}
+
+	// 已发完的不传 limit 再整体发一次：引擎会在 Queue 里拒，这里要在门口拒。
+	if moved, err := f.store.SetCampaignStatus(context.Background(), campaign.ID,
+		[]model.CampaignStatus{model.CampaignDraft}, model.CampaignSent); err != nil || !moved {
+		t.Fatal(err)
+	}
+	if message := callError(t, session, "send_campaign", map[string]any{
+		"campaign": campaign.ID,
+	}); !strings.Contains(message, "only a draft, scheduled or paused one") {
+		t.Fatalf("sending a sent campaign said %q", message)
+	}
+	if pending, err := f.deps.Jobs.Pending(context.Background(), 10); err != nil || len(pending) != 1 {
+		t.Fatalf("the refused send left %d pending jobs (%v), want only the draft's", len(pending), err)
+	}
+	if entries, err := f.store.AuditLog(context.Background(),
+		store.AuditFilter{Action: "campaign.send", Limit: 50}); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 1 {
+		t.Fatalf("the refused send was audited: %d campaign.send entries, want the one legit draft send", len(entries))
+	}
+}
+
+// limit 是补发：草稿还没发出去，谈不上「下一批」。
+func TestASteppedSendNeedsACampaignThatHasGoneOut(t *testing.T) {
+	f := newFixture(t)
+	f.seedNewsletter(t, 2)
+	draft := f.seedCampaign(t, "Issue 12")
+	session := f.connect(t)
+
+	if message := callError(t, session, "send_campaign", map[string]any{
+		"campaign": draft.ID, "limit": 10,
+	}); !strings.Contains(message, "only a sent one") {
+		t.Fatalf("stepping a draft said %q", message)
+	}
+	if pending, err := f.deps.Jobs.Pending(context.Background(), 10); err != nil || len(pending) != 0 {
+		t.Fatalf("the refused step left %d jobs (%v)", len(pending), err)
 	}
 }

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/creds"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/creds"
 )
 
 func seedCredential(t *testing.T, db *DB) (Credential, string) {

@@ -9,7 +9,7 @@ import (
 
 func openTemp(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,12 +45,12 @@ func TestOpenConfiguresSQLite(t *testing.T) {
 
 // migrationsAtThisRevision is how many files internal/store/migrations holds. It is spelled out so
 // that adding a migration is a deliberate edit here too, rather than a test that quietly follows.
-const migrationsAtThisRevision = 3
+const migrationsAtThisRevision = 4
 
 // Opening twice must not re-apply a migration: 0001 creates tables without IF NOT EXISTS, so a
 // second run would fail loudly.
 func TestMigrateIsIdempotent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mailcheap.db")
+	path := filepath.Join(t.TempDir(), "nibwire.db")
 	ctx := context.Background()
 	first, err := Open(ctx, path)
 	if err != nil {

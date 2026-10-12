@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"mailcheap/internal/core/ids"
+	"nibwire/internal/core/ids"
 )
 
 // Event is one row of the events table. Only the problems worth keeping are stored — every send

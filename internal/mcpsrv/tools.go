@@ -1,7 +1,7 @@
 package mcpsrv
 
 import (
-	"mailcheap/internal/creds"
+	"nibwire/internal/creds"
 )
 
 // tools is the MCP surface: every tool, the scope a call needs, and how it binds its handler.
@@ -30,7 +30,7 @@ var tools = []*tool{
 		add: func(sf *surface, t *tool) { addTool(sf, t, getCampaignReport) }},
 	{name: "get_stats", scope: creds.ScopeRead,
 		about: "Subscriber growth, sends by hour and the last 30 days' email rates, against the 30 " +
-			"before them. The same figures `mailcheap stats` prints.",
+			"before them. The same figures `nibwire stats` prints.",
 		add: func(sf *surface, t *tool) { addTool(sf, t, getStats) }},
 	{name: "list_contacts", scope: creds.ScopeRead,
 		about: "List a newsletter's contacts, most recently subscribed first.",
@@ -89,6 +89,10 @@ var tools = []*tool{
 		about: "Import contacts the caller already has, up to 1000 rows per call. A status only ever " +
 			"moves stricter: an import cannot resurrect somebody who unsubscribed.",
 		add: func(sf *surface, t *tool) { addTool(sf, t, importContacts) }},
+	{name: "run_cleanup", scope: creds.ScopeWrite,
+		about: "Report what the list cleanup would do, and with dry_run false move the contacts who " +
+			"were warned 14 days ago or more to dormant. Nobody is ever unsubscribed or deleted.",
+		add: func(sf *surface, t *tool) { addTool(sf, t, runCleanup) }},
 	{name: "add_suppression", scope: creds.ScopeWrite,
 		about: "Stop every newsletter from sending to one address.",
 		add:   func(sf *surface, t *tool) { addTool(sf, t, addSuppression) }},

@@ -7,16 +7,16 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/checks"
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/core/stats"
-	"mailcheap/internal/core/validate"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/statsquery"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/checks"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/core/stats"
+	"nibwire/internal/core/validate"
+	"nibwire/internal/mailer"
+	"nibwire/internal/statsquery"
+	"nibwire/internal/store"
 )
 
 // The read tools (design §9). Every list takes PageArgs; the getters take a reference an operator
@@ -106,6 +106,11 @@ type CampaignReport struct {
 	LastChance lastChanceView `json:"last_chance"`
 	Providers  []providerView `json:"providers"`
 	Remaining  int            `json:"remaining"`
+	// Stranded is messages that are still waiting or claimed under a campaign that is not sending any
+	// more. It should always be 0; anything else is a campaign whose report would otherwise say the
+	// issue went out while part of the audience never got it, and nobody would ever claim those
+	// messages (§phase 9 #37).
+	Stranded int `json:"stranded_messages,omitempty"`
 }
 
 func getCampaignReport(ctx context.Context, sess *session, _ store.Credential, in campaignRefIn) (CampaignReport, error) {
@@ -136,9 +141,18 @@ func getCampaignReport(ctx context.Context, sess *session, _ store.Credential, i
 	for _, provider := range providers {
 		rows = append(rows, viewProvider(provider))
 	}
+	// A campaign that is still sending has unfinished messages by design, and one that was queued but
+	// never started has all of them; only the finished states should show nothing.
+	stranded := 0
+	if !campaign.Status.Queueable() && campaign.Status != model.CampaignSending {
+		if stranded, err = sess.deps.Store.CountUnfinishedCampaignMessages(ctx, campaign.ID); err != nil {
+			return CampaignReport{}, err
+		}
+	}
 	return CampaignReport{
 		Campaign: viewCampaign(campaign), Stats: viewCounters(counters),
 		LastChance: viewLastChance(lastChance), Providers: rows, Remaining: remaining,
+		Stranded: stranded,
 	}, nil
 }
 
@@ -278,6 +292,11 @@ type CampaignCheck struct {
 	Audience int            `json:"audience"`
 	Checks   []checks.Check `json:"checks"`
 	Blocked  *checks.Check  `json:"blocked,omitempty"`
+	// Sending is the rate and the account's remaining allowance, and Estimated is how long this
+	// audience takes at it (D17, D18). An agent asking "may I send this" also wants to know whether
+	// the answer is "in a minute" or "tomorrow".
+	Sending   mailer.SendingRate `json:"sending"`
+	Estimated string             `json:"estimated"`
 }
 
 func checkCampaign(ctx context.Context, sess *session, _ store.Credential, in campaignRefIn) (CampaignCheck, error) {
@@ -289,7 +308,11 @@ func checkCampaign(ctx context.Context, sess *session, _ store.Credential, in ca
 	if err != nil {
 		return CampaignCheck{}, err
 	}
-	out := CampaignCheck{Campaign: campaign.ID, Audience: audience, Checks: report}
+	rate := sess.deps.Mailer.SendingRate()
+	out := CampaignCheck{
+		Campaign: campaign.ID, Audience: audience, Checks: report,
+		Sending: rate, Estimated: rate.Estimate(audience).Round(time.Second).String(),
+	}
 	if blocked, bad := checks.Blocked(report); bad {
 		out.Blocked = &blocked
 	}

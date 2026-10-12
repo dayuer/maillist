@@ -42,7 +42,9 @@ func listed(t *testing.T, session *mcp.ClientSession) map[string]*mcp.Tool {
 	return out
 }
 
-// 设计 §9 的读写 tool 表就是这张表：名字逐字一致，一个不多、一个不少（run_cleanup 见执行记录）。
+// 设计 §9 的读写 tool 表就是这张表：名字逐字一致，一个不多、一个不少。
+//
+// run_cleanup 在阶段 6 没注册，因为那时没有实现；阶段 7 把它和实现一起交出来。
 func TestTheSurfaceIsTheDesignsToolList(t *testing.T) {
 	want := []string{
 		// 读
@@ -52,7 +54,7 @@ func TestTheSurfaceIsTheDesignsToolList(t *testing.T) {
 		// 写
 		"create_newsletter", "update_newsletter", "create_campaign", "update_campaign",
 		"send_test", "send_campaign", "schedule_campaign", "pause_campaign", "resume_campaign",
-		"import_contacts", "add_suppression", "remove_suppression", "upload_image",
+		"import_contacts", "add_suppression", "remove_suppression", "upload_image", "run_cleanup",
 	}
 	session := connect(t, Deps{}, "unused-hash")
 	tools := listed(t, session)
@@ -98,7 +100,7 @@ func TestEveryToolDeclaresItsScope(t *testing.T) {
 	}
 	for _, name := range []string{
 		"create_newsletter", "update_newsletter", "create_campaign", "update_campaign",
-		"add_suppression", "remove_suppression", "upload_image",
+		"add_suppression", "remove_suppression", "upload_image", "run_cleanup",
 	} {
 		want[name] = "write"
 	}

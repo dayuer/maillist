@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/rules"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/rules"
 )
 
 // CampaignCounters are the issue's own counters (upstream campaign.stats).
@@ -41,20 +41,20 @@ const campaignColumns = `id, newsletter_id, subject, preview_text, format, body,
     stats_delivered, stats_bounced, stats_complained, stats_opened, stats_clicked,
     stats_unsubscribed, stats_failed, last_chance_recipients, last_chance_sent,
     last_chance_delivered, last_chance_bounced, last_chance_complained, last_chance_failed,
-    last_chance_dormant, created_at, updated_at`
+    last_chance_dormant, created_at, updated_at, reserved_day`
 
 // CreateCampaign inserts one campaign. archive_listed is written explicitly: the model's
 // model.NewCampaign sets it, and the column default covers rows inserted without it.
 func (db *DB) CreateCampaign(ctx context.Context, c model.Campaign) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO campaigns (`+campaignColumns+`) VALUES (
-            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			c.ID, c.NewsletterID, c.Subject, c.PreviewText, string(c.Format), c.Body, string(c.Status),
 			c.AudienceLimit, c.Source, formatTimePtr(c.ScheduledAt), formatTimePtr(c.StartedAt),
 			formatTimePtr(c.SentAt), formatTimePtr(c.TestSentAt), c.ArchiveSlug, c.ThumbnailURL,
 			boolInt(c.ArchiveListed), boolInt(c.ArchivePinned), c.WebViews,
 			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-			formatTime(nonZero(c.CreatedAt)), formatTime(time.Now()))
+			formatTime(nonZero(c.CreatedAt)), formatTime(time.Now()), c.ReservedDay)
 		return err
 	})
 }
@@ -80,7 +80,7 @@ func scanCampaign(row interface{ Scan(...any) error }) (model.Campaign, error) {
 		&c.ThumbnailURL, &archiveListed, &archivePinned, &c.WebViews,
 		new(int), new(int), new(int), new(int), new(int), new(int), new(int), new(int), new(int),
 		new(int), new(int), new(int), new(int), new(int), new(int), new(int),
-		&createdAt, &updatedAt)
+		&createdAt, &updatedAt, &c.ReservedDay)
 	if err != nil {
 		return model.Campaign{}, err
 	}
@@ -155,24 +155,63 @@ func (db *DB) Campaigns(ctx context.Context, newsletterID string, limit, offset 
 	return out, rows.Err()
 }
 
-// UpdateCampaign writes every mutable column of c back. created_at is never rewritten.
+// UpdateCampaign writes the columns an editor owns — the ones an operator changes by hand or through
+// an agent — and created_at is never rewritten.
+//
+// What is left out is the point of this function. status, the four sending timestamps and web_views
+// belong to something else (SetCampaignStatus, SetCampaignSchedule, SetCampaignStartedAt/SentAt,
+// SetCampaignTestSentAt, AddWebViews), and editing a campaign is a read-modify-write: the operator
+// loads it, changes a field, and writes it back. Writing the sender's own columns from a copy read
+// before the sender finished would undo work that had already happened — a campaign the sender had
+// just marked sent would go back to sending, and an issue's view count would be reset to whatever it
+// was when the editor opened the page. Each of those columns has a setter that only moves it as part
+// of a decision, which is where the guard against a wrong transition lives.
 func (db *DB) UpdateCampaign(ctx context.Context, c model.Campaign) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `UPDATE campaigns SET
-            subject = ?, preview_text = ?, format = ?, body = ?, status = ?, audience_limit = ?,
-            source = ?, scheduled_at = ?, started_at = ?, sent_at = ?, test_sent_at = ?,
-            archive_slug = ?, thumbnail_url = ?, archive_listed = ?, archive_pinned = ?,
-            web_views = ?, updated_at = ? WHERE id = ?`,
-			c.Subject, c.PreviewText, string(c.Format), c.Body, string(c.Status), c.AudienceLimit,
-			c.Source, formatTimePtr(c.ScheduledAt), formatTimePtr(c.StartedAt),
-			formatTimePtr(c.SentAt), formatTimePtr(c.TestSentAt), c.ArchiveSlug, c.ThumbnailURL,
-			boolInt(c.ArchiveListed), boolInt(c.ArchivePinned), c.WebViews,
+            newsletter_id = ?, subject = ?, preview_text = ?, format = ?, body = ?,
+            audience_limit = ?, source = ?, archive_slug = ?, thumbnail_url = ?,
+            archive_listed = ?, archive_pinned = ?, updated_at = ? WHERE id = ?`,
+			c.NewsletterID, c.Subject, c.PreviewText, string(c.Format), c.Body,
+			c.AudienceLimit, c.Source, c.ArchiveSlug, c.ThumbnailURL,
+			boolInt(c.ArchiveListed), boolInt(c.ArchivePinned),
 			formatTime(time.Now()), c.ID)
 		if err != nil {
 			return err
 		}
 		return requireOneRow(result, "campaign", c.ID)
 	})
+}
+
+// SettleCampaign moves a campaign from sending to sent, but only if nothing of it is unfinished, and
+// reports whether it moved.
+//
+// The condition is part of the statement rather than a read the caller makes first. Counting in one
+// transaction and moving in another leaves a window: a message another process releases or claims
+// between the two appears after "nothing is unfinished" was true, and the campaign ends up sent with
+// work still pending under it — which nobody will ever claim, because a sent campaign is not sending
+// (the phase 1-3 audit's C2).
+func (db *DB) SettleCampaign(ctx context.Context, id string) (bool, error) {
+	moved := false
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		moved = false
+		result, err := tx.ExecContext(ctx, `UPDATE campaigns SET status = ?, updated_at = ?
+            WHERE id = ? AND status = ? AND NOT EXISTS (
+                SELECT 1 FROM messages WHERE campaign_id = ? AND kind IN (?, ?) AND status IN (?, ?))`,
+			string(model.CampaignSent), formatTime(time.Now()), id, string(model.CampaignSending),
+			id, string(model.KindCampaign), string(model.KindLastChance),
+			string(model.MessagePending), string(model.MessageClaimed))
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		moved = affected > 0
+		return nil
+	})
+	return moved, err
 }
 
 // SetCampaignStatus moves a campaign from one of the from statuses to to and reports whether it
@@ -323,5 +362,80 @@ func (db *DB) SetCampaignSentAt(ctx context.Context, id string, at time.Time) er
             WHERE id = ? AND (sent_at IS NULL OR sent_at > ?)`,
 			formatTime(at), formatTime(time.Now()), id, formatTime(at))
 		return err
+	})
+}
+
+// CampaignByArchiveSlug is the issue behind an archive page: the slug is unique per deployment (the
+// store enforces it), and only the three published states have a page. An unlisted issue still
+// resolves — it is not linked, but the address works, which is what upstream does.
+func (db *DB) CampaignByArchiveSlug(ctx context.Context, newsletterID, slug string) (model.Campaign, error) {
+	campaign, err := scanCampaign(db.sql.QueryRowContext(ctx,
+		"SELECT "+campaignColumns+` FROM campaigns
+         WHERE newsletter_id = ? AND archive_slug = ?
+           AND status IN ('sending', 'paused', 'sent')`, newsletterID, slug))
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Campaign{}, fmt.Errorf("issue %s: %w", slug, ErrNotFound)
+	}
+	return campaign, err
+}
+
+// NewsletterForArchiveSlug finds the newsletter an archive slug belongs to, for the application
+// domain's /p/{slug}: that path does not name the newsletter, so the slug has to.
+func (db *DB) NewsletterForArchiveSlug(ctx context.Context, slug string) (model.Newsletter, error) {
+	var id string
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT newsletter_id FROM campaigns
+          WHERE archive_slug = ? AND status IN ('sending', 'paused', 'sent') ORDER BY id LIMIT 1`, slug).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Newsletter{}, fmt.Errorf("issue %s: %w", slug, ErrNotFound)
+	}
+	if err != nil {
+		return model.Newsletter{}, err
+	}
+	newsletter, err := db.Newsletter(ctx, id)
+	if err != nil {
+		return model.Newsletter{}, err
+	}
+	if !newsletter.ArchiveEnabled {
+		// The archive switch is off: the issue has a slug from when it was on, and no page now.
+		return model.Newsletter{}, fmt.Errorf("newsletter %s: %w", newsletter.Slug, ErrNotFound)
+	}
+	return newsletter, nil
+}
+
+// AddWebViews counts readers who looked at an issue's page.
+//
+// The count is incremented here rather than by a beacon, because there is no beacon any more: the
+// page is rendered per request when there is no ISR layer to serve it from a cache (design §10, D11).
+func (db *DB) AddWebViews(ctx context.Context, campaignID string, n int) error {
+	if n <= 0 {
+		return nil
+	}
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "UPDATE campaigns SET web_views = web_views + ? WHERE id = ?",
+			n, campaignID)
+		return err
+	})
+}
+
+// CampaignMessageKinds is what kind of message this campaign wrote for each contact, by contact id.
+// It is ReachedContacts under a name that says what the list cleanup asks it.
+func (db *DB) CampaignMessageKinds(ctx context.Context, campaignID string) (map[string]model.MessageKind, error) {
+	return db.ReachedContacts(ctx, campaignID)
+}
+
+// SetCampaignArchiveSlug stores the address an issue's page will live at, once it is going out.
+//
+// It is a setter of its own rather than an UpdateCampaign because the caller is the send: it has the
+// id and the slug, and rewriting every column of a campaign from a partial copy is how a concurrent
+// edit gets lost.
+func (db *DB) SetCampaignArchiveSlug(ctx context.Context, id, slug string) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, "UPDATE campaigns SET archive_slug = ?, updated_at = ? WHERE id = ?",
+			slug, formatTime(time.Now()), id)
+		if err != nil {
+			return err
+		}
+		return requireOneRow(result, "campaign", id)
 	})
 }

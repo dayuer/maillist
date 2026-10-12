@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
+	"nibwire/internal/mailer"
 )
 
 func signupForm(email string) url.Values { return url.Values{"email": {email}} }
@@ -39,6 +40,65 @@ func TestSubscribeAddsAContactAndSendsWelcome(t *testing.T) {
 	if server.fake.SentCount() != 1 || server.fake.Sent()[0].Tags["kind"] != string(model.KindWelcome) {
 		t.Fatalf("sent = %+v", server.fake.Sent())
 	}
+}
+
+// 站点注册洪水：告警，但不拒绝（#48，上游 app/archive/actions.js 的那条 sendAlert）。
+//
+// 超过共享上限的注册照样放行——拒绝等于让一个洪水者把所有真实注册挡在外面——所以告警是这件事唯一的
+// 可见面。
+func TestASignupFloodAlertsWithoutRefusing(t *testing.T) {
+	server := newTestServer(t)
+	server.seedNewsletter(t)
+	ctx := context.Background()
+
+	// The newsletter is already over its shared limit: that is other signups, not this one. (Posting
+	// three hundred times would need sixty visitors first, because the per-visitor limit refuses.)
+	for i := 0; i < subscribeNewsletterLimit.Count; i++ {
+		server.Limiter.Limited(subscribeNewsletterLimit, "field-notes", server.now)
+	}
+
+	response := server.postForm(t, "/subscribe/field-notes", signupForm("reader@example.com"))
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want the signup through: past the shared limit it alerts rather than "+
+			"refuses", response.StatusCode)
+	}
+	_ = response.Body.Close()
+	newsletter, err := server.store.NewsletterBySlug(ctx, "field-notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.store.ContactByEmail(ctx, newsletter.ID, "reader@example.com"); err != nil {
+		t.Fatalf("the signup did not go through: %v", err)
+	}
+
+	// The operator hears about it: once, with the numbers and the next step.
+	rows, err := server.store.Alerts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Key != "signup-flood:field-notes" ||
+		rows[0].Title != "Website signup flood" {
+		t.Fatalf("alert rows = %+v", rows)
+	}
+	alert := emailed(t, server, "Website signup flood")
+	for _, want := range []string{"300", "Field notes", "still go through", "contact list"} {
+		if !strings.Contains(alert.Email.Text, want) {
+			t.Errorf("the alert does not say %q: %s", want, alert.Email.Text)
+		}
+	}
+}
+
+// emailed asserts the operator got an email with this alert title and returns what it said: the
+// detail lives in the email and the log and nowhere else, so this is where a test reads it back.
+func emailed(t *testing.T, server *testServer, title string) mailer.SentEmail {
+	t.Helper()
+	for _, sent := range server.fake.Sent() {
+		if sent.Email.Subject == "[Nibwire] "+title {
+			return sent
+		}
+	}
+	t.Fatalf("no email with the subject %q: %+v", "[Nibwire] "+title, server.fake.Sent())
+	return mailer.SentEmail{}
 }
 
 // 双重确认开启时发确认信，并告诉读者去哪儿找。

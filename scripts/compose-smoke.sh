@@ -52,7 +52,7 @@ contains() {
 }
 
 # run <args…> — the CLI inside the container.
-run() { $COMPOSE exec -T mailcheap mailcheap "$@"; }
+run() { $COMPOSE exec -T nibwire nibwire "$@"; }
 
 step "writing deploy/.env"
 cat >"$ENV_FILE" <<'EOF'
@@ -62,8 +62,8 @@ SESSION_SECRET=smoke-test-session-secret-of-at-least-32-characters
 APP_URL=http://localhost
 SENDING_ENABLED=true
 SES_REGION=eu-west-1
-SES_CONFIGURATION_SET=mailcheap-smoke
-SES_SNS_TOPIC_ARN=arn:aws:sns:eu-west-1:000000000000:mailcheap-smoke
+SES_CONFIGURATION_SET=nibwire-smoke
+SES_SNS_TOPIC_ARN=arn:aws:sns:eu-west-1:000000000000:nibwire-smoke
 SITE_ADDRESS=http://localhost
 TRUSTED_PROXIES=172.16.0.0/12
 EOF
@@ -84,7 +84,7 @@ until run health >/dev/null 2>&1; do
 	[ "$tries" -gt 90 ] && fail "the app never became healthy"
 	sleep 1
 done
-pass "mailcheap health"
+pass "nibwire health"
 
 tries=0
 until curl -fsS "$SITE/healthz" >/dev/null 2>&1; do
@@ -120,7 +120,7 @@ step "sending the issue"
 sent=$(run campaign send --subject "$SUBJECT" --yes)
 contains "$sent" "queued 1 recipients" "the send was queued"
 tries=0
-until $COMPOSE exec -T mailcheap mailcheap campaign report --subject "$SUBJECT" >/dev/null 2>&1; do
+until $COMPOSE exec -T nibwire nibwire campaign report --subject "$SUBJECT" >/dev/null 2>&1; do
 	tries=$((tries + 1))
 	[ "$tries" -gt 60 ] && fail "the campaign report never became readable"
 	sleep 1
@@ -211,6 +211,109 @@ headers=$(curl -s -o /dev/null -D - "$SITE$path")
 contains "$headers" "immutable" "the image is served immutably"
 contains "$headers" "image/png" "as a PNG"
 
+step "the issue has a public archive page"
+# 归档是读者侧的另一半：地址在发出时分配，于是 /archive/<slug>/p/<slug> 现成可用，
+# sitemap 与 robots 也由同一个进程给出。
+archived=$(curl -s -o /dev/null -w '%{http_code}' "$SITE/archive/$SLUG")
+[ "$archived" = "200" ] || fail "the archive index answered $archived"
+index=$(curl -s "$SITE/archive/$SLUG")
+case "$index" in
+	*"$SUBJECT"*) pass "the archive lists the issue" ;;
+	*) fail "the archive index did not list the issue" ;;
+esac
+
+issue_slug=$(run campaign show --subject "$SUBJECT" --json |
+	sed -n 's/.*"ArchiveSlug": "\([^"]*\)".*/\1/p')
+[ -n "$issue_slug" ] || fail "the issue has no archive slug: it was not assigned when it went out"
+post=$(curl -s "$SITE/archive/$SLUG/p/$issue_slug")
+case "$post" in
+	*"https://example.com/read"*) pass "the issue page renders its body ($issue_slug)" ;;
+	*) fail "the issue page did not render the body" ;;
+esac
+case "$(curl -s -o /dev/null -w '%{http_code}' "$SITE/archive/$SLUG/sitemap.xml")" in
+	200) pass "the sitemap is served" ;;
+	*) fail "the sitemap did not answer 200" ;;
+esac
+robots=$(curl -s "$SITE/archive/$SLUG/robots.txt")
+case "$robots" in
+	*"Sitemap:"*) pass "robots points at the sitemap" ;;
+	*) fail "robots did not name a sitemap" ;;
+esac
+# 指向 404 的 Sitemap 是搜索引擎读不到归档的全部原因：这里把 robots 说的那个地址真的取一次。
+sitemap_url=$(printf '%s\n' "$robots" | sed -n 's/^Sitemap:[[:space:]]*//p' | head -1)
+case "$(curl -s -o /dev/null -w '%{http_code}' "$sitemap_url")" in
+	200) pass "the sitemap robots names answers 200 ($sitemap_url)" ;;
+	*) fail "robots names $sitemap_url, which is not there" ;;
+esac
+# curl 的 UA 在上游的机器名单里：页面照样 200，但不该计成一个读者。
+if [ "$(run campaign show --subject "$SUBJECT" --json | sed -n 's/.*"WebViews": \([0-9]*\).*/\1/p')" = "0" ]; then
+	pass "a crawler's request was not counted as a reader"
+else
+	fail "a crawler was counted as a reader"
+fi
+
+step "two thousand messages at the account's rate"
+# 阶段 8 的收尾：整条路径都在这一步里走一遍——一封一个真实请求体、真实限速、真实回写。
+#
+# The audience is imported rather than added one contact at a time (each `contact add` is a container
+# round trip), and the file is copied in because the image has no shell to pipe it through. The fake
+# SES answers slowly and reports a rate, which is what makes this a test of the pacing rather than of
+# a tight loop.
+BULK_SUBJECT='Rate smoke'
+BULK=2000
+audience=$(mktemp)
+{
+	printf 'email,status\n'
+	i=1
+	while [ "$i" -le "$BULK" ]; do
+		printf 'bulk%d@example.com,active\n' "$i"
+		i=$((i + 1))
+	done
+} >"$audience"
+# 0644 before the copy: docker cp keeps the source's mode, and the app runs as a non-root user in the
+# container, so a mktemp file's 0600 arrives unreadable.
+chmod 0644 "$audience"
+$COMPOSE cp "$audience" nibwire:/tmp/audience.csv >/dev/null
+rm -f "$audience"
+imported=$(run contact import /tmp/audience.csv --newsletter "$SLUG" --source smoke)
+contains "$imported" "created $BULK" "the audience was imported"
+
+run campaign create --newsletter "$SLUG" --subject "$BULK_SUBJECT" \
+	--file /seed/issue.md >/dev/null
+bulk_sent=$(run campaign send --subject "$BULK_SUBJECT" --yes)
+contains "$bulk_sent" "queued $BULK recipients" "the send was queued whole"
+
+# The count comes from the fake, which is the only thing that knows what was really accepted. The one
+# message from the first campaign is in there too.
+want=$((BULK + 1))
+tries=0
+while :; do
+	accepted=$(curl -fsS "$FAKESES/_limits" | sed -n 's/.*"accepted":\([0-9]*\).*/\1/p')
+	[ "$accepted" = "$want" ] && break
+	tries=$((tries + 1))
+	[ "$tries" -gt 120 ] && fail "the fake SES accepted $accepted of $want messages"
+	sleep 1
+done
+pass "$want messages reached the fake SES"
+
+# 零重复：同一个地址被接受两次是 D14 最不能犯的错，而它只在这里看得见——假 SES 收到的每一个请求。
+duplicates=$(curl -fsS "$FAKESES/_sent" | grep -o '"to":"[^"]*"' | sort | uniq -d)
+if [ -n "$duplicates" ]; then
+	fail "these addresses were accepted more than once: $duplicates"
+fi
+pass "no address was sent to twice"
+
+# 发完的标志是 campaign 自己走完 settle：没有 pending、没有 claimed，状态才是 sent。
+tries=0
+# The CLI prints indented JSON ("Status": "sent"), so the pattern allows the space: a pattern written
+# for the compact form would never match and the loop would time out on a campaign that was fine.
+until run campaign show --subject "$BULK_SUBJECT" --json 2>/dev/null | grep -q '"Status": *"sent"'; do
+	tries=$((tries + 1))
+	[ "$tries" -gt 60 ] && fail "the campaign never settled after its last message"
+	sleep 1
+done
+pass "the campaign settled with nothing left over"
+
 step "an agent reaches the same deployment over MCP"
 # The MCP surface is a credential, not a door: the token is issued in the container and used by a
 # stdio client in the container, which is how an agent gets at a deployed instance (compose does not
@@ -229,7 +332,7 @@ answer=$( (
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"count_audience","arguments":{"newsletter":"$SLUG"}}}
 EOF
 	sleep 2
-) | $COMPOSE exec -T mailcheap mailcheap mcp --stdio --token "$token" 2>/dev/null) ||
+) | $COMPOSE exec -T nibwire nibwire mcp --stdio --token "$token" 2>/dev/null) ||
 	fail "the stdio MCP server did not answer"
 contains "$answer" "count_audience" "the tool list came back over stdio"
 contains "$answer" "send_campaign" "including the ones that can send"
@@ -237,5 +340,6 @@ case "$answer" in
 *delete_* | *create_credentials*) fail "the surface offered something design §9 keeps off it" ;;
 esac
 
-printf '\n=== the stack went up: one issue went out, a reader opened, clicked and unsubscribed, and an agent\n'
-printf 'used the same deployment over MCP\n'
+printf '\n=== the stack went up: one issue went out, a reader opened, clicked and unsubscribed, and its\n'
+printf 'archive page is public; two thousand messages went out at the account rate with no address\n'
+printf 'sent to twice; an agent listed the tools of the same deployment over MCP\n'

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/config"
+	"nibwire/internal/config"
 )
 
 // 上传的图片由读者面服务，而且只服务那一个形状的名字。
@@ -62,10 +62,10 @@ func TestUploadsAreServedImmutablyAndOnlyByName(t *testing.T) {
 
 	// A traversal attempt never reaches the handler: the mux cleans the path first (a 307 to a path
 	// that is not registered). Either way the database is not served.
-	traversal := server.get(t, "/uploads/../mailcheap.db")
+	traversal := server.get(t, "/uploads/../nibwire.db")
 	_ = traversal.Body.Close()
 	if traversal.StatusCode == http.StatusOK {
-		t.Errorf("GET /uploads/../mailcheap.db = 200")
+		t.Errorf("GET /uploads/../nibwire.db = 200")
 	}
 
 	// A valid name whose file is not there is a 404 as well, rather than an error the reader sees.

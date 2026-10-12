@@ -31,12 +31,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -f deploy/Dockerfile --build-arg VERSION=ci -t mailcheap:ci .
+      - run: docker build -f deploy/Dockerfile --build-arg VERSION=ci -t nibwire:ci .
       - name: it runs
-        run: docker run --rm mailcheap:ci version
+        run: docker run --rm nibwire:ci version
       - name: it is under 30 MB
         run: |
-          id=$(docker create mailcheap:ci)
+          id=$(docker create nibwire:ci)
           bytes=$(docker export "$id" | wc -c)
           docker rm "$id" >/dev/null
           mb=$((bytes / 1024 / 1024))

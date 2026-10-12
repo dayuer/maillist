@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
 )
 
 func seedNewsletter(t *testing.T, db *DB) model.Newsletter {

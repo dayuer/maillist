@@ -3,9 +3,9 @@ package rules
 import (
 	"strings"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/sign"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/sign"
 )
 
 // RecipientEmail is one message ready for the provider.
@@ -23,14 +23,16 @@ type RecipientEmail struct {
 
 // RecipientInput is one recipient's copy of a campaign.
 type RecipientInput struct {
-	AppURL     string
-	Campaign   model.Campaign // subject, preview text, format, body
-	Newsletter model.Newsletter
-	Contact    model.Contact
-	MessageID  string // "" = untracked
-	Kind       model.MessageKind
-	ConfirmURL string
-	KeepURL    string
+	AppURL string
+	// ArchiveHosts is the ARCHIVE_HOSTS value: a newsletter with a domain of its own links to it.
+	ArchiveHosts string
+	Campaign     model.Campaign // subject, preview text, format, body
+	Newsletter   model.Newsletter
+	Contact      model.Contact
+	MessageID    string // "" = untracked
+	Kind         model.MessageKind
+	ConfirmURL   string
+	KeepURL      string
 }
 
 // BuildRecipientEmail renders one recipient's message. With a MessageID opens and clicks are
@@ -49,7 +51,7 @@ func BuildRecipientEmail(s *sign.Signer, in RecipientInput) (RecipientEmail, err
 		Subject:     in.Campaign.Subject,
 		PreviewText: in.Campaign.PreviewText,
 		Newsletter:  in.Newsletter,
-		WebURL:      IssueWebURL(in.AppURL, in.Campaign, in.Newsletter),
+		WebURL:      IssueWebURL(in.AppURL, in.ArchiveHosts, in.Campaign, in.Newsletter),
 	})
 	html := rendered.HTML
 	if in.MessageID != "" {

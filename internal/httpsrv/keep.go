@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/sign"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/sign"
 )
 
 // KeepMaxAge is how long a keep link stays usable; upstream allows 90 days, well past the 14 days

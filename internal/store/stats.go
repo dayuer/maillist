@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/stats"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/stats"
 )
 
 // The subscriber curve and the hourly send series are bucketed in Go, not in SQL: SQLite's date
@@ -41,9 +41,9 @@ func (db *DB) JoiningContactsSince(ctx context.Context, newsletterID string, sin
 // UnsubscribingContactsSince is the contacts who left inside the range, whatever the reason.
 //
 // Upstream's query also drops a leave recorded within a minute of the contact being created — an
-// import's own row, whose unsubscribe happened before Mailcheap knew the address. That comparison
+// import's own row, whose unsubscribe happened before Nibwire knew the address. That comparison
 // needs arithmetic on two dates, which the fixed-width TEXT columns cannot do in a comparison, so
-// the caller applies stats.HasLeftInMailcheap to these rows.
+// the caller applies stats.HasLeftInNibwire to these rows.
 func (db *DB) UnsubscribingContactsSince(ctx context.Context, newsletterID string, since time.Time) ([]stats.Activity, error) {
 	return db.activities(ctx, `SELECT source, subscribed_at, confirmed_at, unsubscribed_at, created_at
         FROM contacts

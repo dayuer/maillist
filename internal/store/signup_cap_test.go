@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
 )
 
 // 上限与插入是一条语句：并发的注册不能都读到「还没到上限」然后都写。

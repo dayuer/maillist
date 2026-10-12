@@ -17,7 +17,7 @@ type DNSRecord struct {
 	Value string
 }
 
-// Identity is one sending identity, as `mailcheap domains` prints it and as the pre-send check reads
+// Identity is one sending identity, as `nibwire domains` prints it and as the pre-send check reads
 // it: everything the CLI needs to answer "may this From address send?".
 type Identity struct {
 	Domain          string
@@ -142,7 +142,7 @@ func IdentityFromSES(domain string, got *sesv2.GetEmailIdentityOutput, region st
 }
 
 // StaticIdentity is a fixed list of verified domains, for tests and for the fake sender's
-// MAILCHEAP_FAKE_SES_DOMAINS.
+// NIBWIRE_FAKE_SES_DOMAINS.
 type StaticIdentity struct{ Domains []string }
 
 // Identities reports every listed domain as verified with DKIM in order: the fake SES does not model

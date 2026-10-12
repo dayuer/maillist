@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/creds"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/store"
+	"nibwire/internal/creds"
+	"nibwire/internal/mailer"
+	"nibwire/internal/store"
 )
 
 // 一条一条地试：设计 §9 与 §11 里那些「不能做」的事，每一条都有一个测试。

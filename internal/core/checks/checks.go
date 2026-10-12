@@ -5,8 +5,8 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
 )
 
 // Check is one row of the pre-send checklist.

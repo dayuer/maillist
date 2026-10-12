@@ -7,14 +7,15 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/store"
 )
 
 const testAppURL = "https://mail.example.com"
@@ -28,6 +29,8 @@ type fixture struct {
 	newsletter model.Newsletter
 	campaign   model.Campaign
 	contacts   []model.Contact
+	// logs is what the engine said, which is where the things only an operator sees end up.
+	logs *logCapture
 }
 
 func newFixture(t *testing.T, contacts int) *fixture {
@@ -39,8 +42,16 @@ func newFixture(t *testing.T, contacts int) *fixture {
 // particular way (see WithContextCancellation).
 func newFixtureWith(t *testing.T, contacts int, options ...FakeOption) *fixture {
 	t.Helper()
+	return newFixtureConfigured(t, contacts, nil, options...)
+}
+
+// newFixtureConfigured is the fixture with a hook for the engine's configuration, which is where the
+// rate controller goes: the tests about the rate following SES need one, the rest do not.
+func newFixtureConfigured(t *testing.T, contacts int, configure func(*Config),
+	options ...FakeOption) *fixture {
+	t.Helper()
 	ctx := context.Background()
-	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,23 +92,70 @@ func newFixtureWith(t *testing.T, contacts int, options ...FakeOption) *fixture 
 	}
 
 	fake := NewFake(options...)
-	engine := NewEngine(db, fake, signer, Config{
+	cfg := Config{
 		AppURL: testAppURL, SendingOn: true, SendRatePerSec: 1000,
 		Limits: model.Limits{MaxEmailBytes: 100_000, BounceRate: 0.02, ComplaintRate: 0.0008,
 			MaxSendsPerDay: 50_000, WelcomeEmailsPer10Minute: 100},
 		PollInterval: 10 * time.Millisecond,
-	}, slog.New(slog.NewTextHandler(&testLogWriter{t}, nil)))
+		// The whole suite runs with the engine's real concurrency: the invariants this port promises
+		// (C1 in flight is never released, C2 settling counts claimed, F1 shutdown leaves nothing
+		// claimed) have to hold when sixteen sends are in the air, not only when they are queued up
+		// one at a time. A test that needs a single file sets it back to 1.
+		SendConcurrency: 16,
+	}
+	if configure != nil {
+		configure(&cfg)
+	}
+	logs := newLogCapture(t)
+	engine := NewEngine(db, fake, signer, cfg, slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(engine.Close)
 
-	return &fixture{db: db, engine: engine, fake: fake, signer: signer,
+	return &fixture{db: db, engine: engine, fake: fake, signer: signer, logs: logs,
 		newsletter: newsletter, campaign: campaign, contacts: audience}
 }
 
-type testLogWriter struct{ t *testing.T }
+// logCapture is a logger that writes what the engine said into the test's own output, and keeps a
+// copy. It keeps one because a pause's reason reaches the log and the alert and nothing else, so this
+// is the only place a test can read it back.
+type logCapture struct {
+	t     *testing.T
+	mu    sync.Mutex
+	lines []string
+}
 
-func (w *testLogWriter) Write(p []byte) (int, error) {
-	w.t.Log(strings.TrimSpace(string(p)))
+func newLogCapture(t *testing.T) *logCapture { return &logCapture{t: t} }
+
+func (c *logCapture) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	c.mu.Lock()
+	c.lines = append(c.lines, line)
+	c.mu.Unlock()
+	c.t.Log(line)
 	return len(p), nil
+}
+
+// says is whether any line contains substring.
+func (c *logCapture) says(substring string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, line := range c.lines {
+		if strings.Contains(line, substring) {
+			return true
+		}
+	}
+	return false
+}
+
+// serial puts the fixture back to one send at a time.
+//
+// The assertions that count "the messages the batch had not reached yet" are statements about a
+// queue, and only a single file has one: with sixteen workers and six messages, every message has
+// already been handed out by the time the first send returns, so there is nothing left to reach.
+// Those tests say so out loud and use this; the concurrency-independent invariants (nothing left
+// claimed, nothing unknown, nothing sent twice) are asserted at the fixture's real concurrency.
+func (f *fixture) serial() *fixture {
+	f.engine.cfg.SendConcurrency = 1
+	return f
 }
 
 // drain sends everything that is queued.
@@ -480,8 +538,11 @@ func TestSESErrorsAreClassified(t *testing.T) {
 }
 
 // Five failures in a row pause the campaign (upstream MAX_CONSECUTIVE_FAILURES).
+//
+// The counter is a property of the order sends come back in, so the exact stopping point is a
+// statement about a single file; the concurrent version below says what is left of it at sixteen.
 func TestConsecutiveFailuresPauseTheCampaign(t *testing.T) {
-	f := newFixture(t, 6)
+	f := newFixture(t, 6).serial()
 	ctx := context.Background()
 	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
@@ -499,6 +560,51 @@ func TestConsecutiveFailuresPauseTheCampaign(t *testing.T) {
 	}
 	if loaded.Status != model.CampaignPaused {
 		t.Fatalf("campaign = %s, want paused", loaded.Status)
+	}
+	// The one message that was not reached is back in the queue, not failed and not claimed.
+	if claimed, unknown, pending := claimedCount(t, f.db); claimed != 0 || unknown != 0 || pending != 1 {
+		t.Fatalf("claimed = %d, unknown = %d, pending = %d, want 0/0/1", claimed, unknown, pending)
+	}
+}
+
+// 并发之下「五连败就暂停」仍成立，只是在飞的都会落地：停掉的判定只能拦住还没发出去的消息。
+//
+// With SEND_CONCURRENCY workers, by the time the fifth failure is counted up to concurrency-1 more
+// sends are already in flight and will come back too. What survives concurrency is the part that
+// matters: the campaign stops, the failures are recorded, and every message the batch did not reach
+// is released rather than left claimed.
+func TestConsecutiveFailuresPauseTheCampaignUnderConcurrency(t *testing.T) {
+	f := newFixture(t, 40)
+	ctx := context.Background()
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, contact := range f.contacts {
+		f.fake.FailWith(contact.Email, "MessageRejected", "Message contains a virus")
+	}
+	result := f.drain(t)
+
+	if result.Failed < rules.MaxConsecutiveFailures {
+		t.Fatalf("failed = %d, want at least %d", result.Failed, rules.MaxConsecutiveFailures)
+	}
+	// Nothing beyond the workers that were already in flight when the rule fired.
+	if most := rules.MaxConsecutiveFailures + f.engine.cfg.SendConcurrency - 1; result.Failed > most {
+		t.Fatalf("failed = %d, want no more than %d (the rule fires at %d and at most %d were in flight)",
+			result.Failed, most, rules.MaxConsecutiveFailures, f.engine.cfg.SendConcurrency)
+	}
+	loaded, err := f.db.Campaign(ctx, f.campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != model.CampaignPaused {
+		t.Fatalf("campaign = %s, want paused", loaded.Status)
+	}
+	claimed, unknown, pending := claimedCount(t, f.db)
+	if claimed != 0 || unknown != 0 {
+		t.Fatalf("claimed = %d, unknown = %d, want 0/0", claimed, unknown)
+	}
+	if result.Failed+pending != 40 {
+		t.Fatalf("failed %d + pending %d != 40: a message was lost", result.Failed, pending)
 	}
 }
 
@@ -569,6 +675,83 @@ func TestQueueAndSendRefuseWhenSendingIsOff(t *testing.T) {
 	}
 }
 
+// 发送关闭时，后台发送循环照常空转，直到 ctx 结束才返回，且不返回错误。
+//
+// Sending off is a setting, not a failure. serve stops everything when one of its components returns
+// an error, so a Run that reported "Sending is off" took the archive, the unsubscribe links and MCP
+// down with it — and SENDING_ENABLED=false is what deploy/.env.example ships.
+func TestRunKeepsRunningWhileSendingIsOff(t *testing.T) {
+	f := newFixture(t, 1)
+	f.engine.cfg.SendingOn = false
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- f.engine.Run(ctx) }()
+
+	// Twenty poll intervals: long enough for the old Run to have hit SendBatch and returned.
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned %v while sending is off, want it to keep running", err)
+	case <-time.After(20 * f.engine.cfg.PollInterval):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after cancel = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop within five seconds of cancellation")
+	}
+	if f.fake.SentCount() != 0 {
+		t.Fatalf("sent = %d, want 0", f.fake.SentCount())
+	}
+}
+
+// 空转就是空转：队列里的消息一封都不发、不领取，而且都还在队列里等着发送打开。
+//
+// The two tests overlap on purpose: the one above arrived on main with PR #19 and this one with the
+// phase 8 branch, and the reviewer asked for both. This one queues its messages first, so it says
+// what idling means for the work that is already waiting rather than only that the loop survived.
+func TestRunIdlesWhenSendingIsOff(t *testing.T) {
+	f := newFixture(t, 2)
+	ctx := context.Background()
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	f.engine.cfg.SendingOn = false
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.engine.Run(runCtx) }()
+	// Twenty ticks of the fixture's 10 ms poll interval: an engine that stopped on the first one has
+	// had every chance to say so.
+	select {
+	case err := <-done:
+		cancel()
+		t.Fatalf("Run returned %v while sending is off, want it to idle", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want a clean stop", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop when its context was cancelled")
+	}
+
+	// Idle means idle: the queued messages are still in the queue and nothing was claimed or sent.
+	if claimed, unknown, pending := claimedCount(t, f.db); claimed != 0 || unknown != 0 || pending != 2 {
+		t.Fatalf("claimed = %d, unknown = %d, pending = %d, want 0/0/2", claimed, unknown, pending)
+	}
+	if sent := f.fake.SentCount(); sent != 0 {
+		t.Fatalf("%d messages were sent while sending is off", sent)
+	}
+}
+
 func messagesWithStatus(t *testing.T, f *fixture, status model.MessageStatus) []model.Message {
 	t.Helper()
 	rows, err := f.db.Rows(context.Background(),
@@ -596,4 +779,59 @@ func messagesWithStatus(t *testing.T, f *fixture, status model.MessageStatus) []
 		out = append(out, message)
 	}
 	return out
+}
+
+// 归档打开时，一期在发出时拿到自己页面的地址（上游 assignArchiveSlug）：从主题来、唯一、且此后不再变。
+func TestAnIssueGetsItsArchiveSlugWhenItGoesOut(t *testing.T) {
+	f := newFixture(t, 1)
+	ctx := context.Background()
+	f.newsletter.ArchiveEnabled = true
+	if err := f.db.UpdateNewsletter(ctx, f.newsletter); err != nil {
+		t.Fatal(err)
+	}
+	f.campaign.Subject = "Issue 12: the one about pricing!"
+	if err := f.db.UpdateCampaign(ctx, f.campaign); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := f.db.Campaign(ctx, f.campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.ArchiveSlug != "issue-12-the-one-about-pricing" {
+		t.Fatalf("slug = %q", queued.ArchiveSlug)
+	}
+
+	// 第二期同样的主题：地址不撞车。
+	second := model.NewCampaign(f.newsletter.ID, "Issue 12: the one about pricing!", time.Now().UTC())
+	second.Body = "# Hello\n\nRead [this](https://example.com)."
+	if err := f.db.CreateCampaign(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.engine.Queue(ctx, second.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	other, err := f.db.Campaign(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.ArchiveSlug != "issue-12-the-one-about-pricing-2" {
+		t.Fatalf("second slug = %q", other.ArchiveSlug)
+	}
+
+	// 归档关着：不分配（一个永远不会被服务的地址只是看着像回事）。
+	off := newFixture(t, 1)
+	off.newsletter.ArchiveEnabled = false
+	if err := off.db.UpdateNewsletter(ctx, off.newsletter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := off.engine.Queue(ctx, off.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	if plain, err := off.db.Campaign(ctx, off.campaign.ID); err != nil || plain.ArchiveSlug != "" {
+		t.Fatalf("archive off: %q %v", plain.ArchiveSlug, err)
+	}
 }

@@ -9,8 +9,8 @@ import (
 
 	"github.com/aws/smithy-go"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/rules"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/rules"
 )
 
 // SentEmail is one recorded send.
@@ -86,6 +86,18 @@ func (f *Fake) SentCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.sent)
+}
+
+// SentPerRecipient is how many copies each address received. A test that restarts a batch uses it to
+// say "nobody got two" instead of trusting the total.
+func (f *Fake) SentPerRecipient() map[string]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	counts := make(map[string]int, len(f.sent))
+	for _, email := range f.sent {
+		counts[email.Email.To]++
+	}
+	return counts
 }
 
 // Send records the email, unless that address was told to fail.

@@ -2,7 +2,7 @@
 // two-period email figures, read out of the store and turned into the shape the CLI prints and the
 // MCP get_stats tool returns.
 //
-// It is a package rather than a function in cmd/mailcheap because there are two callers now (the
+// It is a package rather than a function in cmd/nibwire because there are two callers now (the
 // `stats` command and the tool), and the report is arithmetic on rows: a second copy is how the two
 // would start disagreeing about the same newsletter.
 package statsquery
@@ -11,9 +11,9 @@ import (
 	"context"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/stats"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/stats"
+	"nibwire/internal/store"
 )
 
 // Report is the whole of `stats --json` and of get_stats: the curve, the hourly sends and the
@@ -74,7 +74,7 @@ func Build(ctx context.Context, db *store.DB, newsletter model.Newsletter,
 	// with a minute's slack is not something a TEXT comparison can do (see the store method).
 	leavers := unsubscribes[:0]
 	for _, row := range unsubscribes {
-		if stats.HasLeftInMailcheap(row.UnsubscribedAt, row.CreatedAt) {
+		if stats.HasLeftInNibwire(row.UnsubscribedAt, row.CreatedAt) {
 			leavers = append(leavers, row)
 		}
 	}

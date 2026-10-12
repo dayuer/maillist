@@ -4,13 +4,13 @@ import (
 	"context"
 	"testing"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // settle 不能把还有在途（claimed）消息的 campaign 置成 sent。
 //
 // C2 from the phase 1-3 audit. Another process sending the same campaign — `compose exec` running
-// `mailcheap campaign send` while serve is up, which the design's §5.2 anticipated — holds messages
+// `nibwire campaign send` while serve is up, which the design's §5.2 anticipated — holds messages
 // in claimed. If settle only counts pending it sees nothing left, marks the campaign sent, and the
 // messages the other process puts back are pending on a campaign that is no longer sending: nobody
 // will ever claim them, and the report says the issue went out.

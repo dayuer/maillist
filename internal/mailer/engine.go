@@ -6,18 +6,23 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/aws/smithy-go"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/providers"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/core/validate"
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/store"
+	"nibwire/internal/alerts"
+	"nibwire/internal/core/cleanup"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/providers"
+	"nibwire/internal/core/ratectl"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/core/slug"
+	"nibwire/internal/core/validate"
+	"nibwire/internal/jobs"
+	"nibwire/internal/store"
 )
 
 // releaseTimeout bounds the bookkeeping a stopped batch still owes the database.
@@ -25,12 +30,27 @@ const releaseTimeout = 10 * time.Second
 
 // Config is what the engine needs from internal/config.
 type Config struct {
-	AppURL         string
+	AppURL string
+	// ArchiveHosts is the ARCHIVE_HOSTS value, so the Read-online link points at the newsletter's own
+	// archive domain when it has one (audit F2).
+	ArchiveHosts   string
 	SendingOn      bool
 	SendRatePerSec int
 	Limits         model.Limits
 	// PollInterval is how often Run looks for work.
 	PollInterval time.Duration
+	// SendConcurrency is how many sends may be in flight at once (SEND_CONCURRENCY). One makes the
+	// engine behave exactly as it did before this phase: a single file of messages.
+	SendConcurrency int
+	// RateControl is the controller the quota poller writes readings into and this engine reports
+	// throttles and successes to. It is one object on purpose: the rate the account's quota implies,
+	// the rate a throttle halved and the rate the bucket enforces all have to be the same number
+	// (D8-1, D17). Optional — without it the bucket keeps SendRatePerSec, which is what the tests that
+	// do not care about the rate do.
+	RateControl *ratectl.Controller
+	// Alerts tells the operator what went wrong. It is optional: the CLI builds an engine with no
+	// server behind it, and there is nobody to alert there.
+	Alerts *alerts.Notifier
 }
 
 // BatchResult is what one batch did (upstream sendMessageBatch's result).
@@ -45,6 +65,79 @@ type BatchResult struct {
 
 // Done is how many messages the batch disposed of, one way or another.
 func (r BatchResult) Done() int { return r.Sent + r.Failed + r.Suppressed + r.Skipped }
+
+// SendingRate is how fast this deployment may send and how much of the account's 24-hour allowance is
+// left. `campaign check` prints it, and the estimate it implies, because "queue 200,000 recipients"
+// should not look like the same thing as "queue 200" (D17, D18).
+type SendingRate struct {
+	// PerSecond is the current ceiling, in sends per second.
+	PerSecond float64 `json:"perSecond"`
+	// Remaining24h is what the account has left in its 24-hour window, or ratectl.Unlimited.
+	Remaining24h int `json:"remaining24h"`
+	// Known is false before a quota has been read: PerSecond is then the floor rather than a reading,
+	// and Remaining24h is 0 rather than a promise.
+	Known bool `json:"quotaKnown"`
+}
+
+// Estimate is how long n sends take at this rate.
+func (r SendingRate) Estimate(n int) time.Duration {
+	rate := r.PerSecond
+	if rate <= 0 {
+		rate = 1
+	}
+	return time.Duration(float64(n) / rate * float64(time.Second))
+}
+
+// SendingRate reports the rate and the allowance.
+//
+// Without a controller there is no quota to read — this process paces its sends by the bucket alone —
+// so the ceiling is the bucket's own rate and the allowance is not claimed to be known.
+func (e *Engine) SendingRate() SendingRate {
+	// A nil engine is a server built without a mailer, which is what a tools-only test does: there is
+	// no rate, and asking must not be a nil dereference.
+	if e == nil {
+		return SendingRate{}
+	}
+	if e.control == nil {
+		return SendingRate{PerSecond: e.bucket.Rate()}
+	}
+	_, known := e.control.Quota()
+	return SendingRate{
+		PerSecond:    e.control.Rate(time.Now().UTC()),
+		Remaining24h: e.control.Remaining24h(),
+		Known:        known,
+	}
+}
+
+// sesQuotaRefusal is D18's third ceiling: the account's own 24-hour allowance, which is the one SES
+// enforces and the only one nothing else here can see.
+//
+// It is checked before anything is written, so a step that does not fit is refused whole — no
+// messages, no charge against the day, and the campaign stays where it is. Sending the part that fits
+// would leave the campaign looking half sent with no record of why, and the operator is the one who
+// gets to decide to split a send: that is what --limit is for.
+func (e *Engine) sesQuotaRefusal(n int) string {
+	if e.control == nil {
+		return ""
+	}
+	// An allowance nobody has read is not an allowance of zero. ratectl answers 0 there, and refusing
+	// every send on that number would turn "the quota could not be read" into "the deployment cannot
+	// send at all" — the opposite of what D8-2 chose: one alert and one email per second, slowly,
+	// which is what the rate floor is for.
+	if _, known := e.control.Quota(); !known {
+		return ""
+	}
+	remaining := e.control.Remaining24h()
+	if n <= remaining {
+		return ""
+	}
+	if remaining <= 0 {
+		return fmt.Sprintf("the SES account has no sends left in its 24-hour window and this step is "+
+			"%d: the window opens as the previous day's sends age out", n)
+	}
+	return fmt.Sprintf("the SES account has %d sends left in its 24-hour window and this step is %d: "+
+		"send it in steps of at most %d, or wait for the window to reset", remaining, n, remaining)
+}
 
 // QueueResult is what Queue and QueueStep report back.
 type QueueResult struct {
@@ -79,12 +172,13 @@ func (c Charge) system() bool { return c.CredentialID == "" }
 
 // Engine sends queued messages through a Sender.
 type Engine struct {
-	store  *store.DB
-	sender Sender
-	signer *sign.Signer
-	bucket *Bucket
-	cfg    Config
-	log    *slog.Logger
+	store   *store.DB
+	sender  Sender
+	signer  *sign.Signer
+	bucket  *Bucket
+	control *ratectl.Controller
+	cfg     Config
+	log     *slog.Logger
 }
 
 // NewEngine builds an engine. The bucket is shared by every caller, so the rate is a process-wide
@@ -93,17 +187,38 @@ func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 250 * time.Millisecond
 	}
+	if cfg.SendRatePerSec < 1 {
+		// A bucket with a rate of zero would never hand out a slot. One a second is what an unknown
+		// account gets anyway (D8-2), and the controller corrects it as soon as there is a reading.
+		cfg.SendRatePerSec = 1
+	}
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Engine{
-		store: db, sender: sender, signer: signer,
-		bucket: NewBucket(cfg.SendRatePerSec), cfg: cfg, log: log,
+		store: db, sender: sender, signer: signer, control: cfg.RateControl,
+		bucket: NewBucket(float64(cfg.SendRatePerSec)), cfg: cfg, log: log,
 	}
 }
 
 // Close stops the rate limiter.
 func (e *Engine) Close() { e.bucket.Close() }
+
+// Bucket is the rate limiter. It is what the quota poller moves when the account's numbers change:
+// the controller decides the rate and the bucket enforces it (D8-1).
+func (e *Engine) Bucket() *Bucket { return e.bucket }
+
+// SetQuota applies a reading from SES to the rate.
+//
+// It is what the poller does on each tick, and what a command does once before it drains its own
+// queue: a CLI process has no poller, and a rate it never read is one email a second (D8-2).
+func (e *Engine) SetQuota(quota ratectl.Quota, now time.Time) {
+	if e.control == nil {
+		return
+	}
+	e.control.SetQuota(quota, now)
+	FollowControl(e.control, e.bucket, now)
+}
 
 // SendBatch sends one batch. With no ids it claims up to rules.SendBatchSize messages itself, which
 // is what Run uses; with ids it sends exactly those (the CLI's path).
@@ -150,97 +265,177 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		suppressedSet[email] = true
 	}
 
-	// A campaign that is already over its bounce or complaint limit pauses before anything else goes
-	// out, as upstream does at the top of sendMessageBatch.
+	// Every campaign this call touches settles at the end, so the set spans the chunks.
 	campaigns := map[string]bool{}
-	for _, message := range messages {
-		if message.CampaignID == "" {
-			continue
+	prepare := func(chunk []model.Message) error {
+		// A campaign that is already over its bounce or complaint limit pauses before anything else
+		// goes out, as upstream does at the top of sendMessageBatch.
+		for _, message := range chunk {
+			if message.CampaignID == "" {
+				continue
+			}
+			if _, seen := campaigns[message.CampaignID]; seen {
+				continue
+			}
+			campaigns[message.CampaignID] = true
+			if _, err := e.pauseIfUnhealthy(ctx, message.CampaignID); err != nil {
+				return err
+			}
 		}
-		if _, seen := campaigns[message.CampaignID]; seen {
-			continue
-		}
-		campaigns[message.CampaignID] = true
-		if _, err := e.pauseIfUnhealthy(ctx, message.CampaignID); err != nil {
-			return result, err
+		return nil
+	}
+	if err := prepare(messages); err != nil {
+		// Nothing was handed out, so nothing may stay claimed: left claimed, these would be recovered
+		// as unknown — mail that is neither sent nor going to be (D14).
+		e.releaseAll(ctx, messages)
+		return result, err
+	}
+
+	// claimMore is where the next chunk comes from, or nil when there is nothing more to ask for: the
+	// explicit-ids path has been given exactly what it is to send, and a queue that came back empty
+	// has nothing left.
+	//
+	// Claiming on demand rather than in waves is what keeps the pool busy. A batch that claimed fifty
+	// messages, sent them and only then claimed the next fifty would stand idle for one request
+	// latency at every boundary — at 80 ms a send and 450 a second, that is a fifth of the account's
+	// rate thrown away, and it gets worse the faster the account is.
+	var claimMore func(context.Context) ([]model.Message, error)
+	if len(messageIDs) == 0 {
+		claimMore = func(ctx context.Context) ([]model.Message, error) {
+			return e.store.ClaimMessages(ctx, rules.SendBatchSize)
 		}
 	}
 
-	consecutiveFailures := 0
-	for i, message := range messages {
-		// Whatever stops the batch, the messages it did not reach go back to the queue: left
-		// claimed they would be recovered as unknown on the next start, which means silently
-		// dropping a send (D14).
+	// The batch is a dispatcher and a pool of workers.
+	//
+	// The dispatcher is this goroutine: it hands one message at a time to a worker, collects what comes
+	// back, and decides whether to hand out any more. Every decision that can stop a batch — the
+	// context, a campaign that paused itself, too many failures in a row, a bookkeeping error — is
+	// taken here, in one place, on one goroutine, which is what keeps "stop" from meaning four
+	// different things.
+	//
+	// What was never handed out goes back to the queue: left claimed they would be recovered as
+	// unknown on the next start, which means silently dropping a send (D14). What a worker is holding
+	// is not released — it finishes, because deliver only reports a cancellation from before the
+	// request was made (see deliver).
+	concurrency := e.cfg.SendConcurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > len(messages) {
+		concurrency = len(messages)
+	}
+	jobs := make(chan model.Message)
+	outcomes := make(chan sendOutcome, concurrency)
+	var workers sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for message := range jobs {
+				outcomes <- e.sendOne(ctx, message, suppressedSet)
+			}
+		}()
+	}
+
+	chunk := messages
+	var (
+		next                int
+		outstanding         int
+		stopped             bool
+		firstErr            error
+		consecutiveFailures int
+	)
+	apply := func(out sendOutcome) {
+		if out.sent {
+			result.Sent++
+		}
+		result.Failed += out.failed
+		result.Suppressed += out.suppressed
+		result.Skipped += out.skipped
+		result.Retry = result.Retry || out.retry
+		switch {
+		case out.failed > 0:
+			consecutiveFailures += out.failed
+		case out.sent:
+			consecutiveFailures = 0
+		}
+		if out.err != nil && firstErr == nil {
+			firstErr = out.err
+		}
+		if out.stop {
+			stopped = true
+		}
+		if out.err != nil || (out.failed > 0 && out.campaignID != "" &&
+			consecutiveFailures >= rules.MaxConsecutiveFailures) {
+			stopped = true
+			if out.err == nil {
+				if err := e.pause(ctx, out.campaignID,
+					fmt.Sprintf("%d sends failed in a row", consecutiveFailures)); err != nil {
+					firstErr = err
+				}
+			}
+		}
+	}
+
+	for {
 		if ctx.Err() != nil {
 			result.Retry = true
-			e.releaseAll(ctx, messages[i:])
+			stopped = true
+		}
+		if !stopped && next < len(chunk) {
+			select {
+			case jobs <- chunk[next]:
+				next++
+				outstanding++
+				continue
+			case out := <-outcomes:
+				outstanding--
+				apply(out)
+				continue
+			}
+		}
+		if !stopped && claimMore != nil {
+			// This chunk is exhausted. Claim the next one now, while the workers are still finishing
+			// it: the claim is a write, not a send, and it is the only thing that would otherwise
+			// stand between one chunk and the next.
+			more, err := claimMore(ctx)
+			switch {
+			case err != nil && ctx.Err() != nil:
+				// The claim is where a shutdown that landed between two chunks shows up, and a stop
+				// is not a failure: nothing was claimed and the next run picks up the rest.
+				result.Retry, stopped = true, true
+			case err != nil:
+				firstErr, stopped = err, true
+			case len(more) == 0:
+				claimMore = nil
+			default:
+				// The new chunk becomes the dispatcher's before its preparation runs, so a failure
+				// there leaves it to be released by the same code as any other message the batch
+				// never handed out.
+				chunk, next = more, 0
+				if err := prepare(more); err != nil {
+					firstErr, stopped = err, true
+					break
+				}
+				continue
+			}
+		}
+		if outstanding == 0 {
 			break
 		}
-		loaded, err := e.store.LoadMessageContext(ctx, message)
-		if err != nil {
-			e.releaseAll(ctx, messages[i:])
-			return result, fmt.Errorf("load message %s: %w", message.ID, err)
-		}
-		// The campaign may have been paused or finished since the audience was chosen.
-		if rules.IsCampaignKind(message.Kind) &&
-			(loaded.Campaign == nil || loaded.Campaign.Status != model.CampaignSending) {
-			result.Skipped++
-			if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
-				return result, err
-			}
-			continue
-		}
+		// Nothing more goes out: wait for what is in flight and count it.
+		apply(<-outcomes)
+		outstanding--
+	}
+	close(jobs)
+	workers.Wait()
 
-		required := model.ContactActive
-		if message.Kind == model.KindConfirmation {
-			required = model.ContactPending
-		}
-		if loaded.Contact.Status != required || suppressedSet[message.Email] {
-			if err := e.store.MarkMessageSuppressed(ctx, message.ID); err != nil {
-				return result, err
-			}
-			result.Suppressed++
-			continue
-		}
-
-		delivery, err := e.deliver(ctx, message, loaded, nil)
-		if err != nil {
-			// A cancelled context means we are stopping, not that the message is bad: it never
-			// reached SES, so it goes back to the queue instead of being marked failed.
-			//
-			// Releasing the current message is safe only because deliver cannot report a
-			// cancellation once it has called SES: the call runs on a detached context (see
-			// deliver), so the only cancellation it can surface is the send slot's, from before the
-			// request was made.
-			if ctx.Err() != nil {
-				e.releaseAll(ctx, messages[i:])
-				result.Retry = true
-				return result, nil
-			}
-			outcome, stop := e.handleSendError(ctx, message, loaded, err)
-			result.Failed += outcome.failed
-			result.Retry = result.Retry || outcome.retry
-			if stop {
-				e.releaseAll(ctx, messages[i+1:])
-				break
-			}
-			consecutiveFailures += outcome.failed
-			if outcome.failed > 0 && message.CampaignID != "" &&
-				consecutiveFailures >= rules.MaxConsecutiveFailures {
-				if err := e.pause(ctx, message.CampaignID,
-					fmt.Sprintf("%d sends failed in a row", consecutiveFailures)); err != nil {
-					return result, err
-				}
-				e.releaseAll(ctx, messages[i+1:])
-				break
-			}
-			continue
-		}
-		if err := e.recordSent(ctx, message, loaded, delivery); err != nil {
-			return result, err
-		}
-		result.Sent++
-		consecutiveFailures = 0
+	if next < len(chunk) {
+		e.releaseAll(ctx, chunk[next:])
+	}
+	if firstErr != nil {
+		return result, firstErr
 	}
 
 	// Settling is the last bookkeeping of a batch that may have just been cancelled, so it runs on
@@ -253,6 +448,137 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		}
 	}
 	return result, nil
+}
+
+// sendOutcome is what one worker did with one message. The dispatcher decides what to do with it; the
+// worker only reports.
+type sendOutcome struct {
+	sent       bool
+	skipped    int
+	suppressed int
+	failed     int
+	retry      bool
+	// stop tells the dispatcher to hand out nothing more: this is a condition the next message would
+	// meet too.
+	stop bool
+	// err is a failure of the bookkeeping itself — the batch cannot go on — and campaignID is the
+	// campaign the failure counter belongs to.
+	err        error
+	campaignID string
+}
+
+// sendOne is one message from a claimed batch, all the way to its write-back: the context it needs,
+// whether it may still go out, the send itself, and what became of it.
+//
+// It runs on a worker goroutine, so it may not touch anything the dispatcher owns. Everything it does
+// is either its own memory, a store write, or the sender — all of which are already safe for
+// concurrent use.
+func (e *Engine) sendOne(ctx context.Context, message model.Message,
+	suppressed map[string]bool) sendOutcome {
+	// Anything that leaves this message claimed when the worker returns is a message the next start
+	// recovers as unknown — a silently dropped send (D14). So every failure from here on releases it,
+	// on the detached context the bookkeeping uses, because the usual reason to be on one of these
+	// paths is that the batch's context was just cancelled.
+	abandon := func(err error) sendOutcome {
+		e.releaseAll(ctx, []model.Message{message})
+		if ctx.Err() != nil {
+			// The usual reason to be here is that the batch's context was just cancelled, and a stop
+			// is not a failure: Run's select picks at random between a done context and a ready
+			// ticker, so reporting this as an error would call a graceful shutdown a broken send.
+			return sendOutcome{retry: true, stop: true, campaignID: message.CampaignID}
+		}
+		return sendOutcome{err: err, stop: true, campaignID: message.CampaignID}
+	}
+
+	loaded, err := e.store.LoadMessageContext(ctx, message)
+	if err != nil {
+		return abandon(fmt.Errorf("load message %s: %w", message.ID, err))
+	}
+	// The campaign may have been paused or finished since the audience was chosen.
+	if rules.IsCampaignKind(message.Kind) &&
+		(loaded.Campaign == nil || loaded.Campaign.Status != model.CampaignSending) {
+		if err := e.releaseMessage(ctx, message.ID); err != nil {
+			return abandon(err)
+		}
+		return sendOutcome{skipped: 1}
+	}
+
+	required := model.ContactActive
+	if message.Kind == model.KindConfirmation {
+		required = model.ContactPending
+	}
+	if loaded.Contact.Status != required || suppressed[message.Email] {
+		if err := e.markSuppressed(ctx, message.ID); err != nil {
+			return abandon(err)
+		}
+		return sendOutcome{suppressed: 1}
+	}
+
+	delivery, err := e.deliver(ctx, message, loaded, nil)
+	if err != nil {
+		// A cancelled context means we are stopping, not that the message is bad: it never reached
+		// SES, so it goes back to the queue instead of being marked failed.
+		//
+		// Releasing it is safe only because deliver cannot report a cancellation once it has called
+		// SES: the call runs on a detached context (see deliver), so the only cancellation it can
+		// surface is the send slot's, from before the request was made.
+		if ctx.Err() != nil {
+			e.releaseAll(ctx, []model.Message{message})
+			return sendOutcome{retry: true, stop: true}
+		}
+		outcome, stop := e.handleSendError(ctx, message, loaded, err)
+		return sendOutcome{
+			failed: outcome.failed, retry: outcome.retry, stop: stop, campaignID: message.CampaignID,
+		}
+	}
+	// SES took it: that is the event the rate creeps back up on (D8-1).
+	e.onSuccess()
+	if err := e.recordSent(ctx, message, loaded, delivery); err != nil {
+		// The message went out and its record did not. Releasing it would send it twice, so it stays
+		// claimed: the next start recovers it as unknown, which is "we do not know" and never "send it
+		// again" (D14).
+		return sendOutcome{err: err, stop: true, campaignID: message.CampaignID}
+	}
+	return sendOutcome{sent: true, campaignID: message.CampaignID}
+}
+
+// onThrottle is SES saying "too fast": the rate halves, and the bucket — the only thing that enforces
+// a rate — is told at once. Reporting a lower rate than we were sending at is the whole point of
+// hearing the throttle.
+func (e *Engine) onThrottle() {
+	if e.control == nil {
+		return
+	}
+	now := time.Now().UTC()
+	e.control.OnThrottle(now)
+	FollowControl(e.control, e.bucket, now)
+}
+
+// onSuccess is a send SES accepted. Enough of those and the rate creeps back toward the account's
+// limit — one step per IncreaseEvery, and never past it — which is what keeps a backoff from being
+// permanent.
+func (e *Engine) onSuccess() {
+	if e.control == nil {
+		return
+	}
+	now := time.Now().UTC()
+	e.control.OnSuccess(now)
+	FollowControl(e.control, e.bucket, now)
+}
+
+// releaseMessage, markSuppressed and the counters run on the detached context: they are the
+// bookkeeping of a batch that is stopping, and losing them is what makes a message look unclaimed to
+// the next start rather than merely unrecorded.
+func (e *Engine) releaseMessage(ctx context.Context, id string) error {
+	return e.writeBack(ctx, func(writeCtx context.Context) error {
+		return e.store.ReleaseMessage(writeCtx, id)
+	})
+}
+
+func (e *Engine) markSuppressed(ctx context.Context, id string) error {
+	return e.writeBack(ctx, func(writeCtx context.Context) error {
+		return e.store.MarkMessageSuppressed(writeCtx, id)
+	})
 }
 
 // writeBack runs the bookkeeping a completed SES call owes the database.
@@ -297,27 +623,63 @@ func (e *Engine) handleSendError(ctx context.Context, message model.Message, loa
 	if message.CampaignID != "" {
 		action = rules.SendErrorAction(errorCode(cause), cause.Error())
 	}
+	// Every write below runs on the detached context. We know what became of this message, so the
+	// record of it must not be lost to a shutdown that arrived while it was being written: a message
+	// left claimed is one the next start recovers as unknown, and a pause that was not recorded leaves
+	// a hard-failing campaign looking like it is still sending.
+	write := func(what string, f func(context.Context) error) {
+		if err := e.writeBack(ctx, f); err != nil {
+			e.log.Error(what, "message", message.ID, "error", err)
+		}
+	}
 	switch action {
 	case rules.ErrorFail:
-		if err := e.store.MarkMessageFailed(ctx, message.ID, cause.Error()); err != nil {
-			e.log.Error("mark failed", "message", message.ID, "error", err)
-		}
-		if err := e.addFailedStats(ctx, message, loaded); err != nil {
+		write("mark failed", func(writeCtx context.Context) error {
+			return e.store.MarkMessageFailed(writeCtx, message.ID, cause.Error())
+		})
+		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+			return e.addFailedStats(writeCtx, message, loaded)
+		}); err != nil {
 			e.log.Error("failed stats", "message", message.ID, "error", err)
 		}
 		return errorOutcome{failed: 1}, false
 	case rules.ErrorPause:
-		if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
-			e.log.Error("release", "message", message.ID, "error", err)
+		write("release", func(writeCtx context.Context) error {
+			return e.store.ReleaseMessage(writeCtx, message.ID)
+		})
+		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+			return e.pause(writeCtx, message.CampaignID, cause.Error())
+		}); err != nil {
+			e.log.Error("pause", "campaign", message.CampaignID, "error", err)
 		}
-		if err := e.pause(ctx, message.CampaignID, cause.Error()); err != nil {
+		return errorOutcome{}, true
+	case rules.ErrorThrottle:
+		// The account is being asked for more than its rate. SES accepted nothing and rejected
+		// nothing, so this is neither a sent message nor a failed one: it goes back to the queue, and
+		// the batch stops, because the next message would meet the same wall (D8-3).
+		write("release", func(writeCtx context.Context) error {
+			return e.store.ReleaseMessage(writeCtx, message.ID)
+		})
+		e.onThrottle()
+		return errorOutcome{retry: true}, true
+	case rules.ErrorQuota:
+		// The day's allowance is spent, so no amount of waiting will send this. The message is not a
+		// failed delivery — nothing was wrong with it — so it goes back to the queue and the campaign
+		// pauses with a reason the operator can act on. Resuming after the allowance resets sends the
+		// rest.
+		write("release", func(writeCtx context.Context) error {
+			return e.store.ReleaseMessage(writeCtx, message.ID)
+		})
+		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+			return e.pause(writeCtx, message.CampaignID, rules.QuotaPauseReason)
+		}); err != nil {
 			e.log.Error("pause", "campaign", message.CampaignID, "error", err)
 		}
 		return errorOutcome{}, true
 	default: // retry
-		if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
-			e.log.Error("release", "message", message.ID, "error", err)
-		}
+		write("release", func(writeCtx context.Context) error {
+			return e.store.ReleaseMessage(writeCtx, message.ID)
+		})
 		return errorOutcome{retry: true}, true
 	}
 }
@@ -339,12 +701,13 @@ func (e *Engine) deliver(ctx context.Context, message model.Message, loaded stor
 	now := time.Now().UTC()
 	reference := sign.Ref{ContactID: loaded.Contact.ID, NewsletterID: loaded.Newsletter.ID}
 	input := rules.RecipientInput{
-		AppURL:     e.cfg.AppURL,
-		Campaign:   content,
-		Newsletter: loaded.Newsletter,
-		Contact:    loaded.Contact,
-		MessageID:  message.ID,
-		Kind:       message.Kind,
+		AppURL:       e.cfg.AppURL,
+		ArchiveHosts: e.cfg.ArchiveHosts,
+		Campaign:     content,
+		Newsletter:   loaded.Newsletter,
+		Contact:      loaded.Contact,
+		MessageID:    message.ID,
+		Kind:         message.Kind,
 	}
 	// Confirmation and last-chance links have to work, so those emails go out untracked.
 	if rules.Untracked(message.Kind) {
@@ -419,8 +782,13 @@ func (e *Engine) contentFor(message model.Message, loaded store.MessageContext,
 			PreviewText: confirmation.PreviewText, Body: confirmation.Markdown,
 		}, nil
 	case model.KindLastChance:
-		// The last-chance email belongs to the list cleanup, which arrives in phase 7.
-		return model.Campaign{}, errors.New("last-chance emails are not implemented yet")
+		// The last-chance email is the list cleanup's: one question and one button, for a contact who
+		// has ignored the last few issues (core/cleanup).
+		content := cleanup.LastChanceContent(loaded.Newsletter)
+		return model.Campaign{
+			Format: model.FormatMarkdown, Subject: content.Subject,
+			PreviewText: content.PreviewText, Body: content.Markdown,
+		}, nil
 	default:
 		if loaded.Campaign == nil {
 			return model.Campaign{}, fmt.Errorf("message %s has no campaign", message.ID)
@@ -479,6 +847,12 @@ func (e *Engine) pause(ctx context.Context, campaignID, reason string) error {
 	}
 	if moved {
 		e.log.Warn("campaign paused", "campaign", campaignID, "reason", reason)
+		// A pause is the one thing an operator may need to act on within the hour, so its cooldown is a
+		// minute rather than the usual one (upstream pauseCampaign).
+		e.cfg.Alerts.Send(ctx, alerts.Alert{
+			Key: "campaign-paused-" + campaignID, Title: "Campaign paused",
+			Detail: reason, Cooldown: time.Minute,
+		})
 	}
 	return nil
 }
@@ -509,12 +883,10 @@ func (e *Engine) settle(ctx context.Context, campaignID string) error {
 	if paused, err := e.pauseIfUnhealthy(ctx, campaignID); err != nil || paused {
 		return err
 	}
-	unfinished, err := e.store.CountUnfinishedCampaignMessages(ctx, campaignID)
-	if err != nil || unfinished > 0 {
-		return err
-	}
-	moved, err := e.store.SetCampaignStatus(ctx, campaignID,
-		[]model.CampaignStatus{model.CampaignSending}, model.CampaignSent)
+	// Reading "is anything unfinished" and moving the campaign are one statement in the store: two of
+	// them leave a window in which another process releases or claims a message, and the campaign ends
+	// up sent with work still pending under it (audit M1, phase 9 #35).
+	moved, err := e.store.SettleCampaign(ctx, campaignID)
 	if err != nil || !moved {
 		return err
 	}
@@ -539,9 +911,11 @@ func (e *Engine) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		// With sending off there is nothing to do, and that is a setting, not a failure: returning
-		// the error would take the HTTP server down with the sender, and a fresh deployment starts
-		// with sending off on purpose.
+		// Sending off is a setting, not a failure: SendBatch refuses so that a caller asking to send
+		// hears why, but this loop just idles. Returning that refusal would make serve stop the
+		// archive, the unsubscribe links and MCP along with it — this process still serves readers,
+		// runs the scheduler and answers the admin surface, and any supervisor would restart a
+		// non-zero exit forever.
 		if !e.cfg.SendingOn {
 			continue
 		}
@@ -591,39 +965,102 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		if recipients+lastChance == 0 {
 			return QueueResult{Reason: "No active contacts to send to"}, nil
 		}
+		// The audience was chosen and the day reserved when this campaign first started, so neither of
+		// those is decided again — but the account's own allowance has moved since, and resuming on a
+		// spent one would only produce a batch of throttles.
+		//
+		// What the resume spends is what is still queued, not the whole list: asking for the rest of a
+		// campaign that has fifty messages left would refuse a resume that fits.
+		unfinished, err := e.store.CountUnfinishedCampaignMessages(ctx, campaignID)
+		if err != nil {
+			return QueueResult{}, err
+		}
+		if refusal := e.sesQuotaRefusal(unfinished); refusal != "" {
+			return QueueResult{Reason: refusal}, nil
+		}
+		// And if the campaign was reserved on an earlier day, today's ledger has never seen these
+		// messages: charge today for what is left, in one transaction with the record that it did, or
+		// refuse the step whole. Without this a campaign queued yesterday and resumed today would
+		// spend today's allowance while today's ledger stayed empty, and MAX_SENDS_PER_DAY — the whole
+		// of a managed deployment's quota split — would be no limit at all.
+		day := store.Day(time.Now())
+		if campaign.ReservedDay != day {
+			// A day later: nothing about these messages has reached today's ledger. Charge today for
+			// what is left, in one transaction with the record that it happened, or refuse the step
+			// whole. (Same day, the Queue that started this campaign paid, and charging again would
+			// double-count.)
+			pool, credentialMax, err := e.resolveCharge(ctx, charge)
+			if err != nil {
+				return QueueResult{}, err
+			}
+			fits, err := e.store.ReserveForResume(ctx, day, pool, campaignID, unfinished,
+				e.cfg.Limits.MaxSendsPerDay, credentialMax)
+			if err != nil {
+				return QueueResult{}, err
+			}
+			if !fits {
+				return QueueResult{Reason: e.budgetReason(ctx, day, pool, unfinished,
+					e.cfg.Limits.MaxSendsPerDay, credentialMax)}, nil
+			}
+		}
 	} else {
-		audience, err := e.store.SelectAudience(ctx, campaign.NewsletterID, campaign.AudienceLimit)
+		// The archive page's address is decided as the issue goes out (upstream assignArchiveSlug), so
+		// the page exists before the first email links to it.
+		if err := e.assignArchiveSlug(ctx, &campaign, newsletter); err != nil {
+			return QueueResult{}, err
+		}
+
+		// With the list cleanup on, the audience limit counts issue recipients only and is applied
+		// while the audience is walked (core/cleanup.SplitAudience), so the query must return the
+		// whole list and let the walk stop where the limit is.
+		selectLimit := campaign.AudienceLimit
+		if cleanup.SettingsOf(newsletter).Enabled {
+			selectLimit = 0
+		}
+		audience, err := e.store.SelectAudience(ctx, campaign.NewsletterID, selectLimit)
 		if err != nil {
 			return QueueResult{}, err
 		}
 		if len(audience) == 0 {
 			return QueueResult{Reason: "No active contacts to send to"}, nil
 		}
+		previous, err := e.store.ReachedContacts(ctx, campaign.ID)
+		if err != nil {
+			return QueueResult{}, err
+		}
+		messages, err := e.stepMessages(ctx, campaign, newsletter, audience, previous)
+		if err != nil {
+			return QueueResult{}, err
+		}
 
 		// D15: the whole step is reserved up front, so two campaigns cannot overshoot the day
 		// together — and in the same transaction as the first chunk of messages, so a crash cannot
-		// spend the day on mail that was never written.
+		// spend the day on mail that was never written. A last-chance email is one of those sends: it
+		// costs the same quota, so it is reserved the same way.
 		day := store.Day(time.Now())
 		pool, credentialMax, err := e.resolveCharge(ctx, charge)
 		if err != nil {
 			return QueueResult{}, err
 		}
-		messages := toMessages(campaign, audience)
-		fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
+		if len(messages) == 0 {
+			return QueueResult{Reason: "No active contacts to send to"}, nil
+		}
+		// Checked before the day is charged: a step the account cannot send must not spend the
+		// deployment's own budget either, or a refused send would keep the next one from going out.
+		if refusal := e.sesQuotaRefusal(len(messages)); refusal != "" {
+			return QueueResult{Reason: refusal}, nil
+		}
+		// The reservation and every message of the step are written together, so there is nothing left
+		// to write here and nothing to refund if the process dies: either the step is in and paid for,
+		// or it is not there at all (audit M5, phase 9 #38).
+		fits, _, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
 			e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
 		if err != nil {
 			return QueueResult{}, err
 		}
 		if !fits {
-			return QueueResult{Reason: e.budgetReason(ctx, day, len(messages), e.cfg.Limits.MaxSendsPerDay, credentialMax)}, nil
-		}
-		if inserted < len(messages) {
-			written, err := e.store.InsertMessages(ctx, messages[inserted:])
-			if err != nil {
-				// The rest never got written, so the day must not stay charged for it.
-				e.refund(ctx, day, pool, len(messages)-inserted-written)
-				return QueueResult{}, err
-			}
+			return QueueResult{Reason: e.budgetReason(ctx, day, pool, len(messages), e.cfg.Limits.MaxSendsPerDay,
+				credentialMax)}, nil
 		}
 		if recipients, lastChance, err = e.store.CountCampaignMessages(ctx, campaignID); err != nil {
 			return QueueResult{}, err
@@ -650,6 +1087,80 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		return QueueResult{}, err
 	}
 	return QueueResult{Recipients: recipients, LastChance: lastChance, Queued: true}, nil
+}
+
+// assignArchiveSlug gives an issue the address its archive page will live at, unless it already has
+// one. Upstream does this when the issue goes out (lib/archive-slugs.js): the address comes from the
+// subject as it reads now, and the page therefore exists before the first email points at it.
+//
+// A newsletter with no archive is left alone — a slug it will never serve is just a field that looks
+// meaningful. The slugify fallback is "issue", so a campaign whose subject is punctuation still has a
+// page rather than an empty address.
+func (e *Engine) assignArchiveSlug(ctx context.Context, campaign *model.Campaign,
+	newsletter model.Newsletter) error {
+	if !newsletter.ArchiveEnabled || campaign.ArchiveSlug != "" {
+		return nil
+	}
+	slug := slug.Slug(campaign.Subject, 80)
+	if slug == "" {
+		slug = "issue"
+	}
+	unique, err := e.store.UniqueArchiveSlug(ctx, slug)
+	if err != nil {
+		return err
+	}
+	if err := e.store.SetCampaignArchiveSlug(ctx, campaign.ID, unique); err != nil {
+		return err
+	}
+	campaign.ArchiveSlug = unique
+	return nil
+}
+
+// stepMessages is one step's messages: the issue for most of the audience, the last-chance email for
+// the contacts the list cleanup calls cold, and nothing for the ones who are waiting on that email or
+// have already gone dormant.
+//
+// previous is what this campaign already sent each contact, which is what stops a resume or a later
+// step from writing the same message twice. The contacts the split puts to sleep are marked dormant
+// here, and counted so the campaign's report says how many left the list quietly.
+func (e *Engine) stepMessages(ctx context.Context, campaign model.Campaign, newsletter model.Newsletter,
+	audience []model.Contact, previous map[string]model.MessageKind) ([]model.Message, error) {
+	settings := cleanup.SettingsOf(newsletter)
+	if !settings.Enabled {
+		return toMessages(campaign, audience), nil
+	}
+	split := cleanup.SplitAudience(audience, cleanup.SplitInput{
+		Settings: settings, Limit: campaign.AudienceLimit, Previous: previous, Now: time.Now().UTC(),
+	})
+	if len(split.Dormant) > 0 {
+		dormant := make([]string, 0, len(split.Dormant))
+		for _, contact := range split.Dormant {
+			dormant = append(dormant, contact.ID)
+		}
+		// A sign of life since the list was read leaves the contact alone, so the number that moved is
+		// the one that counts — upstream reads modifiedCount for the same reason.
+		moved, err := e.store.MakeDormant(ctx, dormant)
+		if err != nil {
+			return nil, err
+		}
+		if moved > 0 {
+			if err := e.store.AddLastChanceStats(ctx, campaign.ID,
+				store.LastChanceCounters{Dormant: moved}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	messages := toMessages(campaign, split.Issue)
+	for _, contact := range split.LastChance {
+		messages = append(messages, model.Message{
+			ID: ids.New(), Kind: model.KindLastChance,
+			CampaignID: campaign.ID, NewsletterID: campaign.NewsletterID,
+			ContactID: contact.ID, Email: contact.Email,
+			Provider: providers.Mailbox(contact.Email),
+			Status:   model.MessagePending, CreatedAt: time.Now().UTC(),
+		})
+	}
+	return messages, nil
 }
 
 // QueueStep is upstream sendToMoreContacts: a sent campaign goes to the next most engaged slice. It
@@ -702,21 +1213,24 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 	if err != nil {
 		return QueueResult{}, err
 	}
-	messages := toMessages(campaign, fresh)
-	fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
+	// The fresh ones are the ones this step has not reached, so there is no "already got it" to
+	// consult: the split judges each of them on their own.
+	messages, err := e.stepMessages(ctx, campaign, newsletter, fresh, nil)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	if refusal := e.sesQuotaRefusal(len(messages)); refusal != "" {
+		return QueueResult{Reason: refusal}, nil
+	}
+	// As above: the whole step and its reservation are one write.
+	fits, _, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
 		e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
 	if err != nil {
 		return QueueResult{}, err
 	}
 	if !fits {
-		return QueueResult{Reason: e.budgetReason(ctx, day, len(messages), e.cfg.Limits.MaxSendsPerDay, credentialMax)}, nil
-	}
-	if inserted < len(messages) {
-		written, err := e.store.InsertMessages(ctx, messages[inserted:])
-		if err != nil {
-			e.refund(ctx, day, pool, len(messages)-inserted-written)
-			return QueueResult{}, err
-		}
+		return QueueResult{Reason: e.budgetReason(ctx, day, pool, len(messages), e.cfg.Limits.MaxSendsPerDay,
+			credentialMax)}, nil
 	}
 	recipients, lastChance, err := e.store.CountCampaignMessages(ctx, campaignID)
 	if err != nil {
@@ -813,18 +1327,6 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 // deliver), so it needs a deadline of its own or a hung connection would hold the shutdown open.
 const sendTimeout = 30 * time.Second
 
-// refund gives a day's budget back for messages that were charged for and never written. It is
-// best-effort by design: the campaign is not queued either way, and the operator's next attempt
-// reports the budget it actually finds.
-func (e *Engine) refund(ctx context.Context, day, pool string, n int) {
-	if n <= 0 {
-		return
-	}
-	if err := e.store.Refund(ctx, day, pool, n); err != nil {
-		e.log.Error("refund the day's budget", "day", day, "messages", n, "error", err)
-	}
-}
-
 // resolveCharge turns a charge into the pool a step reserves against and the ceiling that sits under
 // the global one: the credential's own daily_budget, or 0 when the charge is the system pool.
 //
@@ -846,23 +1348,31 @@ func (e *Engine) resolveCharge(ctx context.Context, charge Charge) (pool string,
 	return credential.ID, credential.DailyBudget, nil
 }
 
-// budgetReason says which ceiling a step ran into.
+// budgetReason says which ceiling a step ran into, and how much room is left under it.
 //
 // Both are checked before anything is written, and the global one first, so on the refusal path the
 // engine asks which of them the day has actually reached. "MAX_SENDS_PER_DAY" and "this credential's
-// daily_budget" are different answers to whoever reads the job's last_error, and guessing wrong
-// sends them looking at the wrong number.
-func (e *Engine) budgetReason(ctx context.Context, day string, messages, globalMax, credentialMax int) string {
+// daily_budget" are different answers to whoever reads the job's last_error, and guessing wrong sends
+// them looking at the wrong number — but the number they need to act on is the room that is left, not
+// the ceiling's name. That is what tells them to wait for tomorrow or to send a smaller step.
+func (e *Engine) budgetReason(ctx context.Context, day, pool string, messages, globalMax,
+	credentialMax int) string {
 	if globalMax > 0 {
 		if reserved, err := e.store.Reserved(ctx, day, ""); err == nil && reserved+messages > globalMax {
-			return fmt.Sprintf(
-				"the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", messages)
+			return fmt.Sprintf("the daily send budget is spent: %d of MAX_SENDS_PER_DAY are already "+
+				"reserved, so there is room for %d more today and this step is %d",
+				reserved, max(globalMax-reserved, 0), messages)
 		}
 	}
 	if credentialMax > 0 {
-		return fmt.Sprintf(
-			"the daily send budget is spent: %d messages would go over this credential's daily_budget of %d",
-			messages, credentialMax)
+		spent, err := e.store.Reserved(ctx, day, pool)
+		if err == nil {
+			return fmt.Sprintf("this credential's daily_budget is %d and %d of it is already reserved "+
+				"today, so there is room for %d more and this step is %d",
+				credentialMax, spent, max(credentialMax-spent, 0), messages)
+		}
+		return fmt.Sprintf("this credential's daily_budget of %d is smaller than this step of %d",
+			credentialMax, messages)
 	}
 	return fmt.Sprintf("the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", messages)
 }
@@ -898,13 +1408,13 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 		charge := Charge{CredentialID: payload.CredentialID}
 		if payload.Additional > 0 {
 			result, err := e.QueueStep(ctx, payload.CampaignID, payload.Additional, charge)
-			return nothingToSend(result, err)
+			return e.sendJobFailed(ctx, job, payload.CampaignID, nothingToSend(result, err))
 		}
 		if skip, err := e.scheduledSendIsStale(ctx, payload.CampaignID, payload.ScheduledAt); err != nil || skip {
-			return err
+			return e.sendJobFailed(ctx, job, payload.CampaignID, err)
 		}
 		result, err := e.Queue(ctx, payload.CampaignID, charge)
-		return nothingToSend(result, err)
+		return e.sendJobFailed(ctx, job, payload.CampaignID, nothingToSend(result, err))
 	case jobs.KindSendWelcome:
 		var payload struct {
 			NewsletterID string `json:"newsletterId"`
@@ -926,6 +1436,26 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 	default:
 		return fmt.Errorf("unknown job kind %q", job.Kind)
 	}
+}
+
+// sendJobFailed alerts when a send job has run out of attempts: nothing will retry it, and a campaign
+// that never went out is exactly what an operator has to hear about (upstream alerts when a scheduled
+// send fails to start, and this is the same moment reached from the other end).
+func (e *Engine) sendJobFailed(ctx context.Context, job jobs.Job, campaignID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	// Attempts is how many tries this job has already had; the scheduler counts this one after it
+	// records the failure, so the last try is the one where job.Attempts is already at the limit.
+	if job.Attempts+1 >= jobs.MaxAttempts() {
+		e.cfg.Alerts.Send(ctx, alerts.Alert{
+			Key: "send-job-" + campaignID, Title: "A send stopped",
+			Detail: fmt.Sprintf("%s on campaign %s gave up after %d attempts. %s",
+				job.Kind, campaignID, job.Attempts+1, err),
+			Cooldown: time.Minute,
+		})
+	}
+	return err
 }
 
 // nothingToSend turns a refusal that is not an error into one, so the job fails with the reason
@@ -1067,6 +1597,12 @@ func (e *Engine) queueSignup(ctx context.Context, newsletter model.Newsletter, c
 	if !inserted {
 		e.log.Warn("signup emails capped", "newsletter", newsletter.Slug,
 			"limit", e.cfg.Limits.WelcomeEmailsPer10Minute)
+		e.cfg.Alerts.Send(ctx, alerts.Alert{
+			Key: "welcome-cap:" + newsletter.Slug, Title: "Signup emails capped",
+			Detail: fmt.Sprintf("Over %d welcome and confirmation emails for %s in 10 minutes. "+
+				"New signups get none until it slows down.",
+				e.cfg.Limits.WelcomeEmailsPer10Minute, newsletter.Name),
+		})
 		return SignupResult{Skipped: "rate limited"}, nil
 	}
 	if _, err := e.SendBatch(ctx, []string{message.ID}); err != nil {

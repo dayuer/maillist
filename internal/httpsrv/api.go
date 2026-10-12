@@ -3,20 +3,22 @@ package httpsrv
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
-	"mailcheap/internal/audit"
-	"mailcheap/internal/core/archive"
-	"mailcheap/internal/core/content"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/validate"
-	"mailcheap/internal/creds"
-	"mailcheap/internal/store"
+	"nibwire/internal/alerts"
+	"nibwire/internal/audit"
+	"nibwire/internal/core/archive"
+	"nibwire/internal/core/content"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/validate"
+	"nibwire/internal/creds"
+	"nibwire/internal/store"
 )
 
 // The v1 API is the second way in, after the CLI (design §11): an `api` credential, checked per
@@ -140,9 +142,16 @@ func (s *Server) handleAPIContactsPost(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.clock()
 	if s.Limiter.Limited(contactsPerKeyLimit, credential.ID, now) {
-		// The alert email of the original is phase 7's; the log line is what this phase can promise.
-		s.Log.Warn("API signups paused: over the hourly key limit",
-			"credential", credential.Name, "limit", contactsPerKeyLimit.Count)
+		// A leaked key, or a site without its own limit, can fill the list — and every signup can send
+		// a welcome email, so the ceiling is low and hitting it stops the key until it slows down. The
+		// operator has to hear about it: if it is not their site, the key is somebody else's.
+		s.Alerts.Send(r.Context(), alerts.Alert{
+			Key: "api-signup-flood:" + credential.ID, Title: "API signups paused",
+			Detail: fmt.Sprintf("The %q key sent over %d signups in an hour. New ones are refused "+
+				"until it slows down. If that isn't your site, revoke it: "+
+				"nibwire credentials revoke %s",
+				credential.Name, contactsPerKeyLimit.Count, credential.Name),
+		})
 		apiError(w, http.StatusTooManyRequests, "Too many signups, try again later")
 		return
 	}
@@ -376,6 +385,13 @@ func (s *Server) handleAPICampaignsPost(w http.ResponseWriter, r *http.Request) 
 	}
 	if len(body) > validate.MaxBodyBytes {
 		apiError(w, http.StatusBadRequest, "body must be at most 100 KB")
+		return
+	}
+	// The same gate the CLI and MCP apply (core/content): a body that cannot be rendered in a second
+	// is refused rather than stored, because storing it commits every reader of its page, and every
+	// recipient of its email, to rendering it again.
+	if err := content.CheckRenderable(format, body); err != nil {
+		apiError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	archiveSlugField, archiveSlugIsString := asString(fields["archiveSlug"])

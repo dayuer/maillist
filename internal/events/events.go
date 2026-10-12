@@ -8,13 +8,15 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/core/sesmap"
-	"mailcheap/internal/store"
+	"nibwire/internal/alerts"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/core/sesmap"
+	"nibwire/internal/store"
 )
 
 // recordedTypes are the events worth a row: every send produces a delivery, and storing those would
@@ -28,6 +30,9 @@ var recordedTypes = map[sesmap.EventType]bool{
 type Handler struct {
 	store *store.DB
 	log   *slog.Logger
+	// alerts tells the operator about a spam complaint, which is the one SES event that is somebody's
+	// opinion of the newsletter rather than a fact about the delivery.
+	alerts *alerts.Notifier
 }
 
 // New returns a Handler over db.
@@ -36,6 +41,12 @@ func New(db *store.DB, log *slog.Logger) *Handler {
 		log = slog.Default()
 	}
 	return &Handler{store: db, log: log}
+}
+
+// WithAlerts gives the handler somewhere to send its alerts.
+func (h *Handler) WithAlerts(notifier *alerts.Notifier) *Handler {
+	h.alerts = notifier
+	return h
 }
 
 // Applied is what one event did.
@@ -86,7 +97,7 @@ func (h *Handler) ApplyEvent(ctx context.Context, raw json.RawMessage, now time.
 	return applied, nil
 }
 
-// ApplyTracking applies an open or a click from Mailcheap's own pixel and links.
+// ApplyTracking applies an open or a click from Nibwire's own pixel and links.
 func (h *Handler) ApplyTracking(ctx context.Context, messageID string, eventType sesmap.EventType,
 	userAgent string, now time.Time) (bool, error) {
 	message, err := h.store.Message(ctx, messageID)
@@ -99,8 +110,15 @@ func (h *Handler) ApplyTracking(ctx context.Context, messageID string, eventType
 	if eventType == sesmap.EventClick && render.IsLikelyScanner(userAgent, message.SentAt, now) {
 		return false, nil
 	}
-	if err := h.apply(ctx, message, sesmap.TrackingPlan(eventType, now)); err != nil {
+	plan := sesmap.TrackingPlan(eventType, now)
+	if err := h.apply(ctx, message, plan); err != nil {
 		return false, err
+	}
+	if plan.SuppressAs == model.SuppressComplaint && len(plan.Suppress) > 0 {
+		h.alerts.Send(ctx, alerts.Alert{
+			Key: "complaints", Title: "Spam complaint",
+			Detail: strings.Join(plan.Suppress, ", ") + " marked an email as spam. They are suppressed.",
+		})
 	}
 	return true, nil
 }

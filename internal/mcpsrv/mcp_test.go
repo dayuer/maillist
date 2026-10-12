@@ -12,14 +12,15 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"mailcheap/internal/config"
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/creds"
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/store"
+	"nibwire/internal/config"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/ratectl"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/creds"
+	"nibwire/internal/jobs"
+	"nibwire/internal/mailer"
+	"nibwire/internal/store"
 )
 
 // fixture is a deployment an agent can be pointed at: a database, a fake sender, a queue and one
@@ -31,6 +32,9 @@ type fixture struct {
 	fake   *mailer.Fake
 	engine *mailer.Engine
 	token  string
+	// control is the engine's rate controller, which is how a test pretends the account is out of
+	// allowance.
+	control *ratectl.Controller
 }
 
 // newFixture builds a deployment with a credential holding every scope and no budget of its own.
@@ -55,7 +59,7 @@ func newFixtureFull(t *testing.T, scopes []creds.Scope, budget int) *fixture {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := store.Open(ctx, filepath.Join(dir, "mailcheap.db"))
+	db, err := store.Open(ctx, filepath.Join(dir, "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,9 +79,13 @@ func newFixtureFull(t *testing.T, scopes []creds.Scope, budget int) *fixture {
 		BounceRate: 0.02, ComplaintRate: 0.0008, MaxEmailBytes: 100_000,
 		SendRatePerSecond: 1000, WelcomeEmailsPer10Minute: 100, MaxSendsPerDay: 50_000,
 	}
+	// A reading the send tools can work with, so that the tests which have nothing to say about the
+	// account's allowance are not refused by it. The tests that do say something set their own.
+	control := ratectl.New(ratectl.Config{Headroom: 0.9})
+	control.SetQuota(ratectl.Quota{MaxSendRate: 1000, Max24HourSend: -1}, time.Now().UTC())
 	engine := mailer.NewEngine(db, fake, signer, mailer.Config{
 		AppURL: "https://mail.example.com", SendingOn: true, SendRatePerSec: 1000,
-		Limits: limits, PollInterval: 10 * time.Millisecond,
+		Limits: limits, PollInterval: 10 * time.Millisecond, RateControl: control,
 	}, slog.Default())
 	t.Cleanup(engine.Close)
 
@@ -104,7 +112,34 @@ func newFixtureFull(t *testing.T, scopes []creds.Scope, budget int) *fixture {
 			Identities: mailer.StaticIdentity{Domains: []string{"example.net"}},
 			Log:        slog.Default(), Version: "test",
 		},
-		store: db, fake: fake, engine: engine, token: token,
+		store: db, fake: fake, engine: engine, token: token, control: control,
+	}
+}
+
+// seedQueuedMessages writes the messages a campaign would have been given when it first started, with
+// the deployment's own pool rather than this credential's. It is how a test reaches the state
+// "queued, then paused" without going through a send.
+func (f *fixture) seedQueuedMessages(t *testing.T, campaign model.Campaign, newsletter model.Newsletter,
+	contacts int) {
+	t.Helper()
+	ctx := context.Background()
+	audience, err := f.store.SelectAudience(ctx, newsletter.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audience) < contacts {
+		t.Fatalf("the audience has %d contacts, want at least %d", len(audience), contacts)
+	}
+	messages := make([]model.Message, 0, contacts)
+	for _, contact := range audience[:contacts] {
+		messages = append(messages, model.Message{
+			ID: ids.New(), Kind: model.KindCampaign, CampaignID: campaign.ID,
+			NewsletterID: newsletter.ID, ContactID: contact.ID, Email: contact.Email,
+			Status: model.MessagePending, CreatedAt: time.Now().UTC(),
+		})
+	}
+	if _, err := f.store.InsertMessages(ctx, messages); err != nil {
+		t.Fatal(err)
 	}
 }
 

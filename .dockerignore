@@ -7,7 +7,6 @@ third_party
 docs
 deploy
 *.md
-NOTICE
 testdata
 **/testdata
 **/*_test.go

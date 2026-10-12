@@ -8,17 +8,18 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/checks"
-	"mailcheap/internal/core/content"
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/importer"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/schedule"
-	"mailcheap/internal/core/validate"
-	"mailcheap/internal/importsvc"
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/store"
-	"mailcheap/internal/uploads"
+	"nibwire/internal/core/checks"
+	"nibwire/internal/core/cleanup"
+	"nibwire/internal/core/content"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/importer"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/schedule"
+	"nibwire/internal/core/validate"
+	"nibwire/internal/importsvc"
+	"nibwire/internal/jobs"
+	"nibwire/internal/store"
+	"nibwire/internal/uploads"
 )
 
 // The write tools (design §9). Every one of them records what it did, with the credential's name as
@@ -178,6 +179,11 @@ func createCampaign(ctx context.Context, sess *session, credential store.Credent
 	if len(body) > validate.MaxBodyBytes {
 		return campaignOut{}, fmt.Errorf("the body is %d bytes; the limit is %d", len(body), validate.MaxBodyBytes)
 	}
+	// A body the archive page or the emails cannot render in a second is refused here, at the door:
+	// once it is stored, every reader and every recipient pays for it again.
+	if err := content.CheckRenderable(format, body); err != nil {
+		return campaignOut{}, err
+	}
 	archiveSlug := strings.TrimSpace(in.ArchiveSlug)
 	if archiveSlug != "" && !sluggable(archiveSlug) {
 		return campaignOut{}, errors.New(
@@ -245,6 +251,9 @@ func updateCampaign(ctx context.Context, sess *session, credential store.Credent
 		}
 		if len(body) > validate.MaxBodyBytes {
 			return campaignOut{}, fmt.Errorf("the body is %d bytes; the limit is %d", len(body), validate.MaxBodyBytes)
+		}
+		if err := content.CheckRenderable(format, body); err != nil {
+			return campaignOut{}, err
 		}
 		campaign.Format, campaign.Body = format, body
 		campaign.ThumbnailURL = firstImage(format, body)
@@ -319,6 +328,11 @@ func sendTest(ctx context.Context, sess *session, credential store.Credential, i
 	}
 	result, err := sess.deps.Mailer.Test(ctx, campaign.ID, in.To)
 	if err != nil {
+		// Nothing was sent, so the day must not stay charged for it — the engine refunds a step the
+		// same way when messages it had reserved could not be written.
+		if refundErr := sess.deps.Store.Refund(ctx, store.Day(time.Now()), credential.ID, 1); refundErr != nil {
+			sess.deps.Log.Error("refund the test send", "credential", credential.ID, "error", refundErr)
+		}
 		return sendTestOut{}, err
 	}
 	sess.note(ctx, credential, "campaign.test", campaign.ID, map[string]any{
@@ -344,7 +358,11 @@ type sendOut struct {
 // scheduler picks up, and the campaign's own status is what says how far it got.
 //
 // There is no force argument, and there cannot be one: the checks run here are the same ones the
-// engine enforces, and a blocking one ends the call (design §11, layer 0).
+// engine enforces, and a blocking one ends the call (design §11, layer 0). The same goes for the
+// status itself: without a limit this is a fresh send, which the engine's Queue only starts from
+// draft, scheduled or paused, and with one it is a stepped send (QueueStep), which only continues a
+// campaign that has gone out. Refusing here is what the CLI gets from the engine synchronously —
+// and it leaves no job and no audit row, because nothing was sent.
 func sendCampaign(ctx context.Context, sess *session, credential store.Credential, in sendCampaignIn) (sendOut, error) {
 	if in.Limit < 0 {
 		return sendOut{}, errors.New("limit cannot be negative")
@@ -352,6 +370,15 @@ func sendCampaign(ctx context.Context, sess *session, credential store.Credentia
 	campaign, err := campaignByRef(ctx, sess.deps.Store, in.Campaign)
 	if err != nil {
 		return sendOut{}, err
+	}
+	if in.Limit > 0 {
+		if campaign.Status != model.CampaignSent {
+			return sendOut{}, fmt.Errorf(
+				"the campaign is %s: only a sent one can be sent in steps", campaign.Status)
+		}
+	} else if !campaign.Status.Queueable() {
+		return sendOut{}, fmt.Errorf(
+			"the campaign is %s: only a draft, scheduled or paused one can be sent", campaign.Status)
 	}
 	if err := sess.checkCampaignIsSendable(ctx, campaign); err != nil {
 		return sendOut{}, err
@@ -719,12 +746,12 @@ func (s *session) requireASender() error {
 	if running {
 		return nil
 	}
-	return errors.New("no mailcheap serve process is running, so nothing would send this. " +
-		"Start the server (mailcheap serve, or the container), then send again")
+	return errors.New("no nibwire serve process is running, so nothing would send this. " +
+		"Start the server (nibwire serve, or the container), then send again")
 }
 
 // checkCampaignIsSendable runs the pre-send checklist and stops on a blocking failure. It is the
-// same list `mailcheap campaign check` prints and the same one the engine enforces, so a tool call
+// same list `nibwire campaign check` prints and the same one the engine enforces, so a tool call
 // cannot get past a check the CLI would have stopped at.
 func (s *session) checkCampaignIsSendable(ctx context.Context, campaign model.Campaign) error {
 	if !s.deps.Config.SendingOn {
@@ -741,8 +768,8 @@ func (s *session) checkCampaignIsSendable(ctx context.Context, campaign model.Ca
 }
 
 // checkBudget answers "would this fit" before the job is queued, so an agent learns immediately
-// rather than through a job's last_error. Both ceilings are checked, the day's global one and the
-// credential's own.
+// rather than through a job's last_error. Three ceilings are checked: the day's global one, the
+// credential's own, and the SES account's remaining 24-hour allowance (D18).
 //
 // Its count is an upper bound: the whole active audience, capped by the campaign's own limit and by
 // this call's. The authoritative reservation is the engine's, made when the job runs — this one can
@@ -760,6 +787,18 @@ func (s *session) checkBudget(ctx context.Context, credential store.Credential, 
 		return nil
 	}
 	day := store.Day(time.Now())
+	// A resume on the day the campaign was reserved spends nothing new: the audience was chosen and
+	// the day paid for when this campaign first started (D15), and the engine reserves nothing then
+	// either. Applying the day's ceilings here is how a credential whose daily_budget is smaller than
+	// the list could never resume a campaign it had already paid for — the engine would have accepted
+	// it all along.
+	//
+	// A resume on a *later* day is not that: today's ledger has never seen these messages, and the
+	// engine reserves what is left before it sends. So this check applies the day's ceilings to the
+	// same number the engine will.
+	if campaign.Status == model.CampaignPaused && campaign.ReservedDay == day {
+		return s.checkAllowance(wanted)
+	}
 	if global := s.deps.Config.Limits.MaxSendsPerDay; global > 0 {
 		reserved, err := s.deps.Store.Reserved(ctx, day, "")
 		if err != nil {
@@ -782,11 +821,34 @@ func (s *session) checkBudget(ctx context.Context, credential store.Credential, 
 				credential.DailyBudget, spent, wanted)
 		}
 	}
+	return s.checkAllowance(wanted)
+}
+
+// checkAllowance is D18's third ceiling: the account's own remaining 24-hour allowance.
+//
+// An unread quota is not checked: without a reading the number would be a guess, and refusing a send
+// on a deployment that does not read one is worse than finding out from the job.
+func (s *session) checkAllowance(wanted int) error {
+	rate := s.deps.Mailer.SendingRate()
+	if rate.Known && wanted > rate.Remaining24h {
+		return fmt.Errorf(
+			"the SES account has %d sends left in its 24-hour window and this would be %d: send it in "+
+				"steps with the limit argument, or wait for the window to reset",
+			rate.Remaining24h, wanted)
+	}
 	return nil
 }
 
-// audienceSize is what a full send of this campaign would write.
+// audienceSize is how many sends this campaign is about to make: the whole active audience for one
+// that has not started, and what is still queued for one that has been paused.
+//
+// A resume sends the messages the campaign already has rather than the list again, so counting the
+// list would overstate it by everything that went out before the pause — and overstate the account's
+// remaining allowance by the same amount.
 func (s *session) audienceSize(ctx context.Context, campaign model.Campaign) (int, error) {
+	if campaign.Status == model.CampaignPaused {
+		return s.deps.Store.CountUnfinishedCampaignMessages(ctx, campaign.ID)
+	}
 	audience, err := s.deps.Store.SelectAudience(ctx, campaign.NewsletterID, campaign.AudienceLimit)
 	if err != nil {
 		return 0, err
@@ -897,4 +959,76 @@ func sluggable(value string) bool {
 // written so nothing has to walk every body later.
 func firstImage(format model.Format, body string) string {
 	return content.FirstImageOf(format, body)
+}
+
+type runCleanupIn struct {
+	Newsletter string `json:"newsletter" jsonschema:"newsletter id or slug"`
+	DryRun     bool   `json:"dry_run,omitempty" jsonschema:"report what would happen, and write nothing"`
+	Limit      int    `json:"limit,omitempty" jsonschema:"count it as a send of at most this many issue recipients"`
+}
+
+type runCleanupOut struct {
+	Newsletter string          `json:"newsletter"`
+	Settings   cleanupSettings `json:"settings"`
+	Totals     cleanup.Totals  `json:"totals"`
+	// WouldSend is what the next send would do, at Limit when one was given.
+	WouldSend cleanup.Counts `json:"wouldSend"`
+	Moved     int            `json:"moved"`
+}
+
+type cleanupSettings struct {
+	Enabled bool `json:"enabled"`
+	Issues  int  `json:"issues"`
+	Days    int  `json:"days"`
+}
+
+// runCleanup reports what the list cleanup would do, and with dry_run false performs the part a send
+// would perform anyway: contacts warned 14 days ago or more become dormant. Nobody is ever
+// unsubscribed or deleted (design §13) — this is the newest tool on the surface and still one that
+// cannot remove anything.
+func runCleanup(ctx context.Context, sess *session, credential store.Credential, in runCleanupIn) (runCleanupOut, error) {
+	newsletter, err := newsletterByRef(ctx, sess.deps.Store, in.Newsletter)
+	if err != nil {
+		return runCleanupOut{}, err
+	}
+	if in.Limit < 0 {
+		return runCleanupOut{}, errors.New("limit cannot be negative")
+	}
+	settings := cleanup.SettingsOf(newsletter)
+	totals, err := sess.deps.Store.CleanupTotals(ctx, newsletter.ID)
+	if err != nil {
+		return runCleanupOut{}, err
+	}
+	audience, err := sess.deps.Store.SelectAudience(ctx, newsletter.ID, 0)
+	if err != nil {
+		return runCleanupOut{}, err
+	}
+	// The same walk the send makes, counted at the limit the caller asked about: "what would a send of
+	// N do" is the question this tool exists to answer.
+	preview := cleanup.EmptyPreview()
+	preview.Add(audience, cleanup.SplitInput{Settings: settings, Now: time.Now().UTC()})
+	out := runCleanupOut{
+		Newsletter: newsletter.Slug,
+		Settings:   cleanupSettings{Enabled: settings.Enabled, Issues: settings.Issues, Days: settings.Days},
+		Totals:     totals,
+		WouldSend:  preview.Summarize(in.Limit),
+	}
+	if in.DryRun {
+		return out, nil
+	}
+
+	split := cleanup.SplitAudience(audience, cleanup.SplitInput{Settings: settings, Now: time.Now().UTC()})
+	ids := make([]string, 0, len(split.Dormant))
+	for _, contact := range split.Dormant {
+		ids = append(ids, contact.ID)
+	}
+	moved, err := sess.deps.Store.MakeDormant(ctx, ids)
+	if err != nil {
+		return runCleanupOut{}, err
+	}
+	out.Moved = moved
+	sess.note(ctx, credential, "cleanup.run", newsletter.Slug, map[string]any{
+		"newsletter": newsletter.Slug, "moved": moved,
+	})
+	return out, nil
 }

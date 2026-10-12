@@ -6,14 +6,16 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/jobs"
+	"nibwire/internal/core/model"
+	"nibwire/internal/jobs"
 )
 
-// 发送中把 campaign 改成 paused（`mailcheap campaign pause` 就是这一步）：
+// 发送中把 campaign 改成 paused（`nibwire campaign pause` 就是这一步）：
 // 批次里没轮到的消息释放回 pending，campaign 停在 paused——阶段 2 的不变量之一。
 func TestPausingMidBatchReleasesTheRest(t *testing.T) {
-	f := newFixture(t, 6)
+	// A single file: "the messages the batch had not reached" is what this test is about, and a
+	// concurrent batch reaches all six at once (the counterpart below covers that case).
+	f := newFixture(t, 6).serial()
 	ctx := context.Background()
 	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
@@ -56,6 +58,70 @@ func TestPausingMidBatchReleasesTheRest(t *testing.T) {
 	}
 	if campaign.Status != model.CampaignPaused {
 		t.Fatalf("status = %s, want paused (a settled batch must not overwrite a pause)", campaign.Status)
+	}
+}
+
+// 并发之下暂停仍然拦得住新消息：在飞的落地，其余的回到 pending，而且谁都不会收到两份。
+//
+// Six messages and sixteen workers means the pause cannot reach most of them — every message has
+// already been handed out by the time the first send lands. That is the honest behaviour of a
+// concurrent batch, and what has to hold anyway is that nothing is lost, nothing is left claimed,
+// and the resumed campaign sends each contact exactly once.
+func TestPausingMidBatchUnderConcurrencyLosesNothing(t *testing.T) {
+	f := newFixture(t, 6)
+	ctx := context.Background()
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.fake.OnSend = func(n int) {
+		if n != 0 {
+			return
+		}
+		if _, err := f.db.SetCampaignStatus(ctx, f.campaign.ID,
+			[]model.CampaignStatus{model.CampaignSending}, model.CampaignPaused); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, err := f.engine.SendBatch(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.fake.OnSend = nil
+
+	campaign, err := f.db.Campaign(ctx, f.campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if campaign.Status != model.CampaignPaused {
+		t.Fatalf("status = %s, want paused", campaign.Status)
+	}
+	sent := f.fake.SentCount()
+	if sent < 1 {
+		t.Fatalf("sent = %d: the message that triggered the pause must have gone out", sent)
+	}
+	claimed, unknown, pending := claimedCount(t, f.db)
+	if claimed != 0 || unknown != 0 {
+		t.Fatalf("claimed = %d, unknown = %d, want 0/0", claimed, unknown)
+	}
+	if sent+pending != 6 {
+		t.Fatalf("sent %d + pending %d != 6: a message was lost", sent, pending)
+	}
+
+	// Resumed, the campaign finishes the rest — and nobody gets a second copy.
+	if _, err := f.db.SetCampaignStatus(ctx, f.campaign.ID,
+		[]model.CampaignStatus{model.CampaignPaused}, model.CampaignSending); err != nil {
+		t.Fatal(err)
+	}
+	if result := f.drain(t); result.Sent != 6-sent {
+		t.Fatalf("after resuming = %+v, want %d more", result, 6-sent)
+	}
+	if total := f.fake.SentCount(); total != 6 {
+		t.Fatalf("total sent = %d, want 6", total)
+	}
+	for email, count := range f.fake.SentPerRecipient() {
+		if count != 1 {
+			t.Errorf("%s received %d copies", email, count)
+		}
 	}
 }
 

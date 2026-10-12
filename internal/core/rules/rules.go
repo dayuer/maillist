@@ -9,9 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/sign"
+	"nibwire/internal/core/archive"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/core/slug"
 )
 
 const (
@@ -80,7 +82,7 @@ var feedbackUnsafeChars = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 // FeedbackID is the SES feedback-id header value: Gmail Postmaster Tools reports spam rates per
 // field, and the last field identifies the sender.
 func FeedbackID(campaignID string, kind model.MessageKind, newsletterSlug string) string {
-	parts := []string{campaignID, newsletterSlug, string(kind), "mailcheap"}
+	parts := []string{campaignID, newsletterSlug, string(kind), "nibwire"}
 	if campaignID == "" {
 		parts[0] = string(kind)
 	}
@@ -108,20 +110,24 @@ func WelcomeContent(n model.Newsletter) (model.Content, bool) {
 	}, true
 }
 
-// IssueWebURL is the archive page of an issue, or "" when it has none. A draft has no slug yet, so
-// its test email links to the one the subject gives when it goes out. Welcome emails aren't issues.
-func IssueWebURL(appURL string, c model.Campaign, n model.Newsletter) string {
+// IssueWebURL is the archive page of an issue, or "" when it has none: upstream getIssueWebUrl.
+//
+// A draft has no slug yet, so its test email links to the one the subject gives when it goes out.
+// Welcome emails aren't issues and have no page. The address itself comes from core/archive, the one
+// place that knows whether a newsletter has an archive domain of its own (audit F2: this function
+// used to build "/archive/<slug>/p/<post>" whatever ARCHIVE_HOSTS said).
+func IssueWebURL(appURL, archiveHosts string, c model.Campaign, n model.Newsletter) string {
 	if !n.ArchiveEnabled || n.Slug == "" || c.ID == "" || !c.ArchiveListed {
 		return ""
 	}
-	slug := c.ArchiveSlug
-	if slug == "" {
-		slug = Slugify(c.Subject, 80)
+	issueSlug := c.ArchiveSlug
+	if issueSlug == "" {
+		issueSlug = slug.Slug(c.Subject, 80)
 	}
-	if slug == "" {
+	if issueSlug == "" {
 		return ""
 	}
-	return appURL + "/archive/" + n.Slug + "/p/" + slug
+	return archive.ForNewsletter(n.Slug, archiveHosts, appURL).AbsolutePost(issueSlug)
 }
 
 // SendProblem is the first blocking reason in upstream's wording ("Add content", …), or "".
@@ -183,13 +189,21 @@ type ErrorAction string
 
 const (
 	ErrorRetry ErrorAction = "retry"
+	// ErrorThrottle is SES refusing a send because the account is being asked for more than its rate.
+	// Nothing was accepted and nothing was rejected, so the message goes back to the queue and the
+	// rate comes down (design D8-3, D17).
+	ErrorThrottle ErrorAction = "throttle"
+	// ErrorQuota is the 24-hour allowance being spent. Sending again will not work until it resets,
+	// so the campaign pauses — and the message is not counted as a delivery failure, because nothing
+	// was wrong with it (design D8-3).
+	ErrorQuota ErrorAction = "quota"
 	ErrorPause ErrorAction = "pause"
 	ErrorFail  ErrorAction = "fail"
 )
 
 var (
-	// Retrying later may work.
-	retryErrors = map[string]bool{
+	// SES is not taking these right now: retrying later may work, at a lower rate.
+	throttleErrors = map[string]bool{
 		"TooManyRequestsException": true, "ThrottlingException": true, "Throttling": true,
 	}
 	// These fail every following send too, so the campaign pauses until the account is fixed.
@@ -201,13 +215,37 @@ var (
 		"NotFoundException":                  true,
 	}
 	notVerifiedPattern = regexp.MustCompile(`(?i)not verified`)
+	// dailyQuotaPattern tells a spent 24-hour allowance from a rate that was exceeded for a moment.
+	// SES reports both with a throttling code, and the difference decides whether to slow down or to
+	// stop until tomorrow. The wording is upstream mailcheap's, and has not been seen on a live
+	// account — the port does not talk to AWS. scripts/ses-smoke.sh is where that is confirmed; if the
+	// text does not match, a spent allowance is slowed down instead of stopping, which sends nothing
+	// that would not have been refused anyway.
+	dailyQuotaPattern = regexp.MustCompile(`(?i)daily message quota|sending quota`)
+	// quotaCodes are the codes SES uses for both cases above.
+	quotaCodes = map[string]bool{
+		"TooManyRequestsException": true, "ThrottlingException": true, "Throttling": true,
+		"LimitExceededException": true,
+	}
 )
 
+// QuotaPauseReason is what the campaign's pause says when the account is out of 24-hour allowance.
+// The operator reads it in the alert and in the campaign's own report, and what they have to take
+// from it is that nothing failed and nothing was lost: the rest sends after the allowance resets.
+const QuotaPauseReason = "SES 24-hour sending quota reached; the rest sends after it resets"
+
 // SendErrorAction classifies an SES error. Both the error code and the message are needed:
-// "Sending is off" and MessageRejected's "not verified" are only in the message.
+// "Sending is off" and MessageRejected's "not verified" are only in the message, and so is the
+// difference between "too fast" and "out of allowance".
 func SendErrorAction(code, message string) ErrorAction {
-	if retryErrors[code] || strings.HasPrefix(message, "Sending is off") {
+	if strings.HasPrefix(message, "Sending is off") {
 		return ErrorRetry
+	}
+	if quotaCodes[code] && dailyQuotaPattern.MatchString(message) {
+		return ErrorQuota
+	}
+	if throttleErrors[code] {
+		return ErrorThrottle
 	}
 	if pauseErrors[code] {
 		return ErrorPause

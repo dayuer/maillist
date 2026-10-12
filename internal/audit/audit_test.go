@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/store"
+	"nibwire/internal/store"
 )
 
 func TestParamsDigestIsCanonical(t *testing.T) {
@@ -42,7 +42,7 @@ func TestParamsDigestIsCanonical(t *testing.T) {
 
 func TestNoteRecordsAndNeverFails(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

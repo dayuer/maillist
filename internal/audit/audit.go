@@ -14,8 +14,8 @@ import (
 	"log/slog"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/store"
 )
 
 // Actor is who is acting.
