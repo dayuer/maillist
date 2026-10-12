@@ -252,6 +252,63 @@ else
 	fail "a crawler was counted as a reader"
 fi
 
+step "two thousand messages at the account's rate"
+# 阶段 8 的收尾：整条路径都在这一步里走一遍——一封一个真实请求体、真实限速、真实回写。
+#
+# The audience is imported rather than added one contact at a time (each `contact add` is a container
+# round trip), and the file is copied in because the image has no shell to pipe it through. The fake
+# SES answers slowly and reports a rate, which is what makes this a test of the pacing rather than of
+# a tight loop.
+BULK_SUBJECT='Rate smoke'
+BULK=2000
+audience=$(mktemp)
+{
+	printf 'email,status\n'
+	i=1
+	while [ "$i" -le "$BULK" ]; do
+		printf 'bulk%d@example.com,active\n' "$i"
+		i=$((i + 1))
+	done
+} >"$audience"
+$COMPOSE cp "$audience" mailcheap:/tmp/audience.csv >/dev/null
+rm -f "$audience"
+imported=$(run contact import /tmp/audience.csv --newsletter "$SLUG" --source smoke)
+contains "$imported" "created $BULK" "the audience was imported"
+
+run campaign create --newsletter "$SLUG" --subject "$BULK_SUBJECT" \
+	--file /seed/issue.md >/dev/null
+bulk_sent=$(run campaign send --subject "$BULK_SUBJECT" --yes)
+contains "$bulk_sent" "queued $BULK recipients" "the send was queued whole"
+
+# The count comes from the fake, which is the only thing that knows what was really accepted. The one
+# message from the first campaign is in there too.
+want=$((BULK + 1))
+tries=0
+while :; do
+	accepted=$(curl -fsS "$FAKESES/_limits" | sed -n 's/.*"accepted":\([0-9]*\).*/\1/p')
+	[ "$accepted" = "$want" ] && break
+	tries=$((tries + 1))
+	[ "$tries" -gt 120 ] && fail "the fake SES accepted $accepted of $want messages"
+	sleep 1
+done
+pass "$want messages reached the fake SES"
+
+# 零重复：同一个地址被接受两次是 D14 最不能犯的错，而它只在这里看得见——假 SES 收到的每一个请求。
+duplicates=$(curl -fsS "$FAKESES/_sent" | grep -o '"to":"[^"]*"' | sort | uniq -d)
+if [ -n "$duplicates" ]; then
+	fail "these addresses were accepted more than once: $duplicates"
+fi
+pass "no address was sent to twice"
+
+# 发完的标志是 campaign 自己走完 settle：没有 pending、没有 claimed，状态才是 sent。
+tries=0
+until run campaign show --subject "$BULK_SUBJECT" --json 2>/dev/null | grep -q '"Status":"sent"'; do
+	tries=$((tries + 1))
+	[ "$tries" -gt 60 ] && fail "the campaign never settled after its last message"
+	sleep 1
+done
+pass "the campaign settled with nothing left over"
+
 step "an agent reaches the same deployment over MCP"
 # The MCP surface is a credential, not a door: the token is issued in the container and used by a
 # stdio client in the container, which is how an agent gets at a deployed instance (compose does not
@@ -279,4 +336,5 @@ case "$answer" in
 esac
 
 printf '\n=== the stack went up: one issue went out, a reader opened, clicked and unsubscribed, and its\n'
-printf 'archive page is public; an agent listed the tools of the same deployment over MCP\n'
+printf 'archive page is public; two thousand messages went out at the account rate with no address\n'
+printf 'sent to twice; an agent listed the tools of the same deployment over MCP\n'

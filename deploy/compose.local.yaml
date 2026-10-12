@@ -17,6 +17,9 @@ services:
       SES_ACCESS_KEY_ID: local
       SES_SECRET_ACCESS_KEY: local
       SES_REGION: eu-west-1
+      # How many sends are in flight at once. The rate follows the account (D17), so what a deployment
+      # needs is enough workers to reach it: at 20 ms a send, sixteen do 800 a second.
+      SEND_CONCURRENCY: "16"
     volumes:
       - mailcheap-data:/data
       # The campaign body and an image to upload. Read-only: the app never writes to them.
@@ -31,6 +34,15 @@ services:
       # The domain the app's pre-send check reads. Without it the identity list is empty and a send
       # refuses for the right reason.
       FAKE_SES_DOMAINS: example.net
+      # What GetAccount reports, which is what the app paces itself by. Without it the app is told the
+      # account's quota could not be read and sends one a second — the right answer to a missing
+      # permission, and the wrong one for a local stack.
+      FAKE_SES_MAX_SEND_RATE: "500"
+      # -1 is what SES says for an account without a 24-hour limit.
+      FAKE_SES_MAX_24_HOUR_SEND: "-1"
+      # A real send is not instant. The smoke test's last step sends two thousand messages, and
+      # against an instantaneous fake it would measure the loop rather than the rate.
+      FAKE_SES_LATENCY_MS: "20"
     # Published only so the smoke script can read what was sent. A real SES is reached the same way
     # the app reaches it — over the network — and nothing else here is published.
     ports:
