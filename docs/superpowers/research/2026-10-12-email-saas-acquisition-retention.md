@@ -3,7 +3,7 @@
 - 调研日期：2026-10-12
 - 调研对象：Mailchimp、Klaviyo、Substack、beehiiv、Kit（原 ConvertKit）、MailerLite、Buttondown；第五至七节补充 Ghost、Sendy、listmonk、SparkLoop、EmailOctopus、上游 mailcheap
 - 方法：一手来源优先（S-1 招股书、官方产品页/博客、官方定价页、代理商案例、收购公告），关键数字均注明出处；付费墙来源的转引数字单独标注置信度
-- 关联：为 maillist（本仓库）的产品/GTM 决策提供参照，启示见第四节，商业模式选择见第五节，托管版发信隔离见第六节，支付意愿验证见第七节，许可策略见第八节
+- 关联：为 Nibwire（本仓库，原名 maillist）的产品/GTM 决策提供参照，启示见第四节，商业模式选择见第五节，托管版发信隔离见第六节，支付意愿验证见第七节，许可策略见第八节
 
 ## 一页结论
 
@@ -75,17 +75,17 @@ Kit 的创作者教育 + 年度报告、Mailchimp 的内容营销团队、Klaviy
 - **2017–2021**：品牌化 + 生态绑定（Mailchimp 品牌战役、Klaviyo×Shopify）
 - **2022 至今**：推荐网络成为主战场（Substack 首创、beehiiv 商业化、Kit 跟进）——品类从"工具竞争"进入"网络竞争"：**谁能让客户的订阅者增长，客户就留在谁那**。
 
-## 四、对 maillist 项目的启示
+## 四、对 Nibwire 项目的启示
 
-1. **成本故事是真实差异点，但要挂到增长上**："$0.10/千封"只打动计算成本的人；beehiiv 们的启示是客户的真实 KPI 是订阅者增长。maillist 的归档页（SEO 资产）+ 自有域名追踪 = 客户的获取资产，值得在产品叙事里前置。
+1. **成本故事是真实差异点，但要挂到增长上**："$0.10/千封"只打动计算成本的人；beehiiv 们的启示是客户的真实 KPI 是订阅者增长。Nibwire 的归档页（SEO 资产）+ 自有域名追踪 = 客户的获取资产，值得在产品叙事里前置。
 2. **推荐网络是可以后置但必须有的东西**：阶段 7 归档完成后，newsletter 间互推是自托管产品最难复制的护城河——但中心化推荐网络与自托管架构存在真实的产品矛盾，建议到阶段 6/7 时单独决策。
 3. **MCP 集成是被验证的获客面**：beehiiv 定价页已把 "beehiiv MCP（Claude/ChatGPT/Gemini）" 列为付费档功能——本项目的 MCP 接口（阶段 6）不只是便利性，是**分发渠道**：让 agent 生态替产品获客。
-4. **计价结构决定留存曲线**：按订阅者规模计价（而非按功能）让收入随客户成功自然增长。maillist 是自托管软件不直接适用，但未来若提供托管服务，应按规模计价。
+4. **计价结构决定留存曲线**：按订阅者规模计价（而非按功能）让收入随客户成功自然增长。Nibwire 是自托管软件不直接适用，但未来若提供托管服务，应按规模计价。
 5. **页脚徽章类病毒环，自托管产品天然没有**（用户部署在自己域名下）——获客应走 Buttondown/开发者路线：源码公开带来的可见性、comparison SEO 页、CLI 工具链在开发者社区的传播。
 
 ## 五、商业模式分析
 
-前四节回答"别人怎么拉客、怎么留客"。本节回答更前置的问题：**这个品类的钱从哪来，maillist 能拿哪一份**。
+前四节回答"别人怎么拉客、怎么留客"。本节回答更前置的问题：**这个品类的钱从哪来，Nibwire 能拿哪一份**。
 
 ### 5.1 品类利润的来源：按订阅者计价 vs 按发送计成本
 
@@ -132,9 +132,9 @@ Kit 的创作者教育 + 年度报告、Mailchimp 的内容营销团队、Klaviy
 2. **开通门槛**：SES 沙箱转正申请、DKIM/SPF/DMARC 配置、域名验证。
 3. **运维**：服务器、备份、升级、TLS。
 
-maillist 现有设计已覆盖其中一部分：抑制名单、at-most-once 发送（D14）、凭据级日预算（D15）、单 SQLite 文件备份简单。**这些不只是工程细节，而是托管版能收费的东西**，也是与 listmonk/Sendy 的差异点。
+Nibwire 现有设计已覆盖其中一部分：抑制名单、at-most-once 发送（D14）、凭据级日预算（D15）、单 SQLite 文件备份简单。**这些不只是工程细节，而是托管版能收费的东西**，也是与 listmonk/Sendy 的差异点。
 
-### 5.5 maillist 候选商业模式评估
+### 5.5 Nibwire 候选商业模式评估
 
 | 方案 | 收入潜力 | 与现有架构的契合 | 建设成本 | 主要风险 |
 |---|---|---|---|---|
@@ -267,7 +267,7 @@ AWS 实施指南原文明确："Tenant metrics contribute to the overall account
 **最重要的发现：便宜的 SES 托管位置已经有人占了。** EmailOctopus 2014 年起家时就是"Mailchimp 太贵，用 SES 自己发"，至今十年、自述年收入 $3M+（GetLatka 估 $1.2M，冲突）、无融资。它同时卖全托管和 BYO SES 两档——**正是 5.5 方案 C 与 6.4 中 ⑤ 的组合**。因此：
 
 - "比 beehiiv 便宜"不是差异化，是入场门槛。
-- maillist 的可辩护差异只剩三项：**源码公开、可迁出**（交出一个 SQLite 文件就走，无锁定）、**agent 原生**（MCP 发信全流程）、**单二进制可自托管**（付费用户随时可降级为自托管，这本身是信任卖点）。
+- Nibwire 的可辩护差异只剩三项：**源码公开、可迁出**（交出一个 SQLite 文件就走，无锁定）、**agent 原生**（MCP 发信全流程）、**单二进制可自托管**（付费用户随时可降级为自托管，这本身是信任卖点）。
 - 验证实验必须测的是"这三项值不值钱"，而不只是"便宜值不值钱"。
 
 ### 7.2 价格带推导（1 万订阅者档）
@@ -293,7 +293,7 @@ AWS 实施指南原文明确："Tenant metrics contribute to the overall account
 - **H1 需求**：A 类人群在看到价格表后会留邮箱。冷流量访客→留邮箱 **<2% 即证伪**，≥5% 为强信号。
 - **H2 价格**：$29 全托管落在可接受区间内。Van Westendorp 的可接受区间上沿 **<$29 即需下调或砍成本**。
 - **H3 付费**：候补名单中有人愿意预付。30 天内预付 **<3% 或绝对数 <10 即证伪**。
-- **H4 差异化**：留邮箱的人里，选择理由勾选"无锁定/可迁出"或"agent/MCP"的占比 ≥30%。否则 maillist 只是更晚进场的 EmailOctopus。
+- **H4 差异化**：留邮箱的人里，选择理由勾选"无锁定/可迁出"或"agent/MCP"的占比 ≥30%。否则 Nibwire 只是更晚进场的 EmailOctopus。
 
 ### 7.4 实验设计（承诺度递增，成本递增）
 
@@ -341,7 +341,7 @@ AWS 实施指南原文明确："Tenant metrics contribute to the overall account
 1. **仓库已公开，但没有 LICENSE 文件**。GitHub 显示 license 为空；根目录只有 `NOTICE`，内容是上游 mailcheap 的 MIT 声明。也就是说：上游移植来的部分按 MIT 授权，**本仓库新写的代码目前默认"保留所有权利"**——别人可以在 GitHub 上看和 fork，但法律上不能使用、修改或部署。这与第五至七节"开源本体作获客层"的前提矛盾，**无论最终选哪个许可，都应尽快补上**。
 2. **105 个提交全部出自同一作者**。现在选任何许可都无需征得他人同意；一旦接受外部贡献，改许可的自由度就开始收窄（见 8.5）。
 3. **直接依赖全部是宽松许可**：aws-sdk-go-v2、cobra（Apache-2.0）；go-sdk（MCP）、goldmark（MIT）；bluemonday、modernc.org/sqlite、golang.org/x/text（BSD 类）。与 MIT、Apache-2.0、AGPLv3 均兼容，**依赖不构成选择约束**。
-4. **产品名与上游相同**：二进制、Go 模块名都是 `mailcheap`，仓库名是 `maillist`。上游 MIT 授权的是代码，不是名字——这是许可之外的独立问题（见 8.6）。
+4. **产品名与上游相同**：二进制、Go 模块名都是 `mailcheap`，仓库名原为 `maillist`。上游 MIT 授权的是代码，不是名字——这是许可之外的独立问题（见 8.8）。**已于同日处理：产品、Go 模块、二进制与 GitHub 仓库均改名为 Nibwire / `nibwire`**。
 
 ### 8.2 一个前提判断：代码本身不是护城河
 
@@ -430,7 +430,7 @@ Additional Use Grant 草案（意译，正式文本需律师定稿）：
 ### 8.8 名字与商标
 
 - Ghost 的做法：代码 MIT，名字与 logo 由商标政策保护——别人可以说"托管原版 Ghost"，但不能把改版叫 Ghost，也不能用相似的名字。官方托管靠"官方"二字取胜。
-- maillist 当前二进制名 `mailcheap` 沿用上游。上游作者若主张该名字，或其他 fork 也用这个名字，托管版无法建立可区分的品牌；BSL 的 Licensed Work 字段也需要一个确定的名字。**建议在写 LICENSE 之前定下自有产品名**，二进制与模块名随之更改（`NOTICE` 中继续注明移植自 mailcheap），并参照 Ghost 写一份简短商标政策。BSL 本身不授予商标权利，可与商标政策并存。
+- 本项目原二进制名 `mailcheap` 沿用上游。上游作者若主张该名字，或其他 fork 也用这个名字，托管版无法建立可区分的品牌；BSL 的 Licensed Work 字段也需要一个确定的名字。**建议在写 LICENSE 之前定下自有产品名**，二进制与模块名随之更改（`NOTICE` 中继续注明移植自 mailcheap），并参照 Ghost 写一份简短商标政策。BSL 本身不授予商标权利，可与商标政策并存。
 - **暂定名 "Mail Turbo AI"（2026-10-12）的初步检索**：已有同品类产品 MailerTurbo（mailerturbo.com，邮件营销自动化 + CRM），另有 turboSMTP。字面接近且同类别，弃用。
 - **改选 "Nibwire"（2026-10-12 定）**：nib（笔尖，写作）+ wire（通讯社电讯 / 发送）。候选与淘汰（域名查注册局 RDAP，产品查 GitHub 与网页搜索；**未查商标库**）：
 
@@ -452,10 +452,10 @@ Additional Use Grant 草案（意译，正式文本需律师定稿）：
 | 优先级 | 动作 | 时机 |
 |---|---|---|
 | 1 | 定自有产品名（BSL 的 Licensed Work 字段需要） | 已定 Nibwire；商标检索与域名注册待办 |
-| 2 | 按 8.6 草案起草 `LICENSE`（BSL 1.1），律师审 Additional Use Grant 与 Change License；`NOTICE` 保留上游 MIT 声明，并注明上游部分仍按 MIT | 已提交 dayuer/maillist#15，律师审阅待办 |
-| 3 | 写 `CONTRIBUTING.md`：外部贡献入站 MIT（或 CLA） | 已随 dayuer/maillist#15 提交 |
-| 4 | README 与对外文案改用"source available"，附一段 FAQ：能做什么、不能做什么 | README 已随 dayuer/maillist#15 提交；对外文案待写 |
-| 5 | 改二进制与模块名；写商标政策 | 改名已提交 dayuer/maillist#17；商标政策待写 |
+| 2 | 按 8.6 草案起草 `LICENSE`（BSL 1.1），律师审 Additional Use Grant 与 Change License；`NOTICE` 保留上游 MIT 声明，并注明上游部分仍按 MIT | 已提交 dayuer/nibwire#15，律师审阅待办 |
+| 3 | 写 `CONTRIBUTING.md`：外部贡献入站 MIT（或 CLA） | 已随 dayuer/nibwire#15 提交 |
+| 4 | README 与对外文案改用"source available"，附一段 FAQ：能做什么、不能做什么 | README 已随 dayuer/nibwire#15 提交；对外文案待写 |
+| 5 | 改二进制与模块名；写商标政策 | 改名已提交 dayuer/nibwire#17；商标政策待写 |
 | 6 | 托管控制面建为独立仓库、独立程序（闭源），只经 API 与二进制交互 | 决定建托管版时（第七节决策规则通过后） |
 
 ## 主要来源
