@@ -267,13 +267,20 @@ func TestSendingPacesItselfToTheAccountAndLosesNothing(t *testing.T) {
 // enough to send fewer than the enforced rate, nothing would ever be refused and the test would pass
 // without testing anything. It says so out loud rather than passing quietly.
 func TestTheRateConvergesWhenTheAccountAllowsLessThanItReports(t *testing.T) {
-	messages := messagesFor(t, 600, 6000)
+	// The enforced rate scales with the size of the run. What the test needs is a deployment that asks
+	// for more than the account allows — 450 against either of these — and a run that ends inside the
+	// minute; a rate picked for the small run would leave the large one still going at the deadline,
+	// which says nothing about converging.
+	messages, enforced := messagesFor(t, 600, 6000), float64(100)
+	if messages > 600 {
+		enforced = 300
+	}
 	w := newWorldTuned(t, messages,
-		// One halving per second is right for a real account and far too slow to watch: three halvings
-		// take the rate under the enforced limit here instead of three seconds.
+		// One halving per second is right for a real account and far too slow to watch: the descent to
+		// under the enforced limit is what the test is looking at, and it does not need real seconds.
 		func(cfg *ratectl.Config) { cfg.DecreaseEvery = 100 * time.Millisecond },
 		fakessesrv.WithQuota(fakessesrv.Quota{MaxSendRate: 500, Max24HourSend: -1}),
-		fakessesrv.WithEnforcedRate(100))
+		fakessesrv.WithEnforcedRate(enforced))
 	ctx := context.Background()
 
 	if queued, err := w.engine.Queue(ctx, w.campaign.ID, mailer.Charge{}); err != nil {
@@ -299,8 +306,8 @@ func TestTheRateConvergesWhenTheAccountAllowsLessThanItReports(t *testing.T) {
 			limits.Throttled, messages)
 	}
 	w.exactlyOnce(t, messages)
-	t.Logf("%d messages in %s (%v a second against an enforced 100), %d refusals",
-		messages, elapsed, float64(messages)/elapsed.Seconds(), limits.Throttled)
+	t.Logf("%d messages in %s (%v a second against an enforced %v), %d refusals",
+		messages, elapsed, float64(messages)/elapsed.Seconds(), enforced, limits.Throttled)
 }
 
 // 完成标志第三条：账号剩下的额度装不下这一步时，整次拒绝——不建 message、不动 status。
