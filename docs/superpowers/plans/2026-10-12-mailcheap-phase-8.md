@@ -243,3 +243,16 @@ deploy/.env.example、docs/ses-smoke.md   两个新变量、ses:GetAccount、"�
 
 **并发改变了停止的语义边界，这里显式记下**：连续失败与暂停规则只能拦住**还没交出去**的消息，在飞的（最多 `SEND_CONCURRENCY − 1` 个）一定会落地，其中暂停那部分还会真发出去。这不是缺陷而是并发的定义，代价是「5 连败暂停」实际可能发出 6 封失败（见上面的用例断言）；要完全避免只能让暂停先于派发，那会牺牲吞吐。
 
+### Task 8.5（错误分类）
+
+按 D8-3 实现，一处偏离：`ratectl` 增了 `DecreaseEvery`（默认 1 s），**同一瞬间的一批限流只减半一次**。
+
+这不是优化而是必要条件：16 个 worker 会在同一瞬间各自撞上同一堵墙，逐个减半就是 450/s → 下限 1/s，而回升是每 30 s 一档 10%——从 1/s 回到 450/s 要三十多分钟。完成标志里「假 SES 只放行 300/s 时 60 秒内收敛」在逐个减半下**不可能满足**。十六个 worker 报的是一个事件，一次减半才是诚实的计数。
+
+### Task 8.6（日配额预检与 check 输出）
+
+- 三处检查：`Queue` 的草稿/定时分支、`Queue` 的暂停恢复分支（message 早就建好了，但账号的额度是新的）、`QueueStep` 的下一批。都在 `ReserveAndInsert` **之前**，所以拒绝时既不建 message 也不花掉这一天。
+- **写了一版才发现的坑**：`ratectl.Remaining24h()` 在「从未读到配额」时返回 0，预检若照字面用就会把「读不到配额」（网络故障、缺 `ses:GetAccount`）变成「账号没额度了，一封都不发」——与 D8-2 的选择正好相反。现在预检要求 `Quota()` 报告 `known == true`，没读到就跳过，速率仍是下限 1/s 加一次告警。用例 `TestAnUnreadAllowanceRefusesNothing`。
+- MCP 的 `send_campaign` / `resume_campaign` 在 `checkBudget`（原本两条上限）里加了第三条，方向与既有预检一致：按受众**上界**判断，宁可拒一个引擎会放行的，绝不放过一个引擎会拒的。CLI 的 `campaign send` 本来就同步调 `Queue` 并把 `Reason` 报给操作者，不需要额外预检。
+- `app` 里把 `RateControl` 接上、以及配额轮询在 `serve` 与 CLI 里何时跑，都属于 Task 8.9：在那之前 CLI 拿到的是「未读到配额」的状态（`campaign check` 会明说「configured; no SES quota read」）。**这是本阶段收尾前必须补上的一环，否则 D17/D18 在生产上等于没接。**
+
