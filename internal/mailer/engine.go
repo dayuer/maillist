@@ -107,7 +107,7 @@ func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log
 	}
 	return &Engine{
 		store: db, sender: sender, signer: signer,
-		bucket: NewBucket(cfg.SendRatePerSec), cfg: cfg, log: log,
+		bucket: NewBucket(float64(cfg.SendRatePerSec)), cfg: cfg, log: log,
 	}
 }
 
