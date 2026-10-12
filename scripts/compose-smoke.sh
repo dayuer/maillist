@@ -270,6 +270,9 @@ audience=$(mktemp)
 		i=$((i + 1))
 	done
 } >"$audience"
+# 0644 before the copy: docker cp keeps the source's mode, and the app runs as a non-root user in the
+# container, so a mktemp file's 0600 arrives unreadable.
+chmod 0644 "$audience"
 $COMPOSE cp "$audience" mailcheap:/tmp/audience.csv >/dev/null
 rm -f "$audience"
 imported=$(run contact import /tmp/audience.csv --newsletter "$SLUG" --source smoke)
@@ -302,7 +305,9 @@ pass "no address was sent to twice"
 
 # 发完的标志是 campaign 自己走完 settle：没有 pending、没有 claimed，状态才是 sent。
 tries=0
-until run campaign show --subject "$BULK_SUBJECT" --json 2>/dev/null | grep -q '"Status":"sent"'; do
+# The CLI prints indented JSON ("Status": "sent"), so the pattern allows the space: a pattern written
+# for the compact form would never match and the loop would time out on a campaign that was fine.
+until run campaign show --subject "$BULK_SUBJECT" --json 2>/dev/null | grep -q '"Status": *"sent"'; do
 	tries=$((tries + 1))
 	[ "$tries" -gt 60 ] && fail "the campaign never settled after its last message"
 	sleep 1
