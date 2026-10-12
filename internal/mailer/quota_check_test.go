@@ -32,7 +32,7 @@ func TestAStepTheAccountCannotAffordIsRefusedWhole(t *testing.T) {
 	if queued.Queued || queued.Recipients != 0 {
 		t.Fatalf("queued = %+v, want a refusal", queued)
 	}
-	if !strings.Contains(queued.Reason, "2 sends left") || !strings.Contains(queued.Reason, "--limit 2") {
+	if !strings.Contains(queued.Reason, "2 sends left") || !strings.Contains(queued.Reason, "steps of at most 2") {
 		t.Fatalf("reason = %q, want it to name the ceiling and the way through it", queued.Reason)
 	}
 	if claimed, unknown, pending := claimedCount(t, f.db); claimed+unknown+pending != 0 {

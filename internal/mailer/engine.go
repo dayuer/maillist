@@ -136,7 +136,7 @@ func (e *Engine) sesQuotaRefusal(n int) string {
 			"%d: the window opens as the previous day's sends age out", n)
 	}
 	return fmt.Sprintf("the SES account has %d sends left in its 24-hour window and this step is %d: "+
-		"send it with --limit %d, or wait for the window to reset", remaining, n, remaining)
+		"send it in steps of at most %d, or wait for the window to reset", remaining, n, remaining)
 }
 
 // QueueResult is what Queue and QueueStep report back.
@@ -244,19 +244,44 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		suppressedSet[email] = true
 	}
 
-	// A campaign that is already over its bounce or complaint limit pauses before anything else goes
-	// out, as upstream does at the top of sendMessageBatch.
+	// Every campaign this call touches settles at the end, so the set spans the chunks.
 	campaigns := map[string]bool{}
-	for _, message := range messages {
-		if message.CampaignID == "" {
-			continue
+	prepare := func(chunk []model.Message) error {
+		// A campaign that is already over its bounce or complaint limit pauses before anything else
+		// goes out, as upstream does at the top of sendMessageBatch.
+		for _, message := range chunk {
+			if message.CampaignID == "" {
+				continue
+			}
+			if _, seen := campaigns[message.CampaignID]; seen {
+				continue
+			}
+			campaigns[message.CampaignID] = true
+			if _, err := e.pauseIfUnhealthy(ctx, message.CampaignID); err != nil {
+				return err
+			}
 		}
-		if _, seen := campaigns[message.CampaignID]; seen {
-			continue
-		}
-		campaigns[message.CampaignID] = true
-		if _, err := e.pauseIfUnhealthy(ctx, message.CampaignID); err != nil {
-			return result, err
+		return nil
+	}
+	if err := prepare(messages); err != nil {
+		// Nothing was handed out, so nothing may stay claimed: left claimed, these would be recovered
+		// as unknown — mail that is neither sent nor going to be (D14).
+		e.releaseAll(ctx, messages)
+		return result, err
+	}
+
+	// claimMore is where the next chunk comes from, or nil when there is nothing more to ask for: the
+	// explicit-ids path has been given exactly what it is to send, and a queue that came back empty
+	// has nothing left.
+	//
+	// Claiming on demand rather than in waves is what keeps the pool busy. A batch that claimed fifty
+	// messages, sent them and only then claimed the next fifty would stand idle for one request
+	// latency at every boundary — at 80 ms a send and 450 a second, that is a fifth of the account's
+	// rate thrown away, and it gets worse the faster the account is.
+	var claimMore func(context.Context) ([]model.Message, error)
+	if len(messageIDs) == 0 {
+		claimMore = func(ctx context.Context) ([]model.Message, error) {
+			return e.store.ClaimMessages(ctx, rules.SendBatchSize)
 		}
 	}
 
@@ -292,6 +317,7 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		}()
 	}
 
+	chunk := messages
 	var (
 		next                int
 		outstanding         int
@@ -331,20 +357,46 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		}
 	}
 
-	for next < len(messages) || outstanding > 0 {
+	for {
 		if ctx.Err() != nil {
 			result.Retry = true
 			stopped = true
 		}
-		if !stopped && next < len(messages) {
+		if !stopped && next < len(chunk) {
 			select {
-			case jobs <- messages[next]:
+			case jobs <- chunk[next]:
 				next++
 				outstanding++
 				continue
 			case out := <-outcomes:
 				outstanding--
 				apply(out)
+				continue
+			}
+		}
+		if !stopped && claimMore != nil {
+			// This chunk is exhausted. Claim the next one now, while the workers are still finishing
+			// it: the claim is a write, not a send, and it is the only thing that would otherwise
+			// stand between one chunk and the next.
+			more, err := claimMore(ctx)
+			switch {
+			case err != nil && ctx.Err() != nil:
+				// The claim is where a shutdown that landed between two chunks shows up, and a stop
+				// is not a failure: nothing was claimed and the next run picks up the rest.
+				result.Retry, stopped = true, true
+			case err != nil:
+				firstErr, stopped = err, true
+			case len(more) == 0:
+				claimMore = nil
+			default:
+				// The new chunk becomes the dispatcher's before its preparation runs, so a failure
+				// there leaves it to be released by the same code as any other message the batch
+				// never handed out.
+				chunk, next = more, 0
+				if err := prepare(more); err != nil {
+					firstErr, stopped = err, true
+					break
+				}
 				continue
 			}
 		}
@@ -358,8 +410,8 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 	close(jobs)
 	workers.Wait()
 
-	if next < len(messages) {
-		e.releaseAll(ctx, messages[next:])
+	if next < len(chunk) {
+		e.releaseAll(ctx, chunk[next:])
 	}
 	if firstErr != nil {
 		return result, firstErr
