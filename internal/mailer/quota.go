@@ -140,9 +140,23 @@ func (p *QuotaPoller) pollOnce(ctx context.Context, log *slog.Logger) {
 		}
 		return
 	}
-	p.Control.SetQuota(quota, time.Now().UTC())
-	p.Bucket.SetRate(p.Control.Rate(time.Now().UTC()))
+	now := time.Now().UTC()
+	p.Control.SetQuota(quota, now)
+	FollowControl(p.Control, p.Bucket, now)
 	log.Debug("read the SES sending quota",
 		"maxSendRate", quota.MaxSendRate, "remaining24h", p.Control.Remaining24h(),
-		"rate", p.Control.Rate(time.Now().UTC()))
+		"rate", p.Control.Rate(now))
+}
+
+// FollowControl pushes what the controller now says into the bucket.
+//
+// The controller decides the rate and the bucket enforces it (D8-1); this is the one place the two
+// are joined, so that a fresh reading from the poller, a halving after a throttle and a step back up
+// after a success all end at the same number. A nil controller is "no rate to follow": the bucket
+// keeps the rate it was built with.
+func FollowControl(control *ratectl.Controller, bucket *Bucket, now time.Time) {
+	if control == nil || bucket == nil {
+		return
+	}
+	bucket.SetRate(control.Rate(now))
 }

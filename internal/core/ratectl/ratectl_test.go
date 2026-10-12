@@ -84,6 +84,28 @@ func TestThrottlingHalvesAndNeverGoesBelowTheFloor(t *testing.T) {
 	}
 }
 
+// 同一瞬间的一堆限流算一次：十六个 worker 撞上同一堵墙，报的是一个事件，不是一个十六个。
+//
+// Sixteen workers that meet the same wall in the same instant would otherwise take 450 a second to
+// the floor, and the creep back up is one step per IncreaseEvery — hours instead of seconds. This is
+// what the throughput test in mailer depends on.
+func TestOneBurstOfThrottlesHalvesOnce(t *testing.T) {
+	c := New(defaultConfig())
+	c.SetQuota(quota(), t0)
+
+	for i := 0; i < 16; i++ {
+		c.OnThrottle(t0)
+	}
+	if got := c.Rate(t0); got != 225 {
+		t.Fatalf("rate = %v after sixteen simultaneous throttles, want one halving (225)", got)
+	}
+	// And the next interval does halve again: the account is still over its limit.
+	c.OnThrottle(t0.Add(time.Second))
+	if got := c.Rate(t0); !closeTo(got, 112.5) {
+		t.Fatalf("rate = %v after another second of throttles, want 112.5", got)
+	}
+}
+
 // 三十秒没有限流回升 10%，回到 target 就停在那里。
 func TestTheRateCreepsBackUpEveryThirtySeconds(t *testing.T) {
 	c := New(defaultConfig())

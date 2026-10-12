@@ -16,6 +16,7 @@ import (
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/providers"
+	"mailcheap/internal/core/ratectl"
 	"mailcheap/internal/core/rules"
 	"mailcheap/internal/core/sign"
 	"mailcheap/internal/core/slug"
@@ -41,6 +42,12 @@ type Config struct {
 	// SendConcurrency is how many sends may be in flight at once (SEND_CONCURRENCY). One makes the
 	// engine behave exactly as it did before this phase: a single file of messages.
 	SendConcurrency int
+	// RateControl is the controller the quota poller writes readings into and this engine reports
+	// throttles and successes to. It is one object on purpose: the rate the account's quota implies,
+	// the rate a throttle halved and the rate the bucket enforces all have to be the same number
+	// (D8-1, D17). Optional — without it the bucket keeps SendRatePerSec, which is what the tests that
+	// do not care about the rate do.
+	RateControl *ratectl.Controller
 	// Alerts tells the operator what went wrong. It is optional: the CLI builds an engine with no
 	// server behind it, and there is nobody to alert there.
 	Alerts *alerts.Notifier
@@ -92,12 +99,13 @@ func (c Charge) system() bool { return c.CredentialID == "" }
 
 // Engine sends queued messages through a Sender.
 type Engine struct {
-	store  *store.DB
-	sender Sender
-	signer *sign.Signer
-	bucket *Bucket
-	cfg    Config
-	log    *slog.Logger
+	store   *store.DB
+	sender  Sender
+	signer  *sign.Signer
+	bucket  *Bucket
+	control *ratectl.Controller
+	cfg     Config
+	log     *slog.Logger
 }
 
 // NewEngine builds an engine. The bucket is shared by every caller, so the rate is a process-wide
@@ -110,7 +118,7 @@ func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log
 		log = slog.Default()
 	}
 	return &Engine{
-		store: db, sender: sender, signer: signer,
+		store: db, sender: sender, signer: signer, control: cfg.RateControl,
 		bucket: NewBucket(float64(cfg.SendRatePerSec)), cfg: cfg, log: log,
 	}
 }
@@ -377,6 +385,8 @@ func (e *Engine) sendOne(ctx context.Context, message model.Message,
 			failed: outcome.failed, retry: outcome.retry, stop: stop, campaignID: message.CampaignID,
 		}
 	}
+	// SES took it: that is the event the rate creeps back up on (D8-1).
+	e.onSuccess()
 	if err := e.recordSent(ctx, message, loaded, delivery); err != nil {
 		// The message went out and its record did not. Releasing it would send it twice, so it stays
 		// claimed: the next start recovers it as unknown, which is "we do not know" and never "send it
@@ -384,6 +394,30 @@ func (e *Engine) sendOne(ctx context.Context, message model.Message,
 		return sendOutcome{err: err, stop: true, campaignID: message.CampaignID}
 	}
 	return sendOutcome{sent: true, campaignID: message.CampaignID}
+}
+
+// onThrottle is SES saying "too fast": the rate halves, and the bucket — the only thing that enforces
+// a rate — is told at once. Reporting a lower rate than we were sending at is the whole point of
+// hearing the throttle.
+func (e *Engine) onThrottle() {
+	if e.control == nil {
+		return
+	}
+	now := time.Now().UTC()
+	e.control.OnThrottle(now)
+	FollowControl(e.control, e.bucket, now)
+}
+
+// onSuccess is a send SES accepted. Enough of those and the rate creeps back toward the account's
+// limit — one step per IncreaseEvery, and never past it — which is what keeps a backoff from being
+// permanent.
+func (e *Engine) onSuccess() {
+	if e.control == nil {
+		return
+	}
+	now := time.Now().UTC()
+	e.control.OnSuccess(now)
+	FollowControl(e.control, e.bucket, now)
 }
 
 // releaseMessage, markSuppressed and the counters run on the detached context: they are the
@@ -469,6 +503,29 @@ func (e *Engine) handleSendError(ctx context.Context, message model.Message, loa
 		})
 		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
 			return e.pause(writeCtx, message.CampaignID, cause.Error())
+		}); err != nil {
+			e.log.Error("pause", "campaign", message.CampaignID, "error", err)
+		}
+		return errorOutcome{}, true
+	case rules.ErrorThrottle:
+		// The account is being asked for more than its rate. SES accepted nothing and rejected
+		// nothing, so this is neither a sent message nor a failed one: it goes back to the queue, and
+		// the batch stops, because the next message would meet the same wall (D8-3).
+		write("release", func(writeCtx context.Context) error {
+			return e.store.ReleaseMessage(writeCtx, message.ID)
+		})
+		e.onThrottle()
+		return errorOutcome{retry: true}, true
+	case rules.ErrorQuota:
+		// The day's allowance is spent, so no amount of waiting will send this. The message is not a
+		// failed delivery — nothing was wrong with it — so it goes back to the queue and the campaign
+		// pauses with a reason the operator can act on. Resuming after the allowance resets sends the
+		// rest.
+		write("release", func(writeCtx context.Context) error {
+			return e.store.ReleaseMessage(writeCtx, message.ID)
+		})
+		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+			return e.pause(writeCtx, message.CampaignID, rules.QuotaPauseReason)
 		}); err != nil {
 			e.log.Error("pause", "campaign", message.CampaignID, "error", err)
 		}
