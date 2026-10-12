@@ -9,7 +9,7 @@
 | 项 | 说明 |
 |---|---|
 | SES 发信域名 | 已在 SES 里 verified。DKIM 与 MAIL FROM 都要配好——`mailcheap domains` 会把要发布的记录逐条打出来 |
-| IAM 凭据 | 一个 user 或 role，权限只需 `ses:SendEmail` 与 `ses:GetEmailIdentity`。**不要**给 `ses:SendRawEmail` 之外的任何东西 |
+| IAM 凭据 | 一个 user 或 role，权限只需 `ses:SendEmail`、`ses:GetEmailIdentity` 与 `ses:GetAccount`。**不要**给 `ses:SendRawEmail` 之外的任何东西。少了 `ses:GetAccount` 应用**仍然能发**，但只按 1/s 发（见下节） |
 | Configuration set | 一个 SES configuration set；它的 **event destination** 把 `Delivery`/`Bounce`/`Complaint` 发到 SNS |
 | SNS topic | 订阅到 `https://<你的域名>/api/webhooks/ses`，**已确认订阅**（确认是自动的：应用会去 GET 那个 SubscribeURL） |
 | 收信地址 | 一个你能打开的邮箱，且**它在 SES 沙箱里也是已验证的**（沙箱只能发给已验证地址） |
@@ -57,6 +57,43 @@ DRY_RUN=1 … scripts/ses-smoke.sh
 - **打开了但 `Opened` 是 0**：很多客户端默认拦图片。允许图片后重开一次。
 - **点了但 `Clicked` 是 0**：发送后 30 秒内的点击按扫描器处理（上游 `SCANNER_WINDOW_MS`），`curl` 一类的 User-Agent 也一律不计。用真正的浏览器点，且不要在发出后立刻点。
 - **退订了但状态没变**：`SESSION_SECRET` 如果在这封信发出之后被换过，信里所有链接的签名都会失效。换密钥等于让已发出的邮件里的链接全部作废——这是上游行为，不是 bug。
+
+## 发信速率（阶段 8）
+
+发信速率不是配置出来的，是**问出来的**：应用向 `GetAccount` 读账号的 `MaxSendRate` 与 24 小时额度，
+按 90%（`SEND_RATE_HEADROOM`）定速；被 SES 限流就减半，一分钟没被打回再按 10% 慢慢升回去。
+
+```sh
+docker compose exec mailcheap mailcheap quota
+# account       500 sends a second, 199,000 of 200,000 sent in the last 24 hours
+# sending       450/s (from the SES account)
+# 24h remaining 199,000
+# estimated     2s for 1,000 messages
+```
+
+| 设置 | 作用 | 不知道时的默认 |
+|---|---|---|
+| `SEND_CONCURRENCY` | 同时在飞的发送数 | 16 |
+| `SEND_RATE_HEADROOM` | 瞄准账号速率的几成 | 0.9 |
+| `SEND_RATE_PER_SECOND` | **自己的**上限（只能压低账号给的值） | 空＝不设 |
+
+**`SEND_CONCURRENCY` 要按账号算，不是照抄默认值。** 并发决定了速率的上限：N 个在飞、每次请求 L 秒，
+天花板就是 N/L。账号允许 450/s、SES 一次请求 80 ms 时，16 个 worker 只够 200/s——账号的额度会白白
+用不完。`N ≥ 速率 × 延迟` 才是够的（450 × 0.08 ≈ 36），所以慢账号 16 够用、快账号要更大。
+
+三件要知道的事：
+
+1. **读不到账号就按 1/s 发，并告警一次。** 这是保守方向：按账号上限发而其实读不到，会被连续限流；
+   按 1/s 发只是慢。这一条与 `SEND_RATE_PER_SECOND` 无关——上限只能压低账号给的数字，不能代替它。
+   修法是给 IAM 加 `ses:GetAccount`。
+2. **24 小时额度不够时整次拒绝**，不建任何 message、不动 campaign 状态，报文里写明还剩多少、建议分几批
+   （`--limit N` / MCP 的 `limit`）。压过额度是 SES 那边硬失败，不是"发得慢"。
+3. **限流与额度用尽用同一个错误码**，靠 message 文本区分。真实文本**未验证**（本仓库不接触 AWS）：
+   若真实文本不同，额度用尽会被当成普通限流——那一封会被释放重试，是保守方向的错，不会多发。
+
+真实账号上的第一次验证方式：`mailcheap quota` 应该打印出账号自己的数字（而不是 1/s），然后
+`campaign send` 一封测试信，看 `campaign report` 与 `docker compose logs mailcheap` 里有没有
+"could not read the SES sending quota"。
 
 ## 这个脚本不做什么
 
