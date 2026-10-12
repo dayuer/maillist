@@ -178,3 +178,47 @@ func TestUnimplementedRoutesAreNotFound(t *testing.T) {
 		t.Fatalf("status = %d, want 404", response.StatusCode)
 	}
 }
+
+// 真 SES 客户端对着假 SES：把 GetAccount 的方法与路径钉住。
+//
+// 阶段 5 的教训：假 SES 是按 API 的名字猜路径的，而 ListEmailIdentities 其实是 POST
+// /v2/email/list-identities，于是失败出现在第一次发送时。这一条用真客户端把路径钉在测试里。
+func TestTheRealQuotaClientAgreesWithTheFakeOnGetAccount(t *testing.T) {
+	fake := New(nil, WithQuota(Quota{
+		MaxSendRate: 500, Max24HourSend: 200_000, SentLast24Hours: 1_000,
+	}))
+	server := httptest.NewServer(fake.Handler())
+	defer server.Close()
+
+	reader, err := mailer.NewSESQuota(context.Background(), mailer.SESOptions{
+		Region: "eu-west-1", Endpoint: server.URL, AccessKeyID: "test", SecretKey: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quota, err := reader.Quota(context.Background())
+	if err != nil {
+		t.Fatalf("the real client could not read the fake's quota: %v", err)
+	}
+	if quota.MaxSendRate != 500 || quota.Max24HourSend != 200_000 || quota.SentLast24Hours != 1_000 {
+		t.Fatalf("quota = %+v", quota)
+	}
+	if quota.ReadAt.IsZero() {
+		t.Error("a reading has no time on it")
+	}
+}
+
+// 假 SES 没有配额时，真客户端拿到的是错误而不是一个零值的成功——零值会让应用以为账号不能发信。
+func TestAQuotaTheFakeWasNotGivenIsAnError(t *testing.T) {
+	server := httptest.NewServer(New(nil).Handler())
+	defer server.Close()
+	reader, err := mailer.NewSESQuota(context.Background(), mailer.SESOptions{
+		Region: "eu-west-1", Endpoint: server.URL, AccessKeyID: "test", SecretKey: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Quota(context.Background()); err == nil {
+		t.Fatal("an unconfigured fake answered a quota")
+	}
+}
