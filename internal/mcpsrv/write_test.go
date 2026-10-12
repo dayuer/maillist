@@ -357,3 +357,54 @@ func TestRunCleanupReportsAndMoves(t *testing.T) {
 
 // ptrTime is the one-liner the fixtures use for an optional timestamp.
 func ptrTime(at time.Time) *time.Time { return &at }
+
+// 写入时的闸门：解析器吃不下的正文在三个入口都被拒，且不入库（core/content.CheckRenderable）。
+func TestCampaignsRefuseMarkdownThatCannotBeRendered(t *testing.T) {
+	f := newFixture(t)
+	f.seedNewsletter(t, 1)
+	session := f.connect(t)
+	ctx := context.Background()
+
+	pathological := strings.Repeat("[a](", 25_000) // 100 KB of link openers
+	if message := callError(t, session, "create_campaign", map[string]any{
+		"newsletter": "field-notes", "subject": "Too complex", "markdown": pathological,
+	}); !strings.Contains(message, "too complex") {
+		t.Fatalf("create_campaign said %q", message)
+	}
+	// 什么都没写进去：拒绝发生在保存之前。
+	campaigns, err := f.store.Campaigns(ctx, "", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, campaign := range campaigns {
+		if campaign.Subject == "Too complex" {
+			t.Fatalf("a refused body was stored: %+v", campaign)
+		}
+	}
+
+	// 更新同一个闸门：先建一份正常的，再试着把正文换成病态的。
+	draft := call[campaignOut](t, session, "create_campaign", map[string]any{
+		"newsletter": "field-notes", "subject": "Ordinary", "markdown": "# Hello",
+	})
+	if message := callError(t, session, "update_campaign", map[string]any{
+		"campaign": draft.ID, "markdown": pathological,
+	}); !strings.Contains(message, "too complex") {
+		t.Fatalf("update_campaign said %q", message)
+	}
+	after, err := f.store.Campaign(ctx, draft.ID)
+	if err != nil || after.Body != "# Hello" {
+		t.Fatalf("the body changed anyway: %q %v", after.Body, err)
+	}
+
+	// 大而普通的正文照收：闸门拒绝的是结构，不是长度。
+	if _, err := f.store.Campaign(ctx, draft.ID); err != nil {
+		t.Fatal(err)
+	}
+	big := call[campaignOut](t, session, "create_campaign", map[string]any{
+		"newsletter": "field-notes", "subject": "Long but ordinary",
+		"markdown": strings.Repeat("Some ordinary words. ", 4000),
+	})
+	if big.ID == "" {
+		t.Fatal("100 KB of prose was refused")
+	}
+}

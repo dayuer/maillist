@@ -12,6 +12,7 @@ import (
 
 	"mailcheap/internal/app"
 	"mailcheap/internal/core/checks"
+	"mailcheap/internal/core/content"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/providers"
 	"mailcheap/internal/core/render"
@@ -90,6 +91,9 @@ func runCampaignUpdate(cmd *cobra.Command, args []string) error {
 			body, err := readBodyFile(path)
 			if err != nil {
 				return err
+			}
+			if err := content.CheckRenderable(campaign.Format, body); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
 			}
 			campaign.Body = body
 			changed = append(changed, "file")

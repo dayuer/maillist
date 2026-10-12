@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/slowinput"
 )
 
@@ -136,5 +137,25 @@ func TestTheCacheStaysWithinItsBudget(t *testing.T) {
 	cache.Render(bodies[0], true)
 	if parses := cache.Parses(); parses != 5 {
 		t.Errorf("parses = %d, want the oldest entry to have been evicted", parses)
+	}
+}
+
+// 写入时的闸门：解析器吃不下的正文被拒绝，普通正文通过，html 格式不看这一条（它本来就不解析）。
+func TestCheckRenderableRefusesWhatCannotBeRendered(t *testing.T) {
+	if err := CheckRenderable(model.FormatMarkdown, overBudget()); err == nil {
+		t.Fatal("a body that cannot be rendered in a second was accepted")
+	} else if !strings.Contains(err.Error(), "too complex") {
+		t.Errorf("err = %q", err)
+	}
+	if err := CheckRenderable(model.FormatMarkdown, "# Hello\n\nOrdinary prose with a [link](https://x.test)."); err != nil {
+		t.Errorf("ordinary Markdown was refused: %v", err)
+	}
+	// 大而普通：100 KB 的散文是毫秒级的。
+	if err := CheckRenderable(model.FormatMarkdown, strings.Repeat("Some ordinary words. ", 5000)); err != nil {
+		t.Errorf("100 KB of prose was refused: %v", err)
+	}
+	// html 走 frame，不解析。
+	if err := CheckRenderable(model.FormatHTML, overBudget()); err != nil {
+		t.Errorf("an html body was refused: %v", err)
 	}
 }

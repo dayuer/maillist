@@ -378,6 +378,13 @@ func (s *Server) handleAPICampaignsPost(w http.ResponseWriter, r *http.Request) 
 		apiError(w, http.StatusBadRequest, "body must be at most 100 KB")
 		return
 	}
+	// The same gate the CLI and MCP apply (core/content): a body that cannot be rendered in a second
+	// is refused rather than stored, because storing it commits every reader of its page, and every
+	// recipient of its email, to rendering it again.
+	if err := content.CheckRenderable(format, body); err != nil {
+		apiError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	archiveSlugField, archiveSlugIsString := asString(fields["archiveSlug"])
 	if !archiveSlugIsString || (archiveSlugField != "" && !sluggable(archiveSlugField)) {
 		apiError(w, http.StatusBadRequest,

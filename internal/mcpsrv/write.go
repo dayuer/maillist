@@ -179,6 +179,11 @@ func createCampaign(ctx context.Context, sess *session, credential store.Credent
 	if len(body) > validate.MaxBodyBytes {
 		return campaignOut{}, fmt.Errorf("the body is %d bytes; the limit is %d", len(body), validate.MaxBodyBytes)
 	}
+	// A body the archive page or the emails cannot render in a second is refused here, at the door:
+	// once it is stored, every reader and every recipient pays for it again.
+	if err := content.CheckRenderable(format, body); err != nil {
+		return campaignOut{}, err
+	}
 	archiveSlug := strings.TrimSpace(in.ArchiveSlug)
 	if archiveSlug != "" && !sluggable(archiveSlug) {
 		return campaignOut{}, errors.New(
@@ -246,6 +251,9 @@ func updateCampaign(ctx context.Context, sess *session, credential store.Credent
 		}
 		if len(body) > validate.MaxBodyBytes {
 			return campaignOut{}, fmt.Errorf("the body is %d bytes; the limit is %d", len(body), validate.MaxBodyBytes)
+		}
+		if err := content.CheckRenderable(format, body); err != nil {
+			return campaignOut{}, err
 		}
 		campaign.Format, campaign.Body = format, body
 		campaign.ThumbnailURL = firstImage(format, body)

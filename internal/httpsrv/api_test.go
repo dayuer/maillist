@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -437,5 +438,27 @@ func TestAPIIsNotReachableOnTheArchiveHost(t *testing.T) {
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("archive host = %d, want 404", response.StatusCode)
+	}
+}
+
+// v1 API 的同一道闸门：病态正文 400，正常正文照收。
+func TestAPIRefusesMarkdownThatCannotBeRendered(t *testing.T) {
+	server := newTestServer(t)
+	server.seedNewsletter(t)
+	key := server.seedKey(t, creds.ScopeWrite)
+
+	pathological := strings.Repeat("[a](", 25_000)
+	payload := `{"newsletter":"field-notes","subject":"Too complex","markdown":` + strconv.Quote(pathological) + `}`
+	response := server.postAPI(t, "/api/v1/campaigns", key, payload)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("pathological markdown = %d, want 400", response.StatusCode)
+	}
+	if got := body(t, response); !strings.Contains(got, "too complex") {
+		t.Errorf("answer = %q", got)
+	}
+
+	ordinary := `{"newsletter":"field-notes","subject":"Ordinary","markdown":"# Hello\n\nSome words."}`
+	if got := status(t, server.postAPI(t, "/api/v1/campaigns", key, ordinary)); got != http.StatusCreated {
+		t.Fatalf("ordinary markdown = %d, want 201", got)
 	}
 }
