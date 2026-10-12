@@ -103,3 +103,36 @@ func TestSignupCapCountsOneNewsletterInsideTheWindow(t *testing.T) {
 		t.Fatalf("second = %v %v, want it refused", inserted, err)
 	}
 }
+
+// A signup message written without a channel is on the default channel; one written with a channel
+// keeps it.
+func TestSignupMessageChannelRoundTrip(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	newsletter := seedNewsletter(t, db)
+	since := time.Now().UTC().Add(-time.Minute)
+	kinds := []model.MessageKind{model.KindWelcome, model.KindConfirmation}
+
+	want := map[string]string{}
+	for i, channel := range []string{"", "resend"} {
+		message := model.Message{
+			ID: ids.New(), Kind: model.KindWelcome, NewsletterID: newsletter.ID, ContactID: ids.New(),
+			Email: fmt.Sprintf("reader%d@example.com", i), Status: model.MessagePending,
+			CreatedAt: time.Now().UTC(), Channel: channel,
+		}
+		inserted, err := db.InsertSignupMessage(ctx, message, newsletter.ID, kinds, since, 100)
+		if err != nil || !inserted {
+			t.Fatalf("channel %q: inserted = %v, err = %v, want it written", channel, inserted, err)
+		}
+		want[message.ID] = map[string]string{"": model.DefaultChannel, "resend": "resend"}[channel]
+	}
+	for id, channel := range want {
+		got, err := db.Message(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Channel != channel {
+			t.Errorf("message %s: channel = %q, want %q", id, got.Channel, channel)
+		}
+	}
+}

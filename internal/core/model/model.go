@@ -196,8 +196,8 @@ type Message struct {
 	Provider          string // the recipient's mailbox provider (gmail, outlook, …), from core/providers
 	Status            MessageStatus
 	ProviderMessageID string // the id the sending channel returned; "" until sent
-	// Channel is the sending channel that carries this message; "default" is the SES account the
-	// SES_* settings describe. Empty when written means "default".
+	// Channel is the sending channel that carries this message; DefaultChannel is the SES account the
+	// SES_* settings describe. Empty when written means DefaultChannel.
 	Channel      string
 	Error        string
 	ClaimedAt    *time.Time

@@ -607,6 +607,10 @@ func (db *DB) SetMessageError(ctx context.Context, id, message string) error {
 	})
 }
 
+// messageByProviderIDWhere is MessageByProviderID's condition. Its last term, a non-empty
+// provider_message_id, repeats the partial index's own condition, which is what lets SQLite use it.
+const messageByProviderIDWhere = "channel = ? AND provider_message_id = ? AND provider_message_id <> ''"
+
 // MessageByProviderID loads the message a channel's own id names, which is how most events arrive.
 //
 // The id is only unique within its channel: two providers can hand out the same one, so the lookup
@@ -614,8 +618,7 @@ func (db *DB) SetMessageError(ctx context.Context, id, message string) error {
 // from the partial (channel, provider_message_id) index.
 func (db *DB) MessageByProviderID(ctx context.Context, channel, providerMessageID string) (model.Message, error) {
 	message, err := scanMessage(db.sql.QueryRowContext(ctx,
-		"SELECT "+messageColumns+" FROM messages WHERE channel = ? AND provider_message_id = ? AND provider_message_id <> ''",
-		channel, providerMessageID))
+		"SELECT "+messageColumns+" FROM messages WHERE "+messageByProviderIDWhere, channel, providerMessageID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Message{}, fmt.Errorf("message with provider id %s on channel %s: %w", providerMessageID, channel,
 			ErrNotFound)

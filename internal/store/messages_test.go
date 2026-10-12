@@ -375,6 +375,16 @@ func TestMessageByProviderIDIsScopedToItsChannel(t *testing.T) {
 	if _, err := db.MessageByProviderID(ctx, "sendgrid", providerID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("channel sendgrid: err = %v, want ErrNotFound", err)
 	}
+	// An unsent message has no provider id, and the empty id never matches it.
+	pending := base
+	pending.ID, pending.ContactID, pending.Email = ids.New(), ids.New(), "c@example.com"
+	pending.Status, pending.ProviderMessageID = model.MessagePending, ""
+	if _, err := db.InsertMessages(ctx, []model.Message{pending}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.MessageByProviderID(ctx, model.DefaultChannel, ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("empty provider id: err = %v, want ErrNotFound", err)
+	}
 }
 
 // The lookup by a channel's id is answered from the (channel, provider_message_id) index, not by
@@ -382,8 +392,8 @@ func TestMessageByProviderIDIsScopedToItsChannel(t *testing.T) {
 func TestMessageByProviderIDUsesTheChannelIndex(t *testing.T) {
 	ctx := context.Background()
 	db := openTemp(t)
-	rows, err := db.sql.QueryContext(ctx, "EXPLAIN QUERY PLAN SELECT id FROM messages "+
-		"WHERE channel = ? AND provider_message_id = ? AND provider_message_id <> ''", "default", "x")
+	rows, err := db.sql.QueryContext(ctx, "EXPLAIN QUERY PLAN SELECT "+messageColumns+
+		" FROM messages WHERE "+messageByProviderIDWhere, model.DefaultChannel, "x")
 	if err != nil {
 		t.Fatal(err)
 	}
