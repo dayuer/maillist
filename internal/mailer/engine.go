@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/aws/smithy-go"
@@ -37,6 +38,9 @@ type Config struct {
 	Limits         model.Limits
 	// PollInterval is how often Run looks for work.
 	PollInterval time.Duration
+	// SendConcurrency is how many sends may be in flight at once (SEND_CONCURRENCY). One makes the
+	// engine behave exactly as it did before this phase: a single file of messages.
+	SendConcurrency int
 	// Alerts tells the operator what went wrong. It is optional: the CLI builds an engine with no
 	// server behind it, and there is nobody to alert there.
 	Alerts *alerts.Notifier
@@ -175,81 +179,109 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		}
 	}
 
-	consecutiveFailures := 0
-	for i, message := range messages {
-		// Whatever stops the batch, the messages it did not reach go back to the queue: left
-		// claimed they would be recovered as unknown on the next start, which means silently
-		// dropping a send (D14).
+	// The batch is a dispatcher and a pool of workers.
+	//
+	// The dispatcher is this goroutine: it hands one message at a time to a worker, collects what comes
+	// back, and decides whether to hand out any more. Every decision that can stop a batch — the
+	// context, a campaign that paused itself, too many failures in a row, a bookkeeping error — is
+	// taken here, in one place, on one goroutine, which is what keeps "stop" from meaning four
+	// different things.
+	//
+	// What was never handed out goes back to the queue: left claimed they would be recovered as
+	// unknown on the next start, which means silently dropping a send (D14). What a worker is holding
+	// is not released — it finishes, because deliver only reports a cancellation from before the
+	// request was made (see deliver).
+	concurrency := e.cfg.SendConcurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > len(messages) {
+		concurrency = len(messages)
+	}
+	jobs := make(chan model.Message)
+	outcomes := make(chan sendOutcome, concurrency)
+	var workers sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for message := range jobs {
+				outcomes <- e.sendOne(ctx, message, suppressedSet)
+			}
+		}()
+	}
+
+	var (
+		next                int
+		outstanding         int
+		stopped             bool
+		firstErr            error
+		consecutiveFailures int
+	)
+	apply := func(out sendOutcome) {
+		if out.sent {
+			result.Sent++
+		}
+		result.Failed += out.failed
+		result.Suppressed += out.suppressed
+		result.Skipped += out.skipped
+		result.Retry = result.Retry || out.retry
+		switch {
+		case out.failed > 0:
+			consecutiveFailures += out.failed
+		case out.sent:
+			consecutiveFailures = 0
+		}
+		if out.err != nil && firstErr == nil {
+			firstErr = out.err
+		}
+		if out.stop {
+			stopped = true
+		}
+		if out.err != nil || (out.failed > 0 && out.campaignID != "" &&
+			consecutiveFailures >= rules.MaxConsecutiveFailures) {
+			stopped = true
+			if out.err == nil {
+				if err := e.pause(ctx, out.campaignID,
+					fmt.Sprintf("%d sends failed in a row", consecutiveFailures)); err != nil {
+					firstErr = err
+				}
+			}
+		}
+	}
+
+	for next < len(messages) || outstanding > 0 {
 		if ctx.Err() != nil {
 			result.Retry = true
-			e.releaseAll(ctx, messages[i:])
+			stopped = true
+		}
+		if !stopped && next < len(messages) {
+			select {
+			case jobs <- messages[next]:
+				next++
+				outstanding++
+				continue
+			case out := <-outcomes:
+				outstanding--
+				apply(out)
+				continue
+			}
+		}
+		if outstanding == 0 {
 			break
 		}
-		loaded, err := e.store.LoadMessageContext(ctx, message)
-		if err != nil {
-			e.releaseAll(ctx, messages[i:])
-			return result, fmt.Errorf("load message %s: %w", message.ID, err)
-		}
-		// The campaign may have been paused or finished since the audience was chosen.
-		if rules.IsCampaignKind(message.Kind) &&
-			(loaded.Campaign == nil || loaded.Campaign.Status != model.CampaignSending) {
-			result.Skipped++
-			if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
-				return result, err
-			}
-			continue
-		}
+		// Nothing more goes out: wait for what is in flight and count it.
+		apply(<-outcomes)
+		outstanding--
+	}
+	close(jobs)
+	workers.Wait()
 
-		required := model.ContactActive
-		if message.Kind == model.KindConfirmation {
-			required = model.ContactPending
-		}
-		if loaded.Contact.Status != required || suppressedSet[message.Email] {
-			if err := e.store.MarkMessageSuppressed(ctx, message.ID); err != nil {
-				return result, err
-			}
-			result.Suppressed++
-			continue
-		}
-
-		delivery, err := e.deliver(ctx, message, loaded, nil)
-		if err != nil {
-			// A cancelled context means we are stopping, not that the message is bad: it never
-			// reached SES, so it goes back to the queue instead of being marked failed.
-			//
-			// Releasing the current message is safe only because deliver cannot report a
-			// cancellation once it has called SES: the call runs on a detached context (see
-			// deliver), so the only cancellation it can surface is the send slot's, from before the
-			// request was made.
-			if ctx.Err() != nil {
-				e.releaseAll(ctx, messages[i:])
-				result.Retry = true
-				return result, nil
-			}
-			outcome, stop := e.handleSendError(ctx, message, loaded, err)
-			result.Failed += outcome.failed
-			result.Retry = result.Retry || outcome.retry
-			if stop {
-				e.releaseAll(ctx, messages[i+1:])
-				break
-			}
-			consecutiveFailures += outcome.failed
-			if outcome.failed > 0 && message.CampaignID != "" &&
-				consecutiveFailures >= rules.MaxConsecutiveFailures {
-				if err := e.pause(ctx, message.CampaignID,
-					fmt.Sprintf("%d sends failed in a row", consecutiveFailures)); err != nil {
-					return result, err
-				}
-				e.releaseAll(ctx, messages[i+1:])
-				break
-			}
-			continue
-		}
-		if err := e.recordSent(ctx, message, loaded, delivery); err != nil {
-			return result, err
-		}
-		result.Sent++
-		consecutiveFailures = 0
+	if next < len(messages) {
+		e.releaseAll(ctx, messages[next:])
+	}
+	if firstErr != nil {
+		return result, firstErr
 	}
 
 	// Settling is the last bookkeeping of a batch that may have just been cancelled, so it runs on
@@ -262,6 +294,111 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		}
 	}
 	return result, nil
+}
+
+// sendOutcome is what one worker did with one message. The dispatcher decides what to do with it; the
+// worker only reports.
+type sendOutcome struct {
+	sent       bool
+	skipped    int
+	suppressed int
+	failed     int
+	retry      bool
+	// stop tells the dispatcher to hand out nothing more: this is a condition the next message would
+	// meet too.
+	stop bool
+	// err is a failure of the bookkeeping itself — the batch cannot go on — and campaignID is the
+	// campaign the failure counter belongs to.
+	err        error
+	campaignID string
+}
+
+// sendOne is one message from a claimed batch, all the way to its write-back: the context it needs,
+// whether it may still go out, the send itself, and what became of it.
+//
+// It runs on a worker goroutine, so it may not touch anything the dispatcher owns. Everything it does
+// is either its own memory, a store write, or the sender — all of which are already safe for
+// concurrent use.
+func (e *Engine) sendOne(ctx context.Context, message model.Message,
+	suppressed map[string]bool) sendOutcome {
+	// Anything that leaves this message claimed when the worker returns is a message the next start
+	// recovers as unknown — a silently dropped send (D14). So every failure from here on releases it,
+	// on the detached context the bookkeeping uses, because the usual reason to be on one of these
+	// paths is that the batch's context was just cancelled.
+	abandon := func(err error) sendOutcome {
+		e.releaseAll(ctx, []model.Message{message})
+		if ctx.Err() != nil {
+			// The usual reason to be here is that the batch's context was just cancelled, and a stop
+			// is not a failure: Run's select picks at random between a done context and a ready
+			// ticker, so reporting this as an error would call a graceful shutdown a broken send.
+			return sendOutcome{retry: true, stop: true, campaignID: message.CampaignID}
+		}
+		return sendOutcome{err: err, stop: true, campaignID: message.CampaignID}
+	}
+
+	loaded, err := e.store.LoadMessageContext(ctx, message)
+	if err != nil {
+		return abandon(fmt.Errorf("load message %s: %w", message.ID, err))
+	}
+	// The campaign may have been paused or finished since the audience was chosen.
+	if rules.IsCampaignKind(message.Kind) &&
+		(loaded.Campaign == nil || loaded.Campaign.Status != model.CampaignSending) {
+		if err := e.releaseMessage(ctx, message.ID); err != nil {
+			return abandon(err)
+		}
+		return sendOutcome{skipped: 1}
+	}
+
+	required := model.ContactActive
+	if message.Kind == model.KindConfirmation {
+		required = model.ContactPending
+	}
+	if loaded.Contact.Status != required || suppressed[message.Email] {
+		if err := e.markSuppressed(ctx, message.ID); err != nil {
+			return abandon(err)
+		}
+		return sendOutcome{suppressed: 1}
+	}
+
+	delivery, err := e.deliver(ctx, message, loaded, nil)
+	if err != nil {
+		// A cancelled context means we are stopping, not that the message is bad: it never reached
+		// SES, so it goes back to the queue instead of being marked failed.
+		//
+		// Releasing it is safe only because deliver cannot report a cancellation once it has called
+		// SES: the call runs on a detached context (see deliver), so the only cancellation it can
+		// surface is the send slot's, from before the request was made.
+		if ctx.Err() != nil {
+			e.releaseAll(ctx, []model.Message{message})
+			return sendOutcome{retry: true, stop: true}
+		}
+		outcome, stop := e.handleSendError(ctx, message, loaded, err)
+		return sendOutcome{
+			failed: outcome.failed, retry: outcome.retry, stop: stop, campaignID: message.CampaignID,
+		}
+	}
+	if err := e.recordSent(ctx, message, loaded, delivery); err != nil {
+		// The message went out and its record did not. Releasing it would send it twice, so it stays
+		// claimed: the next start recovers it as unknown, which is "we do not know" and never "send it
+		// again" (D14).
+		return sendOutcome{err: err, stop: true, campaignID: message.CampaignID}
+	}
+	return sendOutcome{sent: true, campaignID: message.CampaignID}
+}
+
+// releaseMessage, markSuppressed and the counters run on the detached context: they are the
+// bookkeeping of a batch that is stopping, and losing them is what makes a message look unclaimed to
+// the next start rather than merely unrecorded.
+func (e *Engine) releaseMessage(ctx context.Context, id string) error {
+	return e.writeBack(ctx, func(writeCtx context.Context) error {
+		return e.store.ReleaseMessage(writeCtx, id)
+	})
+}
+
+func (e *Engine) markSuppressed(ctx context.Context, id string) error {
+	return e.writeBack(ctx, func(writeCtx context.Context) error {
+		return e.store.MarkMessageSuppressed(writeCtx, id)
+	})
 }
 
 // writeBack runs the bookkeeping a completed SES call owes the database.
@@ -306,27 +443,40 @@ func (e *Engine) handleSendError(ctx context.Context, message model.Message, loa
 	if message.CampaignID != "" {
 		action = rules.SendErrorAction(errorCode(cause), cause.Error())
 	}
+	// Every write below runs on the detached context. We know what became of this message, so the
+	// record of it must not be lost to a shutdown that arrived while it was being written: a message
+	// left claimed is one the next start recovers as unknown, and a pause that was not recorded leaves
+	// a hard-failing campaign looking like it is still sending.
+	write := func(what string, f func(context.Context) error) {
+		if err := e.writeBack(ctx, f); err != nil {
+			e.log.Error(what, "message", message.ID, "error", err)
+		}
+	}
 	switch action {
 	case rules.ErrorFail:
-		if err := e.store.MarkMessageFailed(ctx, message.ID, cause.Error()); err != nil {
-			e.log.Error("mark failed", "message", message.ID, "error", err)
-		}
-		if err := e.addFailedStats(ctx, message, loaded); err != nil {
+		write("mark failed", func(writeCtx context.Context) error {
+			return e.store.MarkMessageFailed(writeCtx, message.ID, cause.Error())
+		})
+		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+			return e.addFailedStats(writeCtx, message, loaded)
+		}); err != nil {
 			e.log.Error("failed stats", "message", message.ID, "error", err)
 		}
 		return errorOutcome{failed: 1}, false
 	case rules.ErrorPause:
-		if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
-			e.log.Error("release", "message", message.ID, "error", err)
-		}
-		if err := e.pause(ctx, message.CampaignID, cause.Error()); err != nil {
+		write("release", func(writeCtx context.Context) error {
+			return e.store.ReleaseMessage(writeCtx, message.ID)
+		})
+		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+			return e.pause(writeCtx, message.CampaignID, cause.Error())
+		}); err != nil {
 			e.log.Error("pause", "campaign", message.CampaignID, "error", err)
 		}
 		return errorOutcome{}, true
 	default: // retry
-		if err := e.store.ReleaseMessage(ctx, message.ID); err != nil {
-			e.log.Error("release", "message", message.ID, "error", err)
-		}
+		write("release", func(writeCtx context.Context) error {
+			return e.store.ReleaseMessage(writeCtx, message.ID)
+		})
 		return errorOutcome{retry: true}, true
 	}
 }

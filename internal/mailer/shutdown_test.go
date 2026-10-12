@@ -85,7 +85,12 @@ func TestGracefulShutdownRepeatedly(t *testing.T) {
 	}
 }
 
-// 取消 ctx 打断一个批次时，没轮到的已领取消息回到 pending——不是 unknown。
+// 取消 ctx 打断一个批次时，没轮到（或还没发出去）的已领取消息回到 pending——不是 unknown。
+//
+// The stop is not a failure and not a loss. How many messages got out before the cancel landed
+// depends on how many workers were in flight, so the test counts rather than assumes: whatever was
+// not sent is back in the queue, nothing is left claimed, and the restart finishes the campaign
+// without sending anyone a second copy.
 func TestCancelledBatchReleasesClaimedMessages(t *testing.T) {
 	f := newFixture(t, 20)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -95,25 +100,44 @@ func TestCancelledBatchReleasesClaimedMessages(t *testing.T) {
 
 	// The batch stops on the first send: the sender cancels as it is called.
 	f.fake.OnSend = func(int) { cancel() }
-	if _, err := f.engine.SendBatch(ctx, nil); err != nil {
-		t.Fatal(err)
+	result, err := f.engine.SendBatch(ctx, nil)
+	if err != nil {
+		t.Fatalf("a cancelled batch = %v, want a stop, not an error", err)
 	}
 	f.fake.OnSend = nil
 
+	if !result.Retry {
+		t.Fatalf("result = %+v, want Retry", result)
+	}
+	sent := f.fake.SentCount()
+	if sent != result.Sent {
+		t.Fatalf("%d messages reached the sender but %d were recorded", sent, result.Sent)
+	}
+	if sent == 0 || sent > 20 {
+		t.Fatalf("sent = %d", sent)
+	}
 	claimed, unknown, pending := claimedCount(t, f.db)
 	if claimed != 0 {
 		t.Fatalf("claimed = %d after a cancelled batch, want 0", claimed)
 	}
 	if unknown != 0 {
-		t.Fatalf("unknown = %d, want 0: nothing was sent, so nothing is uncertain", unknown)
+		t.Fatalf("unknown = %d, want 0: nothing was left in doubt", unknown)
 	}
-	if pending != 20-1 {
-		t.Fatalf("pending = %d, want %d", pending, 20-1)
+	if pending != 20-sent {
+		t.Fatalf("pending = %d, want %d (everything that was not sent is back in the queue)", pending, 20-sent)
 	}
 
-	// Everything still goes out afterwards.
-	if result := f.drain(t); result.Sent != 20-1 {
-		t.Fatalf("after the restart = %+v", result)
+	// Everything still goes out afterwards, and nobody gets a second copy.
+	if again := f.drain(t); again.Sent != 20-sent {
+		t.Fatalf("after the restart = %+v, want %d more", again, 20-sent)
+	}
+	if total := f.fake.SentCount(); total != 20 {
+		t.Fatalf("total sent = %d, want 20", total)
+	}
+	for email, count := range f.fake.SentPerRecipient() {
+		if count != 1 {
+			t.Errorf("%s received %d copies", email, count)
+		}
 	}
 }
 
