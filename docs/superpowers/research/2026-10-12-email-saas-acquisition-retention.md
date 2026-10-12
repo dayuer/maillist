@@ -1,9 +1,9 @@
 # 海外 Email List 产品：获客与留存打法调研
 
 - 调研日期：2026-10-12
-- 调研对象：Mailchimp、Klaviyo、Substack、beehiiv、Kit（原 ConvertKit）、MailerLite、Buttondown；第五节补充 Ghost、Sendy、listmonk、SparkLoop、上游 mailcheap
+- 调研对象：Mailchimp、Klaviyo、Substack、beehiiv、Kit（原 ConvertKit）、MailerLite、Buttondown；第五至七节补充 Ghost、Sendy、listmonk、SparkLoop、EmailOctopus、上游 mailcheap
 - 方法：一手来源优先（S-1 招股书、官方产品页/博客、官方定价页、代理商案例、收购公告），关键数字均注明出处；付费墙来源的转引数字单独标注置信度
-- 关联：为 maillist（本仓库）的产品/GTM 决策提供参照，启示见第四节，商业模式选择见第五节，托管版发信隔离见第六节
+- 关联：为 maillist（本仓库）的产品/GTM 决策提供参照，启示见第四节，商业模式选择见第五节，托管版发信隔离见第六节，支付意愿验证见第七节
 
 ## 一页结论
 
@@ -95,12 +95,13 @@ Kit 的创作者教育 + 年度报告、Mailchimp 的内容营销团队、Klaviy
 |---|---|---|
 | SES 按功能计价（à la carte，$0.10/千封） | ≈ $4 | 1× |
 | SES Essentials 套餐（$0.16/千封，新账户默认） | ≈ $6.4 | 1.6× |
+| EmailOctopus（托管，基于 SES；评测数字有分歧） | ≈ $44.5 | ~11× |
 | Buttondown | ≈ $79 | ~20× |
-| beehiiv Scale（月付） | $109 | ~27× |
+| beehiiv Lite（原 Scale，月付；2026-10-01 起，原价 $109） | $139 | ~35× |
 | Kit Creator | ≈ $139 | ~35× |
 
 - 价差买的是：编辑器、送达运维、推荐网络、变现工具、客服。用户觉得"不值"的时刻就是流失时刻——上游作者 Marc Lou 离开 beehiiv 的理由正是"很贵（$400/mo）"，然后自己写了 mailcheap（其 X 帖文，转引，置信中）。
-- **自托管产品的商业悖论**：它的卖点是"删掉这 20–35 倍价差"，但删掉价差也就删掉了自己的收入来源。任何自托管路线的商业模式都必须回答"那我收什么钱"。
+- **自托管产品的商业悖论**：它的卖点是"删掉这 11–35 倍价差"，但删掉价差也就删掉了自己的收入来源。任何自托管路线的商业模式都必须回答"那我收什么钱"。
 - **SES 计价已变（2026-07-21）**：2025-06-01 之后开通的 SES 账户默认进入 Essentials 套餐（$0.16/千封，含 Virtual Deliverability Manager），旧的 $0.10 按功能计价需手动切回。上游 README 的"约 $0.10/千封"对新用户默认不成立——部署文档应写明切换步骤，否则成本故事打六折。
 
 ### 5.2 收入模型谱系
@@ -150,7 +151,7 @@ maillist 现有设计已覆盖其中一部分：抑制名单、at-most-once 发�
 
 1. 第 1 节的非目标（不做多实例、不做多用户、不做外部服务）在 SaaS 视角下是缺陷，在"每客户一个容器"的托管视角下恰好是优点——隔离天然、故障域小、迁出就是交出一个 SQLite 文件。
 2. Ghost 证明了"开源 + 托管、不锁定"能做到千万级 ARR 和低流失。
-3. 20–35 倍的价差留足了空间：定价低于 Buttondown 仍有健康毛利。
+3. 11–35 倍的价差留足了空间：定价低于 Buttondown 仍有健康毛利。
 
 **托管版单位经济估算**（1 万订阅者、月 4 期，均为估算）：
 
@@ -162,12 +163,12 @@ maillist 现有设计已覆盖其中一部分：抑制名单、at-most-once 发�
 | 支付手续费（以 $29 定价计） | ~$1.2 |
 | **合计** | **≈ $7–11** |
 
-若定价 $29/月（约为 Buttondown 同档的 37%），毛利率约 60–75%。发送成本按量转嫁（超额按发送量计费），可以避免大名单客户吃掉毛利。
+若定价 $29/月（约为 Buttondown 同档的 37%，低于 EmailOctopus 同档；价格带推导见 7.2），毛利率约 60–75%。发送成本按量转嫁（超额按发送量计费），可以避免大名单客户吃掉毛利。
 
 ### 5.6 待决问题
 
 1. **发信账户模型**（决定 C 是否可行）：共享一个 SES 账户时，一个客户的投诉会封掉所有客户；按客户拆 AWS 子账户（AWS Organizations）隔离好但开通重。**已调研，结论见第六节**：SES Tenants 使 C 可行。
-2. **支付意愿验证**：上游 GitHub 约 677 star（发布数日内），说明存在"受不了平台价格"的人群，但 star ≠ 付费。建议先做托管版候补名单，测转化。
+2. **支付意愿验证**：上游 GitHub 约 677 star（发布数日内），说明存在"受不了平台价格"的人群，但 star ≠ 付费。**已做桌面调研并给出实验设计，见第七节**。
 3. **许可策略**：上游 MIT，本仓库继承 MIT（见 NOTICE）。若走 C，是否需要像 Ghost 一样保持完全开源（信任资产），还是对托管专属组件（开通、计费）闭源——倾向后者，本体保持 MIT。
 4. **待复核数字**：beehiiv "$20M ARR"仅见于二手转述，未找到一手来源，本文未采用。
 
@@ -231,6 +232,106 @@ AWS 实施指南原文明确："Tenant metrics contribute to the overall account
 
 托管版的发信账户问题**有可行解**：共享账户 + SES Tenants + 少量账户分片，每客户每月新增成本约 $0.21，二进制只需加一个配置项。剩余风险（租户指标仍计入账户级）靠产品层准入、日预算爬坡和低于 AWS 的自有告警线来压。5.5 推荐的方案 C 不因发信隔离而受阻。
 
+## 七、支付意愿验证
+
+桌面调研只能回答"有没有付费的先例、价格带在哪、该怎么测"，回答不了"会不会有人付给我们"。本节先整理现有证据，再给出实验设计和决策门槛。
+
+### 7.1 现有证据
+
+**需求信号（上游 mailcheap，截至 2026-10-12）**
+
+- 发布约两天：777 star、191 fork。
+- 上游关闭了 issue，作者明确不回答部署问题——想用但不会部署的人目前无处求助。
+- 上游仅有的 3 个 PR 全是扩展：接入 SparkLoop、改用 Neon + Resend、更新 SES 定价说明。
+- **偏差提醒**：star 和 fork 来自开发者，正是**最可能自己部署、最不可能为托管付费**的人群。这批信号证明"讨厌平台按人头收费"的情绪存在，不证明托管版有付费需求。
+
+**触发事件：beehiiv 2026-10 涨价**
+
+- 2026-10-01 起新用户适用新价；**老用户在 2026-11-01 之后的首次续费时切换**，年付用户到期前锁价。
+- 1 万订阅者档：Lite（原 Scale）$109 → $139；Pro（原 Max）$219 → $239；部分档位涨幅 48–52%（不同来源）。免费档仍是 2,500 人。
+- r/beehiiv 涨价讨论帖首日超过 80 条评论；有创作者公开表示在重新考虑平台。**但未见任何迁移数量的统计**——目前是情绪，不是行为。
+- 含义：**11 月续费季是一个有时限的窗口**，验证实验应赶在这之前上线。
+
+**已被付费的先例（价格锚）**
+
+| 产品 | 卖的是什么 | 价格 | 对我们的意义 |
+|---|---|---|---|
+| PikaPods 托管 listmonk | 只托管运行，不管送达 | 约 $4.8/月起 | "纯托管"的价格地板 |
+| Opsily 托管 listmonk | 托管 + 运维 | $8–11/月，不限订阅者 | 同上 |
+| Elestio 托管 listmonk | 独立 VM + 备份/监控 | $11/月起，实际常 $15–25 | 同上 |
+| EmailOctopus Connect | 软件 + **客户自带 SES** | Pro $8/月起（年付），SES 另付 | **BYO SES 档的直接对标** |
+| EmailOctopus 标准版 | 全托管，自家基于 SES 的发信 | 1 万人约 $44.5/月（评测有分歧，另一来源为 $24） | **全托管档的直接对标** |
+| Buttondown | 全托管，开发者向 | 1 万人约 $79/月 | 上沿 |
+| Ghost(Pro) | 开源本体的官方托管 | — | "开源 + 托管"能做到千万级 ARR |
+
+**最重要的发现：便宜的 SES 托管位置已经有人占了。** EmailOctopus 2014 年起家时就是"Mailchimp 太贵，用 SES 自己发"，至今十年、自述年收入 $3M+（GetLatka 估 $1.2M，冲突）、无融资。它同时卖全托管和 BYO SES 两档——**正是 5.5 方案 C 与 6.4 中 ⑤ 的组合**。因此：
+
+- "比 beehiiv 便宜"不是差异化，是入场门槛。
+- maillist 的可辩护差异只剩三项：**开源可迁出**（交出一个 SQLite 文件就走，无锁定）、**agent 原生**（MCP 发信全流程）、**单二进制可自托管**（付费用户随时可降级为自托管，这本身是信任卖点）。
+- 验证实验必须测的是"这三项值不值钱"，而不只是"便宜值不值钱"。
+
+### 7.2 价格带推导（1 万订阅者档）
+
+| 档位 | 对标 | 建议试价 |
+|---|---|---|
+| 托管运行 + 客户自带 SES | EmailOctopus Connect $8；listmonk 托管 $5–11 | $9/月 |
+| 全托管（含发信，Tenants 隔离） | EmailOctopus ≈$44.5；Buttondown $79 | $29/月 |
+| 全托管 + 迁移代办 + 独立账户分片 | beehiiv Lite $139 | $59/月 |
+
+成本见 5.5：全托管单客户约 $7–11/月，$29 档毛利 60–75%；BYO 档不含发信成本，$9 档毛利更高但绝对额小。
+
+### 7.3 目标人群与假设
+
+| 人群 | 画像 | 可能付费的档 | 风险 |
+|---|---|---|---|
+| A. 平台涨价难民 | beehiiv/Kit 上 2,500–25,000 订阅者，非技术，月账单 $49–169 | 全托管 $29 | 最大，但可能直接去 EmailOctopus/Buttondown |
+| B. 开发者 / indie hacker | 上游 fork 者，会部署 | BYO $9 或不付费 | 最可能自托管，付费意愿最低 |
+| C. agent 优先的运营者 | 用 Claude/ChatGPT 操作业务，想让 agent 发信 | 全托管或 BYO | 规模未知，但无直接竞品 |
+
+待验证假设（每条带证伪门槛）：
+
+- **H1 需求**：A 类人群在看到价格表后会留邮箱。冷流量访客→留邮箱 **<2% 即证伪**，≥5% 为强信号。
+- **H2 价格**：$29 全托管落在可接受区间内。Van Westendorp 的可接受区间上沿 **<$29 即需下调或砍成本**。
+- **H3 付费**：候补名单中有人愿意预付。30 天内预付 **<3% 或绝对数 <10 即证伪**。
+- **H4 差异化**：留邮箱的人里，选择理由勾选"无锁定/可迁出"或"agent/MCP"的占比 ≥30%。否则 maillist 只是更晚进场的 EmailOctopus。
+
+### 7.4 实验设计（承诺度递增，成本递增）
+
+| 序 | 实验 | 做法 | 指标与门槛 | 依赖 |
+|---|---|---|---|---|
+| E1 | 价格页 fake door | 落地页列三档价格，点击"开始"进入候补表单（不承诺上线日期）。表单问：当前平台、订阅者数、月账单、续费日、选择理由（多选，含 H4 选项） | 访客→留邮箱：<2% 停、2–5% 继续、≥5% 强信号；各档点击分布 | 无需任何托管代码 |
+| E2 | 价格敏感度 | 对候补名单发 Van Westendorp 四问 | 20–30 份出方向，≥100 份才定价；剔除自相矛盾答卷（通常 5–15%） | E1 |
+| E3 | 预付 / 创始用户价 | 候补名单分批（不要一次群发）开放"首年创始价"预付，可全额退款 | 30 天内预付 ≥3% 且 ≥10 人为过；<1% 停 | Stripe 链接即可 |
+| E4 | 礼宾式迁移 | 为 5–10 个预付用户人工迁移：beehiiv 导出 CSV → CLI 导入 → 手工起容器 + 建 SES 租户 | 迁移耗时、首期发送退信/投诉率、60 天留存 | 现有二进制 + 第六节的租户方案，无需控制面 |
+
+流量来源（与第四节第 5 条一致，全是自然渠道）：X 与 Hacker News（Show HN）发布、r/beehiiv 与 r/Newsletters 涨价讨论帖下的回答、对比 SEO 页（"beehiiv price increase alternative"、"mailcheap hosted"）、上游 mailcheap 的 fork 者（B 类，用于测 BYO 档）。
+
+基准提醒（多为工具厂商博客数字，作方向参考）：
+
+- 冷流量访客→留邮箱 2–5% 常见；暖流量（自有受众）6–12%。
+- 候补名单→付费：一次群发 1–4%，分批开放 8–15%；名单放置超过 90 天转化显著下滑。
+- 预付/定金：冷流量 0.5–5%，暖流量 3–15%。比留邮箱更能证明真实需求。
+
+### 7.5 时间线与决策规则
+
+| 时间 | 动作 |
+|---|---|
+| 2026-10 下旬 | 上线 E1 价格页，赶在 beehiiv 11 月续费前 |
+| 2026-11 上旬 | 候补名单 ≥30 人时发 E2；同时第一批开放 E3 |
+| 2026-11–12 | E4 礼宾迁移 5–10 人，观察 60 天 |
+| 2027-01 | 决策 |
+
+决策规则：
+
+- **H1 + H3 通过** → 建托管控制面（开通、计费、租户编排），按 7.2 定价上线。
+- **H1 过、H3 不过** → 有兴趣无付费：转向 BYO 档或纯开源（方案 A），不建全托管。
+- **H4 不过**（选择理由几乎全是"便宜"）→ 与 EmailOctopus 正面价格战不划算；回到开源 + agent 原生定位，商业化后置。
+- **H1 不过** → 托管版不做，项目保持开源工具定位。
+
+### 7.6 结论
+
+现有证据只够证明**情绪存在、窗口存在、价格带清晰**：beehiiv 涨价给了一个 11 月截止的时间窗；EmailOctopus、listmonk 托管商把价格带锚在 $5–45；上游 star 数说明"厌恶按人头收费"的人很多。但 star 来自最不会付费的开发者，迁移只有情绪没有数据，而便宜的 SES 托管位置已被 EmailOctopus 占了十年。**付费意愿目前未经验证**，结论取决于 E1–E3。E1 不需要写任何托管代码，应最先做。
+
 ## 主要来源
 
 - [Klaviyo S-1（SEC 原文）](https://www.sec.gov/Archives/edgar/data/1835830/000162828023030618/klaviyoincs-1.htm)
@@ -266,3 +367,16 @@ AWS 实施指南原文明确："Tenant metrics contribute to the overall account
 - [SES 开发者指南：出沙箱申请（按账户、按区域）](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html)
 - [SES 开发者指南：Sending authorization 概述](https://docs.aws.amazon.com/ses/latest/dg/sending-authorization-overview.html)
 - [AWS re:Post：多客户 SES 平台的客户审核最佳实践](https://repost.aws/articles/ARiPfzfFD3RbGzRPjn-2YdEg/client-vetting-best-practices-for-amazon-ses-customers-managing-multiple-client-accounts)
+- [EmailOctopus：beehiiv 2026 涨价与替代方案（竞品撰写，注意立场）](https://emailoctopus.com/blog/beehiiv-price-increase-2026)
+- [Net Influencer：beehiiv 涨价遭创作者反弹](https://www.netinfluencer.com/beehiiv-raises-prices-faces-pushback-from-creators/)
+- [EmailTooltester：beehiiv 定价（含涨幅）](https://www.emailtooltester.com/en/reviews/beehiiv/pricing/)
+- [EmailTooltester：EmailOctopus 定价](https://www.emailtooltester.com/en/reviews/emailoctopus/pricing/)
+- [EmailOctopus：营销打法与 $3M+ ARR](https://emailoctopus.com/blog/the-marketing-tactics-that-took-emailoctopus-to-over-3m-in-annual-revenue)
+- [Bootstrappers：EmailOctopus 从 SES 脚本起家](https://bootstrappers.com/how-these-founders-went-from-giving-away-their-product-to-making-130000-in-mrr/)
+- [Elestio：托管 listmonk](https://elest.io/open-source/listmonk)
+- [Opsily：listmonk 托管成本](https://opsily.com/hosting/listmonk/listmonk-cost)
+- [PikaPods 应用目录](https://www.pikapods.com/apps/)
+- [LaunchList：候补名单转付费基准](https://getlaunchlist.com/blog/convert-waitlist-to-paying-customers)
+- [Getwaitlist：候补名单转化基准](https://getwaitlist.com/blog/waitlist-benchmarks-conversion-rates)
+- [Fake door 测试门槛](https://swetrix.com/blog/fake-door-test)
+- [Van Westendorp 样本量（SaaS 创始人指南）](https://thesaaslibrary.com/pricing-research-methods-saas-founders/)
