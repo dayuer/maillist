@@ -114,16 +114,9 @@ func newFixtureConfigured(t *testing.T, contacts int, configure func(*Config),
 		newsletter: newsletter, campaign: campaign, contacts: audience}
 }
 
-// testLogWriter is a logger that writes to the test's own output, so a failing test shows what the
-// engine said. logCapture is the same thing with a memory: a pause's reason reaches the log and the
-// alert and nothing else, so this is where a test can read it back.
-type testLogWriter struct{ t *testing.T }
-
-func (w *testLogWriter) Write(p []byte) (int, error) {
-	w.t.Log(strings.TrimSpace(string(p)))
-	return len(p), nil
-}
-
+// logCapture is a logger that writes what the engine said into the test's own output, and keeps a
+// copy. It keeps one because a pause's reason reaches the log and the alert and nothing else, so this
+// is the only place a test can read it back.
 type logCapture struct {
 	t     *testing.T
 	mu    sync.Mutex
