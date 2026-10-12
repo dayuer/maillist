@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"mailcheap/internal/core/content"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/providers"
+	"mailcheap/internal/core/ratectl"
 	"mailcheap/internal/core/render"
 	"mailcheap/internal/core/rules"
 	"mailcheap/internal/core/schedule"
@@ -219,6 +221,30 @@ func runCampaignPreview(cmd *cobra.Command, args []string) error {
 	})
 }
 
+// describeRate says where the rate came from, because "1/s" reads very differently when it is the
+// account's own number and when it is the floor this process falls back to before it has read one.
+func describeRate(rate mailer.SendingRate) string {
+	if !rate.Known {
+		return trimRate(rate.PerSecond) + "/s (configured; no SES quota read)"
+	}
+	return trimRate(rate.PerSecond) + "/s (from the SES account)"
+}
+
+// describeRemaining is the account's 24-hour allowance, the ceiling D18 refuses a step against.
+func describeRemaining(rate mailer.SendingRate) string {
+	switch {
+	case !rate.Known:
+		return "unknown (no SES quota read)"
+	case rate.Remaining24h >= ratectl.Unlimited:
+		return "unlimited"
+	default:
+		return stats.FormatNumber(rate.Remaining24h)
+	}
+}
+
+// trimRate prints 450 rather than 450.000000, and a fractional rate as itself.
+func trimRate(value float64) string { return strconv.FormatFloat(value, 'f', -1, 64) }
+
 func newCampaignCheckCmd() *cobra.Command {
 	check := &cobra.Command{
 		Use:   "check [campaign-id]",
@@ -247,12 +273,23 @@ func runCampaignCheck(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		rate := a.Mailer.SendingRate()
+		estimated := rate.Estimate(audience).Round(time.Second).String()
 		if jsonOutput(cmd) {
-			if err := printJSON(cmd, map[string]any{"checks": report, "audience": audience}); err != nil {
+			if err := printJSON(cmd, map[string]any{
+				"checks": report, "audience": audience,
+				"sending": rate, "estimated": estimated,
+			}); err != nil {
 				return err
 			}
 		} else {
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "audience       %s\n", stats.FormatNumber(audience))
+			// What the send costs in time, and which ceiling it spends (D17, D18): "queue 200,000
+			// recipients" is a different decision at 450 a second than at 1 a second, and the operator
+			// is the one who decides whether to split it.
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "rate           %s\n", describeRate(rate))
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "24h remaining  %s\n", describeRemaining(rate))
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "estimated      %s\n", estimated)
 			for _, item := range report {
 				mark := "ok  "
 				if !item.OK {
