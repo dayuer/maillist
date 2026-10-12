@@ -10,21 +10,6 @@ import (
 	"nibwire/internal/mailer"
 )
 
-// verifiedDomains is the list of domains SES considers verified, or an error the operator can act
-// on. A send must not proceed on an unverified domain: SES accepts the API call and then drops the
-// mail, which looks like a successful send and is not.
-//
-// The filtering itself is mailer.VerifiedDomains, which is what the MCP surface's pre-send checks
-// use: two implementations of "which of these may send" would be two answers to one question
-// (phase 9 #44).
-func verifiedDomains(ctx context.Context, a *app.App) ([]string, error) {
-	identities, err := a.Identities.Identities(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("ask SES for the sending identities: %w", err)
-	}
-	return mailer.VerifiedDomains(identities), nil
-}
-
 func newDomainsCmd() *cobra.Command {
 	domains := &cobra.Command{
 		Use:   "domains",
