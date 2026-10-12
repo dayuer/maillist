@@ -10,7 +10,6 @@ import (
 	"nibwire/internal/config"
 	"nibwire/internal/core/checks"
 	"nibwire/internal/core/model"
-	"nibwire/internal/mailer"
 )
 
 // countingAudience stands in for the store: the checklist needs one number from it and this keeps
@@ -45,8 +44,25 @@ func readyNewsletter() model.Newsletter {
 	}
 }
 
-func identityReader(domains ...string) mailer.StaticIdentity {
-	return mailer.StaticIdentity{Domains: domains}
+func identityReader(domain string) *recordingIdentities {
+	return &recordingIdentities{verified: domain}
+}
+
+// recordingIdentities answers about the one domain SES is said to have verified, and remembers what
+// it was asked: the checklist asks about the newsletter's From domain and nothing else, which with a
+// tenant configured is the whole conversation with SES (phase 9 #57).
+type recordingIdentities struct {
+	verified string
+	err      error
+	asked    []string
+}
+
+func (r *recordingIdentities) VerifiedDomain(_ context.Context, domain string) (bool, error) {
+	r.asked = append(r.asked, domain)
+	if r.err != nil {
+		return false, r.err
+	}
+	return domain != "" && strings.EqualFold(domain, r.verified), nil
 }
 
 // 一次装配同时给出清单与受众数，且这条装配给出的清单是"可以发"：两条检查（unsubscribe 与 content）
@@ -120,10 +136,27 @@ func TestAssembleBlocksOnAnEmptyBody(t *testing.T) {
 	}
 }
 
+// 装配只问一个域名：newsletter 的发信域名，取出来是去掉大小写的裸域名。少问或多问都会让租户密钥
+// 收不窄（#57）。
+func TestAssembleAsksAboutTheFromDomainAndNothingElse(t *testing.T) {
+	identities := identityReader("example.net")
+	newsletter := readyNewsletter()
+	newsletter.FromEmail = "Jane@Example.NET"
+
+	if _, err := Assemble(context.Background(), identities, countingAudience{count: 1},
+		sendingConfig(), readyCampaign(), newsletter); err != nil {
+		t.Fatal(err)
+	}
+	if len(identities.asked) != 1 || identities.asked[0] != "example.net" {
+		t.Fatalf("asked about %v, want exactly the from domain %q", identities.asked, "example.net")
+	}
+}
+
 // 读不到身份状态时整个装配失败，而不是给出一份"域名未验证"的清单：前者让操作员去修，后者看起来像
 // 一份结论。
 func TestAssembleFailsWhenTheIdentitiesCannotBeRead(t *testing.T) {
-	_, err := Assemble(context.Background(), failingIdentities{errors.New("SES is unreachable")},
+	_, err := Assemble(context.Background(),
+		&recordingIdentities{err: errors.New("SES is unreachable")},
 		countingAudience{count: 1}, sendingConfig(), readyCampaign(), readyNewsletter())
 	if err == nil || !strings.Contains(err.Error(), "SES is unreachable") {
 		t.Fatalf("err = %v", err)
@@ -139,7 +172,3 @@ func TestAssembleFailsWhenTheAudienceCannotBeCounted(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
-
-type failingIdentities struct{ err error }
-
-func (f failingIdentities) Identities(context.Context) ([]mailer.Identity, error) { return nil, f.err }

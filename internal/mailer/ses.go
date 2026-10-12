@@ -44,9 +44,12 @@ type SESOptions struct {
 	// than as another constructor argument because it is part of the same picture — where SES is and
 	// who is asking — and because there is one place that builds these options.
 	//
-	// Only the sender uses it. A tenant has its own identities and configuration sets, but which
-	// tenant an operator means is settled by this name, not by looking it up: the domain check and
-	// the quota reader stay account-level, and associating resources with a tenant is done in SES.
+	// The sender sends through it, and the identity reader answers the pre-send check's one question
+	// about one domain rather than listing the account, so a tenant's keys can be narrowed to its own
+	// identities (phase 9 #57). A tenant has its own identities and configuration sets, but which
+	// tenant an operator means is settled by this name, not by looking it up. The quota reader stays
+	// account-level: SES_TENANT_NAME does not reach GetAccount, and the day's allowance belongs to the
+	// account that pays for it either way.
 	TenantName string
 }
 

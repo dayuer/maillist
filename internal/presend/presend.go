@@ -16,12 +16,13 @@ import (
 	"nibwire/internal/core/model"
 	"nibwire/internal/core/render"
 	"nibwire/internal/core/rules"
-	"nibwire/internal/mailer"
 )
 
-// Identities is where the sending identities come from: mailer.IdentityReader in production.
+// Identities answers the one identity question the checklist asks: is this domain verified for
+// sending? mailer.SESIdentity implements it, with a tenant configured and without one — and with a
+// tenant it asks SES about that domain alone instead of enumerating the account (phase 9 #57).
 type Identities interface {
-	Identities(ctx context.Context) ([]mailer.Identity, error)
+	VerifiedDomain(ctx context.Context, domain string) (bool, error)
 }
 
 // Audience counts the contacts a newsletter would reach: *store.DB in production. It is an interface
@@ -44,9 +45,10 @@ type Report struct {
 // send and is not.
 func Assemble(ctx context.Context, identities Identities, audience Audience, cfg config.Config,
 	campaign model.Campaign, newsletter model.Newsletter) (Report, error) {
-	verified, err := identities.Identities(ctx)
+	domain := rules.DomainOf(newsletter.FromEmail)
+	verified, err := identities.VerifiedDomain(ctx, domain)
 	if err != nil {
-		return Report{}, fmt.Errorf("ask SES for the sending identities: %w", err)
+		return Report{}, fmt.Errorf("ask SES about the sending domain: %w", err)
 	}
 	count, err := audience.CountActiveContacts(ctx, newsletter.ID)
 	if err != nil {
@@ -70,7 +72,7 @@ func Assemble(ctx context.Context, identities Identities, audience Audience, cfg
 			},
 			SendingOn:      cfg.SendingOn,
 			Limits:         cfg.Limits,
-			DomainVerified: rules.VerifiedFromDomain(mailer.VerifiedDomains(verified), newsletter.FromEmail),
+			DomainVerified: verified,
 		}),
 	}, nil
 }

@@ -65,8 +65,10 @@ DRY_RUN=1 … scripts/ses-smoke.sh
 | 代码 | SES v2 操作 | 需要的权限 | 少了它会怎样 |
 |---|---|---|---|
 | `internal/mailer/ses.go` | `SendEmail` | `ses:SendEmail` | 一封都发不出去，第一封就报错 |
-| `internal/mailer/identity.go` | `ListEmailIdentities` | `ses:ListEmailIdentities` | `nibwire domains` 与发送前的域名检查看不到任何身份 |
+| `internal/mailer/identity.go` | `ListEmailIdentities` | `ses:ListEmailIdentities` | `nibwire domains` 看不到任何身份；**未配置租户时**发送前的域名检查也看不到（配置了租户就不走这条，见「SES Tenants」） |
 | `internal/mailer/identity.go` | `GetEmailIdentity` | `ses:GetEmailIdentity` | 域名检查无法判定，`domains` 打不出 DKIM 状态 |
+
+**一条身份列表可能不止一页**：`ListEmailIdentities` 每次最多返回 100 个，应用会按 `NextToken` 翻到最后一页（阶段 9 #56）。多租户共用一个账号时身份数很容易过百，而实例自己的发信域名完全可能排在第二、第三页——只看第一页会把"已验证"读成"未验证"并拒绝发送。
 | `internal/mailer/quota.go` | `GetAccount` | `ses:GetAccount` | **仍然能发，但只按 1/s 发**（见「发信速率」） |
 
 ```json
@@ -107,6 +109,35 @@ DRY_RUN=1 … scripts/ses-smoke.sh
    连字符、下划线（[CreateTenant 参考](https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_CreateTenant.html)）。
    应用按同一条规则校验 `SES_TENANT_NAME`，不合法**拒绝启动**并指出是哪一条规则。
 2. 发信身份与 configuration set **已关联到该租户**：SES 只在"这次请求点到的每个资源（身份、configuration set、模板）都属于这个租户"时才接受发送（[SendEmail 参考](https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html) 的 `TenantName`）。
+
+**配置了租户，IAM 可以收窄**（阶段 9 #57）。发送前的域名检查不再枚举账户里的全部身份，而是**只对
+newsletter 的发信域名问一次** `GetEmailIdentity`。所以租户侧的读权限可以这样给：
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["ses:SendEmail", "ses:GetEmailIdentity"],
+    "Resource": "arn:aws:ses:<region>:<account>:identity/<这个租户的域名>"
+  }, {
+    "Effect": "Allow",
+    "Action": "ses:GetAccount",
+    "Resource": "*"
+  }]
+}
+```
+
+- 不再需要 `ses:ListEmailIdentities`：配置了租户时**没有任何调用点**走它。这只是预检与发信这一条路；
+  `nibwire domains`（与 MCP 的 `list_domains`）显示的是账号级身份列表，仍然要这条权限，租户密钥跑它会
+  得到一条授权错误——这是有意的：那个命令问的就是"账号里有哪些身份"。
+- `GetEmailIdentity` 的 `Resource` 可以收到自己身份（或域名）的 ARN。`ses:GetAccount` 与
+  `ses:SendEmail` 的资源语义仍按上一节的说明，**这些收窄没有在真实账号上验证过**。
+- 域名不在这个租户里时 SES 返回 `NotFoundException`，应用读作"未验证"并拦住发送；**读被拒绝**
+  （`AccessDeniedException`）则是错误，会原样报给操作员——把前者当错误会让操作员改一个改不好的域名，
+  把后者当"未验证"会让一条缺权限的密钥看起来像域名没验证。
+- 本 SDK 版本里 `GetEmailIdentity` 与 `ListEmailIdentities` **没有** `TenantName` 参数（只有 `SendEmail`
+  有，见 `api_op_*.go` 的请求结构），所以收窄只能靠 IAM 资源，不能靠请求参数。
 
 **租户出问题时**：租户不存在返回 `NotFoundException`（HTTP 404，"The resource you attempted to access
 doesn't exist"），租户被停用返回 `SendingPausedException`——两个都会被归入「暂停 campaign + 告警、
