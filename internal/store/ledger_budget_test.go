@@ -121,8 +121,18 @@ func TestAStepWritesEveryChunkAndIsChargedExactlyOnce(t *testing.T) {
 	}
 }
 
-// 一步的插入不能把单写入方占死：一边在写 20 万封，另一边记一条单行写入要在 200 ms 内完成（#61，设计 §5.2
-// 第 2 条）。
+// 一步的插入不能把单写入方占死：一边在写两万封，另一边记一条单行写入，它等待的时间只应当够写“一块”，
+// 而不是“整步”（#61，设计 §5.2 第 2 条）。
+//
+// 断言不写成绝对墙钟：同一份代码在 CI 上带 -race 时慢一个数量级，200 ms 会红，那是机器快慢不是形状。
+// 所以先在同一个库里量一块 1000 条的提交耗时 c（三次取最慢，宁可把预算放宽也不误判），再断言等待
+// <= 4c + 50ms。
+//
+// 两条断言各挡一个形状，也各自说明为什么它必要：
+//   - 等到第一行可见时整步已经写完：那正是"整步一个事务"的样子。它只写一块时单行写入几乎不用等，
+//     只看耗时看不出来，必须看这一步本身还没走完。
+//   - 等待超过 4c：前几行早就可见，写锁却被后面十几块攥在手里（例如第一块按块走、其余合成一个大事务）。
+//     形状的差别与机器无关，是两个数量级：等一块，与等剩下的十九块。
 //
 // The shape this replaces was one transaction for the whole step, sized by the audience: at about
 // sixty-one thousand rows a second a million messages held the writer for sixteen seconds, and
@@ -130,12 +140,31 @@ func TestAStepWritesEveryChunkAndIsChargedExactlyOnce(t *testing.T) {
 // The CLI's own busy_timeout is ten seconds, so its writes failed outright.
 func TestAStepBeingWrittenDoesNotBlockASingleRow(t *testing.T) {
 	if testing.Short() {
-		t.Skip("writes two hundred thousand messages")
+		t.Skip("writes twenty thousand messages")
 	}
 	db := openTemp(t)
 	ctx := context.Background()
+
+	// c: what one chunk of a step costs to commit here, now, on this machine. Its own campaign, so the
+	// count below is about the step alone. The slowest of three, because the budget that comes out of
+	// it is meant to absorb this machine's jitter, not to be a tight fit.
+	noise := sendingCampaign(t, db)
+	var chunkCost time.Duration
+	for i := 0; i < 3; i++ {
+		chunk := campaignMessages(t, db, noise, InsertChunkSize)
+		start := time.Now()
+		if _, err := db.InsertMessages(ctx, chunk); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(start); elapsed > chunkCost {
+			chunkCost = elapsed
+		}
+	}
+	budget := 4*chunkCost + 50*time.Millisecond
+
+	const audience = 20_000
 	campaign := sendingCampaign(t, db)
-	step := campaignMessages(t, db, campaign, 200_000)
+	step := campaignMessages(t, db, campaign, audience)
 
 	done := make(chan struct{})
 	go func() {
@@ -147,18 +176,19 @@ func TestAStepBeingWrittenDoesNotBlockASingleRow(t *testing.T) {
 
 	// Wait until the step is being written. Its first chunk is committed with the reservation, so
 	// rows appearing is the signal — and a read, which WAL does not block on.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		var written int
+	written := func() int {
+		var count int
 		if err := db.Row(ctx, "SELECT count(*) FROM messages WHERE campaign_id = ?",
-			campaign.ID).Scan(&written); err != nil {
+			campaign.ID).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
-		if written > 0 {
-			break
-		}
+		return count
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for written() == 0 {
 		if time.Now().After(deadline) {
-			t.Fatal("the step never started writing")
+			t.Fatal("the step never committed its first chunk: the writer is holding the lock for " +
+				"the whole step, or the step is not running at all")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -169,9 +199,18 @@ func TestAStepBeingWrittenDoesNotBlockASingleRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	elapsed := time.Since(start)
+	writtenWhenItLanded := written()
 	<-done
-	if elapsed > 200*time.Millisecond {
-		t.Fatalf("a single write took %s while a step was being inserted", elapsed)
+	t.Logf("one chunk of %d committed in %s; the single write waited %s, budget %s, at %d of %d rows",
+		InsertChunkSize, chunkCost, elapsed, budget, writtenWhenItLanded, audience)
+	if elapsed > budget {
+		t.Fatalf("a single write waited %s behind a step that was being inserted, budget %s "+
+			"(four chunk commits plus 50ms): the writer is holding the lock across more than one chunk",
+			elapsed, budget)
+	}
+	if writtenWhenItLanded >= audience {
+		t.Fatalf("the step had already written all %d rows when the single write landed, so it waited "+
+			"for nothing: the whole step went in one transaction, and this test measured nothing", audience)
 	}
 }
 
