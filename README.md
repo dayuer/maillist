@@ -1,4 +1,4 @@
-# Mail Turbo AI（暂定名）
+# Nibwire
 
 单二进制、单 SQLite 文件、经 Amazon SES 发信的 newsletter 工具，用 CLI 与 MCP 管理。移植自 [marclou/mailcheap](https://github.com/marclou/mailcheap)（MIT，见 `NOTICE`）。设计见 [`docs/superpowers/specs/`](docs/superpowers/specs/)。
 
