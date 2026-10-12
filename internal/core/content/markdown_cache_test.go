@@ -159,3 +159,32 @@ func TestCheckRenderableRefusesWhatCannotBeRendered(t *testing.T) {
 		t.Errorf("an html body was refused: %v", err)
 	}
 }
+
+// 被「槽位都占着」挡回去的那一次不算判断：它是对此刻的描述，不是对这份正文的描述。
+//
+// 记住它会把「忙的那一秒」变成一个长期显示为纯文本的页面，直到这条被逐出为止。下一次请求要再试。
+func TestASaturatedRenderIsNotRemembered(t *testing.T) {
+	cache := NewCache(DefaultCacheBytes)
+	ordinary := "# Hello\n\nOrdinary prose."
+
+	// 占满槽位：让两个跑不完的解析在后台。
+	for i := 0; i < MaxConcurrentParses; i++ {
+		go func() { _, _ = cache.Render(overBudget(), true) }()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for cache.Peak() < int64(MaxConcurrentParses) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if peak := cache.Peak(); peak < int64(MaxConcurrentParses) {
+		t.Skipf("could not saturate the cache (peak %d)", peak)
+	}
+
+	got, within := cache.Render(ordinary, true)
+	if within {
+		t.Fatalf("a saturated render was judged as rendered: %q", got)
+	}
+	// 关键的一条：它没有被记住，所以槽位空出来之后同一份正文能正常渲染。
+	if _, cached := cache.lookup(cacheKey(ordinary, true)); cached {
+		t.Fatal("the saturated fallback was remembered: the page would stay text")
+	}
+}

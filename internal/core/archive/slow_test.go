@@ -112,14 +112,15 @@ func TestSEOIsLinearOnSlowInputs(t *testing.T) {
 }
 
 // 深到清洗器处理不了的嵌套也开不出一个脚本：真正要保住的是「没有任何标记活下来」。
+//
+// 断言的是这一点，而不是「输出里没有 alert 这个词」：解析器超预算或进程正忙时，正文会以**转义后的
+// 纯文本**出现，那时 alert(1) 作为文字就在页面上——它是死的，因为尖括号已经被转义。写成「不含 alert」
+// 会在机器慢的时候偶发失败（CI 上就是这样），而它测的也不是那条性质。
 func TestDeepNestingCannotOpenAScriptOnThePage(t *testing.T) {
 	newsletter := model.Newsletter{Slug: "field-notes", ArchiveEnabled: true}
 	for _, depth := range []int{1, 7, 8, 9, 50} {
 		rendered := RenderIssueBody(campaignWith(model.FormatMarkdown, slowinput.Nested(depth)), newsletter)
 		assertNoRunnableMarkup(t, rendered.HTML, "nested")
-		if strings.Contains(rendered.HTML, "alert") {
-			t.Errorf("depth %d: the script's text survived: %q", depth, rendered.HTML)
-		}
 	}
 }
 
