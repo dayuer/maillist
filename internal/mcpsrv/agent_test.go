@@ -88,7 +88,7 @@ func TestAnAgentCanRunTheWholeFlowOverMCP(t *testing.T) {
 	if report.Stats.Sent != 1 || report.Stats.Recipients != 1 {
 		t.Fatalf("report = %+v", report.Stats)
 	}
-	if report.Campaign.Status != "sent" || report.Campaign.SentAt == nil {
+	if report.Campaign.Status != "sent" || report.Campaign.SentAt == "" {
 		t.Fatalf("campaign = %+v", report.Campaign)
 	}
 	// 测试副本在哨兵联系人名下，所以它不在收件人里，也不在 provider 分组里。

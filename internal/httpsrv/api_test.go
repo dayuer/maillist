@@ -17,9 +17,16 @@ import (
 // seedKey mints an api credential and returns its token.
 func (s *testServer) seedKey(t *testing.T, scopes ...creds.Scope) string {
 	t.Helper()
+	return s.seedKeyOfKind(t, creds.KindAPI, scopes...)
+}
+
+// seedKeyOfKind mints a credential of the given kind, for the test that a token only works on the
+// entry point it was issued for.
+func (s *testServer) seedKeyOfKind(t *testing.T, kind string, scopes ...creds.Scope) string {
+	t.Helper()
 	generated := creds.Generate()
 	credential := store.Credential{
-		ID: ids.New(), Kind: "api", Name: "site", Prefix: generated.Prefix,
+		ID: ids.New(), Kind: kind, Name: "site", Prefix: generated.Prefix,
 		TokenHash: generated.Hash, Scopes: scopes, CreatedAt: time.Now().UTC(),
 	}
 	if err := s.store.CreateCredential(context.Background(), credential); err != nil {
@@ -45,6 +52,21 @@ func (s *testServer) getAPI(t *testing.T, path, token string) *http.Response {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 	return s.do(request)
+}
+
+// mcp token 不在这扇门上：kind 是签发时的用途，两个入口各认自己那一种。
+//
+// 没有这条检查时，一个发出去的 mcp token 会被网站的表单当成 api key 用，而 `credentials list`
+// 上写着 mcp 的那一行就成了无意义的字。
+func TestAPIRejectsAMCPToken(t *testing.T) {
+	server := newTestServer(t)
+	server.seedNewsletter(t)
+	token := server.seedKeyOfKind(t, creds.KindMCP, creds.ScopeWrite)
+
+	body := `{"newsletter":"field-notes","email":"reader@example.com"}`
+	if got := status(t, server.postAPI(t, "/api/v1/contacts", token, body)); got != http.StatusUnauthorized {
+		t.Fatalf("an mcp token = %d, want 401", got)
+	}
 }
 
 // 没有凭据、凭据不对、凭据已撤销 —— 都是 401，且不泄露库里有没有这个 hash。

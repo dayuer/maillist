@@ -108,13 +108,21 @@ func (s *Server) routes() http.Handler {
 // Run serves until ctx is cancelled, then shuts down gracefully within shutdownTimeout: in-flight
 // requests finish, new connections are refused.
 func (s *Server) Run(ctx context.Context, addr string, shutdownTimeout time.Duration) error {
+	return Serve(ctx, addr, s, shutdownTimeout)
+}
+
+// Serve runs one handler on its own listener with the same timeouts and the same graceful shutdown,
+// for the process's other listeners: serve runs the reader surface and the MCP endpoint, and both
+// have to stop the same way.
+func Serve(ctx context.Context, addr string, handler http.Handler, shutdownTimeout time.Duration) error {
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           s,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// No WriteTimeout: an MCP session's response can be a stream that stays open. The reader
+		// routes bound their own work, and a write timeout here would cut a session short.
+		ReadTimeout: 30 * time.Second,
+		IdleTimeout: 60 * time.Second,
 	}
 	errs := make(chan error, 1)
 	go func() {

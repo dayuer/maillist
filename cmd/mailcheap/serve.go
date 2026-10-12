@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -13,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"mailcheap/internal/app"
+	"mailcheap/internal/httpsrv"
+	"mailcheap/internal/mcpsrv"
 	"mailcheap/internal/scheduler"
 	"mailcheap/internal/store"
 )
@@ -23,11 +26,15 @@ const shutdownTimeout = 10 * time.Second
 func newServeCmd() *cobra.Command {
 	serve := &cobra.Command{
 		Use:   "serve",
-		Short: "Run the reader side: HTTP, the sender and the scheduler",
+		Short: "Run the reader side: HTTP, the sender, the scheduler and the MCP endpoint",
 		Args:  cobra.NoArgs,
 		RunE:  runServe,
 	}
 	serve.Flags().String("addr", ":8080", "address to listen on")
+	// The MCP endpoint is a listener of its own, on the loopback by default (design §4): it is the
+	// admin surface, and caddy is what fronts the reader side. The flag exists so a test — or a
+	// deployment that puts it on another interface — can move it.
+	serve.Flags().String("mcp-addr", "", "address for the MCP endpoint (default MCP_HTTP_ADDR)")
 	return serve
 }
 
@@ -35,10 +42,19 @@ func newServeCmd() *cobra.Command {
 // flight finish its writes, then exits — so no message is left claimed (design §3.1).
 func runServe(cmd *cobra.Command, _ []string) error {
 	addr, _ := cmd.Flags().GetString("addr")
+	mcpAddr, _ := cmd.Flags().GetString("mcp-addr")
 
 	return withApp(cmd, func(ctx context.Context, a *app.App) error {
 		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
+
+		if strings.TrimSpace(mcpAddr) == "" {
+			mcpAddr = a.Config.MCPHTTPAddr
+		}
+		mcpServer := mcpsrv.New(mcpsrv.Deps{
+			Config: a.Config, Store: a.Store, Mailer: a.Mailer, Jobs: a.Jobs,
+			Identities: a.Identities, Log: a.Log, Version: version,
+		})
 
 		// A crash between the SES call and the write-back leaves claimed rows. They become unknown
 		// and are never sent twice (D14).
@@ -77,12 +93,15 @@ func runServe(cmd *cobra.Command, _ []string) error {
 			}
 		}()
 
-		errs := make(chan error, 3)
+		errs := make(chan error, 4)
 		var wg sync.WaitGroup
 		for name, run := range map[string]func() error{
 			"sender":    func() error { return a.Mailer.Run(runCtx) },
 			"scheduler": func() error { return runner.Run(runCtx) },
 			"http":      func() error { return a.HTTP.Run(runCtx, addr, shutdownTimeout) },
+			"mcp": func() error {
+				return httpsrv.Serve(runCtx, mcpAddr, mcpServer.HTTPHandler(), shutdownTimeout)
+			},
 		} {
 			wg.Add(1)
 			go func(name string, run func() error) {
