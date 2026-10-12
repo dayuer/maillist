@@ -120,6 +120,42 @@ func TestPagingThroughContacts(t *testing.T) {
 	}
 }
 
+// 已 sent 但底下还有消息没人领取：报告必须说出来。
+//
+// The state has no other witness. The campaign says sent, the counters say the audience was reached,
+// and the messages that never went out are invisible to everyone — including the operator who would
+// have to queue them again (phase 9 #37).
+func TestTheReportShowsMessagesStrandedUnderASentCampaign(t *testing.T) {
+	f := newFixture(t)
+	newsletter := f.seedNewsletter(t, 2)
+	draft := f.seedCampaign(t, "Issue 12")
+	ctx := context.Background()
+	session := f.connect(t)
+
+	// A campaign that has not started is not stranded: its messages are waiting for their turn.
+	if out := call[CampaignReport](t, session, "get_campaign_report", map[string]any{
+		"campaign": draft.ID,
+	}); out.Stranded != 0 {
+		t.Fatalf("a campaign that never started reports %d stranded messages", out.Stranded)
+	}
+
+	// Send one message's worth, then leave one behind and mark the campaign sent — the shape the
+	// audit found no way to see.
+	f.seedQueuedMessages(t, draft, newsletter, 1)
+	if moved, err := f.store.SetCampaignStatus(ctx, draft.ID,
+		[]model.CampaignStatus{model.CampaignDraft}, model.CampaignSending); err != nil || !moved {
+		t.Fatalf("start sending: %v", err)
+	}
+	if moved, err := f.store.SetCampaignStatus(ctx, draft.ID,
+		[]model.CampaignStatus{model.CampaignSending}, model.CampaignSent); err != nil || !moved {
+		t.Fatalf("finish: %v", err)
+	}
+	out := call[CampaignReport](t, session, "get_campaign_report", map[string]any{"campaign": draft.ID})
+	if out.Stranded != 1 {
+		t.Fatalf("stranded = %d, want the one message nobody will claim", out.Stranded)
+	}
+}
+
 // check_campaign 也回答「多快」：agent 问「现在能发吗」，答案可能是「一分钟」也可能是「明天」，而
 // 前者才该让它接着调 send_campaign。
 func TestCheckCampaignReportsHowFastTheAudienceGoesOut(t *testing.T) {

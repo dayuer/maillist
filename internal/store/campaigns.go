@@ -183,6 +183,37 @@ func (db *DB) UpdateCampaign(ctx context.Context, c model.Campaign) error {
 	})
 }
 
+// SettleCampaign moves a campaign from sending to sent, but only if nothing of it is unfinished, and
+// reports whether it moved.
+//
+// The condition is part of the statement rather than a read the caller makes first. Counting in one
+// transaction and moving in another leaves a window: a message another process releases or claims
+// between the two appears after "nothing is unfinished" was true, and the campaign ends up sent with
+// work still pending under it — which nobody will ever claim, because a sent campaign is not sending
+// (the phase 1-3 audit's C2).
+func (db *DB) SettleCampaign(ctx context.Context, id string) (bool, error) {
+	moved := false
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		moved = false
+		result, err := tx.ExecContext(ctx, `UPDATE campaigns SET status = ?, updated_at = ?
+            WHERE id = ? AND status = ? AND NOT EXISTS (
+                SELECT 1 FROM messages WHERE campaign_id = ? AND kind IN (?, ?) AND status IN (?, ?))`,
+			string(model.CampaignSent), formatTime(time.Now()), id, string(model.CampaignSending),
+			id, string(model.KindCampaign), string(model.KindLastChance),
+			string(model.MessagePending), string(model.MessageClaimed))
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		moved = affected > 0
+		return nil
+	})
+	return moved, err
+}
+
 // SetCampaignStatus moves a campaign from one of the from statuses to to and reports whether it
 // moved. It is how "only draft/scheduled/paused may start sending" is enforced at the database
 // (design D7, invariant 3).

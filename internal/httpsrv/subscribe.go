@@ -1,10 +1,12 @@
 package httpsrv
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
 
+	"nibwire/internal/alerts"
 	"nibwire/internal/core/model"
 	"nibwire/internal/core/render"
 	"nibwire/internal/core/validate"
@@ -75,9 +77,16 @@ func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Limiter.Limited(subscribeNewsletterLimit, newsletter.Slug, s.clock()) {
-		// Phase 7 turns this into a sendAlert; for now it is worth a loud log line.
-		s.Log.Warn("website signup flood", "newsletter", newsletter.Slug,
-			"limit", subscribeNewsletterLimit.Count)
+		// Signups past a shared limit still go through — refusing them would let one flooder block
+		// every real signup — but a flood from many addresses is list bombing, and it fills the list
+		// with spam traps. So this is an alert and not a refusal, and the wording says both.
+		s.Alerts.Send(r.Context(), alerts.Alert{
+			Key: "signup-flood:" + newsletter.Slug, Title: "Website signup flood",
+			Detail: fmt.Sprintf("Over %d signups to %s in 10 minutes. They still go through "+
+				"(%d per visitor per 10 minutes); check new contacts for junk: "+
+				"nibwire contact list --newsletter %s",
+				subscribeNewsletterLimit.Count, newsletter.Name, subscribeIPLimit.Count, newsletter.Slug),
+		})
 	}
 
 	contact, created, err := s.Store.UpsertContact(r.Context(), newsletter, email, "website", true)

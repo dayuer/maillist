@@ -115,6 +115,12 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	}, log)
 	handler := events.New(db, log).WithAlerts(notifier)
 
+	// The reader surface tells the operator about a signup flood or a key filling the list, so it gets
+	// the same notifier everything else alerts through.
+	http := httpsrv.New(cfg, db, signer, handler, engine,
+		sns.NewVerifier(httpsrv.CertificateFetcher(nil)), log)
+	http.Alerts = notifier
+
 	return &App{
 		Config:     cfg,
 		Store:      db,
@@ -128,9 +134,8 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Poller: &mailer.QuotaPoller{
 			Reader: quota, Control: control, Bucket: engine.Bucket(), Alerts: notifier, Log: log,
 		},
-		HTTP: httpsrv.New(cfg, db, signer, handler, engine,
-			sns.NewVerifier(httpsrv.CertificateFetcher(nil)), log),
-		Log: log,
+		HTTP: http,
+		Log:  log,
 	}, nil
 }
 

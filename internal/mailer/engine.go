@@ -883,12 +883,10 @@ func (e *Engine) settle(ctx context.Context, campaignID string) error {
 	if paused, err := e.pauseIfUnhealthy(ctx, campaignID); err != nil || paused {
 		return err
 	}
-	unfinished, err := e.store.CountUnfinishedCampaignMessages(ctx, campaignID)
-	if err != nil || unfinished > 0 {
-		return err
-	}
-	moved, err := e.store.SetCampaignStatus(ctx, campaignID,
-		[]model.CampaignStatus{model.CampaignSending}, model.CampaignSent)
+	// Reading "is anything unfinished" and moving the campaign are one statement in the store: two of
+	// them leave a window in which another process releases or claims a message, and the campaign ends
+	// up sent with work still pending under it (audit M1, phase 9 #35).
+	moved, err := e.store.SettleCampaign(ctx, campaignID)
 	if err != nil || !moved {
 		return err
 	}
@@ -1052,7 +1050,10 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		if refusal := e.sesQuotaRefusal(len(messages)); refusal != "" {
 			return QueueResult{Reason: refusal}, nil
 		}
-		fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
+		// The reservation and every message of the step are written together, so there is nothing left
+		// to write here and nothing to refund if the process dies: either the step is in and paid for,
+		// or it is not there at all (audit M5, phase 9 #38).
+		fits, _, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
 			e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
 		if err != nil {
 			return QueueResult{}, err
@@ -1060,14 +1061,6 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		if !fits {
 			return QueueResult{Reason: e.budgetReason(ctx, day, pool, len(messages), e.cfg.Limits.MaxSendsPerDay,
 				credentialMax)}, nil
-		}
-		if inserted < len(messages) {
-			written, err := e.store.InsertMessages(ctx, messages[inserted:])
-			if err != nil {
-				// The rest never got written, so the day must not stay charged for it.
-				e.refund(ctx, day, pool, len(messages)-inserted-written)
-				return QueueResult{}, err
-			}
 		}
 		if recipients, lastChance, err = e.store.CountCampaignMessages(ctx, campaignID); err != nil {
 			return QueueResult{}, err
@@ -1229,7 +1222,8 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 	if refusal := e.sesQuotaRefusal(len(messages)); refusal != "" {
 		return QueueResult{Reason: refusal}, nil
 	}
-	fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
+	// As above: the whole step and its reservation are one write.
+	fits, _, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
 		e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
 	if err != nil {
 		return QueueResult{}, err
@@ -1237,13 +1231,6 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 	if !fits {
 		return QueueResult{Reason: e.budgetReason(ctx, day, pool, len(messages), e.cfg.Limits.MaxSendsPerDay,
 			credentialMax)}, nil
-	}
-	if inserted < len(messages) {
-		written, err := e.store.InsertMessages(ctx, messages[inserted:])
-		if err != nil {
-			e.refund(ctx, day, pool, len(messages)-inserted-written)
-			return QueueResult{}, err
-		}
 	}
 	recipients, lastChance, err := e.store.CountCampaignMessages(ctx, campaignID)
 	if err != nil {
@@ -1339,18 +1326,6 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 // sendTimeout bounds one call to SES. The request runs detached from the batch's context (see
 // deliver), so it needs a deadline of its own or a hung connection would hold the shutdown open.
 const sendTimeout = 30 * time.Second
-
-// refund gives a day's budget back for messages that were charged for and never written. It is
-// best-effort by design: the campaign is not queued either way, and the operator's next attempt
-// reports the budget it actually finds.
-func (e *Engine) refund(ctx context.Context, day, pool string, n int) {
-	if n <= 0 {
-		return
-	}
-	if err := e.store.Refund(ctx, day, pool, n); err != nil {
-		e.log.Error("refund the day's budget", "day", day, "messages", n, "error", err)
-	}
-}
 
 // resolveCharge turns a charge into the pool a step reserves against and the ceiling that sits under
 // the global one: the credential's own daily_budget, or 0 when the charge is the system pool.

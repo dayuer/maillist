@@ -106,6 +106,11 @@ type CampaignReport struct {
 	LastChance lastChanceView `json:"last_chance"`
 	Providers  []providerView `json:"providers"`
 	Remaining  int            `json:"remaining"`
+	// Stranded is messages that are still waiting or claimed under a campaign that is not sending any
+	// more. It should always be 0; anything else is a campaign whose report would otherwise say the
+	// issue went out while part of the audience never got it, and nobody would ever claim those
+	// messages (§phase 9 #37).
+	Stranded int `json:"stranded_messages,omitempty"`
 }
 
 func getCampaignReport(ctx context.Context, sess *session, _ store.Credential, in campaignRefIn) (CampaignReport, error) {
@@ -136,9 +141,18 @@ func getCampaignReport(ctx context.Context, sess *session, _ store.Credential, i
 	for _, provider := range providers {
 		rows = append(rows, viewProvider(provider))
 	}
+	// A campaign that is still sending has unfinished messages by design, and one that was queued but
+	// never started has all of them; only the finished states should show nothing.
+	stranded := 0
+	if !campaign.Status.Queueable() && campaign.Status != model.CampaignSending {
+		if stranded, err = sess.deps.Store.CountUnfinishedCampaignMessages(ctx, campaign.ID); err != nil {
+			return CampaignReport{}, err
+		}
+	}
 	return CampaignReport{
 		Campaign: viewCampaign(campaign), Stats: viewCounters(counters),
 		LastChance: viewLastChance(lastChance), Providers: rows, Remaining: remaining,
+		Stranded: stranded,
 	}, nil
 }
 
