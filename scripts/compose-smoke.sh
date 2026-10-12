@@ -211,4 +211,31 @@ headers=$(curl -s -o /dev/null -D - "$SITE$path")
 contains "$headers" "immutable" "the image is served immutably"
 contains "$headers" "image/png" "as a PNG"
 
-printf '\n=== the stack went up, one issue went out and a reader opened, clicked and unsubscribed\n'
+step "an agent reaches the same deployment over MCP"
+# The MCP surface is a credential, not a door: the token is issued in the container and used by a
+# stdio client in the container, which is how an agent gets at a deployed instance (compose does not
+# publish the endpoint). Nothing here touches AWS — the fake SES above is still the only sender.
+token=$(run credentials create --kind mcp --name smoke-agent --scopes read,write,send | head -1)
+contains "$token" "mc_" "an mcp credential was issued"
+# One JSON-RPC session on stdin: initialize, then list the tools and call one of them.
+# The sleep is what keeps the session alive: stdin closing is how a stdio server is told the client
+# is done, and a pipe that ends the instant the last request is written closes it mid-session. A real
+# client keeps it open until it has its answers.
+answer=$( (
+	cat <<EOF
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"count_audience","arguments":{"newsletter":"$SLUG"}}}
+EOF
+	sleep 2
+) | $COMPOSE exec -T mailcheap mailcheap mcp --stdio --token "$token" 2>/dev/null) ||
+	fail "the stdio MCP server did not answer"
+contains "$answer" "count_audience" "the tool list came back over stdio"
+contains "$answer" "send_campaign" "including the ones that can send"
+case "$answer" in
+*delete_* | *create_credentials*) fail "the surface offered something design §9 keeps off it" ;;
+esac
+
+printf '\n=== the stack went up: one issue went out, a reader opened, clicked and unsubscribed, and an agent\n'
+printf 'used the same deployment over MCP\n'
