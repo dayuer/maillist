@@ -394,4 +394,3 @@ func TestFeedbackIDIdentifiesTheSender(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
-

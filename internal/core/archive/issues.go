@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"regexp"
 	"time"
 
 	"mailcheap/internal/core/model"
@@ -42,4 +43,16 @@ func IssueDate(c model.Campaign) *time.Time {
 // published-issues list uses, so a link and a page cannot disagree.
 func HasAPage(c model.Campaign, n model.Newsletter) bool {
 	return n.ArchiveEnabled && c.ArchiveSlug != "" && Published(c.Status)
+}
+
+// botUserAgent matches the tools that fetch a page without a person behind them: crawlers, link
+// previewers, headless browsers and command-line clients. It is upstream's BOT_PATTERN from
+// app/api/views/route.js, character for character, and an empty User-Agent counts as one of them —
+// a browser that says nothing is not a reader.
+var botUserAgent = regexp.MustCompile(
+	`(?i)bot|crawl|spider|slurp|preview|facebookexternalhit|headless|lighthouse|curl|wget|python|axios|go-http`)
+
+// IsBotUserAgent reports whether a reader's User-Agent is a machine's.
+func IsBotUserAgent(userAgent string) bool {
+	return userAgent == "" || botUserAgent.MatchString(userAgent)
 }
