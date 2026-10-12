@@ -150,10 +150,13 @@ type QueueResult struct {
 }
 
 // TestResult is one test email.
+//
+// `nibwire campaign test --json` prints it as is, so the keys are pinned: ProviderMessageID keeps
+// its pre-channel key, SESMessageID, for CLI compatibility.
 type TestResult struct {
-	MessageID         string
-	ProviderMessageID string
-	SentAt            time.Time
+	MessageID         string    `json:"MessageID"`
+	ProviderMessageID string    `json:"SESMessageID"`
+	SentAt            time.Time `json:"SentAt"`
 }
 
 // Charge says whose daily budget a step spends (design §11, layer 2). The zero value is the system

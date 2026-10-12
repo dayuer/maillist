@@ -100,7 +100,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		_ = db.Close()
 		return nil, err
 	}
-	channel := mailer.NewChannel(model.DefaultChannel, mailer.ChannelTypeSES, sender, quota, identities, nil)
+	channel := mailer.NewChannel(model.DefaultChannel, mailer.ChannelTypeSES, sender, quota, identities, mailer.ClassifySES)
 	// The rate follows the account (D17): the controller decides it, the bucket enforces it, and
 	// SEND_RATE_PER_SECOND can only lower what the account gave.
 	control := ratectl.New(ratectl.Config{
