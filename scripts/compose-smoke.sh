@@ -211,6 +211,40 @@ headers=$(curl -s -o /dev/null -D - "$SITE$path")
 contains "$headers" "immutable" "the image is served immutably"
 contains "$headers" "image/png" "as a PNG"
 
+step "the issue has a public archive page"
+# 归档是读者侧的另一半：地址在发出时分配，于是 /archive/<slug>/p/<slug> 现成可用，
+# sitemap 与 robots 也由同一个进程给出。
+archived=$(curl -s -o /dev/null -w '%{http_code}' "$SITE/archive/$SLUG")
+[ "$archived" = "200" ] || fail "the archive index answered $archived"
+index=$(curl -s "$SITE/archive/$SLUG")
+case "$index" in
+	*"$SUBJECT"*) pass "the archive lists the issue" ;;
+	*) fail "the archive index did not list the issue" ;;
+esac
+
+issue_slug=$(run campaign show --subject "$SUBJECT" --json |
+	sed -n 's/.*"ArchiveSlug": "\([^"]*\)".*/\1/p')
+[ -n "$issue_slug" ] || fail "the issue has no archive slug: it was not assigned when it went out"
+post=$(curl -s "$SITE/archive/$SLUG/p/$issue_slug")
+case "$post" in
+	*"https://example.com/read"*) pass "the issue page renders its body ($issue_slug)" ;;
+	*) fail "the issue page did not render the body" ;;
+esac
+case "$(curl -s -o /dev/null -w '%{http_code}' "$SITE/archive/$SLUG/sitemap.xml")" in
+	200) pass "the sitemap is served" ;;
+	*) fail "the sitemap did not answer 200" ;;
+esac
+case "$(curl -s "$SITE/archive/$SLUG/robots.txt")" in
+	*"Sitemap:"*) pass "robots points at the sitemap" ;;
+	*) fail "robots did not name a sitemap" ;;
+esac
+# curl 的 UA 在上游的机器名单里：页面照样 200，但不该计成一个读者。
+if [ "$(run campaign show --subject "$SUBJECT" --json | sed -n 's/.*"WebViews": \([0-9]*\).*/\1/p')" = "0" ]; then
+	pass "a crawler's request was not counted as a reader"
+else
+	fail "a crawler was counted as a reader"
+fi
+
 step "an agent reaches the same deployment over MCP"
 # The MCP surface is a credential, not a door: the token is issued in the container and used by a
 # stdio client in the container, which is how an agent gets at a deployed instance (compose does not
@@ -237,5 +271,5 @@ case "$answer" in
 *delete_* | *create_credentials*) fail "the surface offered something design §9 keeps off it" ;;
 esac
 
-printf '\n=== the stack went up: one issue went out, a reader opened, clicked and unsubscribed, and an agent\n'
-printf 'used the same deployment over MCP\n'
+printf '\n=== the stack went up: one issue went out, a reader opened, clicked and unsubscribed, and its\n'
+printf 'archive page is public; an agent listed the tools of the same deployment over MCP\n'
