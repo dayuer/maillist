@@ -34,7 +34,10 @@ type Email struct {
 	// companion travel here rather than in the body, so a test that only reads the body cannot see
 	// them — and it is the header a mail client acts on, not the footer link.
 	Headers map[string]string `json:"headers"`
-	At      time.Time         `json:"at"`
+	// TenantName is the tenant the send named, empty when it named none. A deployment that isolates
+	// its senders through tenants cares that this is on every request and on no other.
+	TenantName string    `json:"tenantName,omitempty"`
+	At         time.Time `json:"at"`
 }
 
 // Server is the fake. Its methods are the routes.
@@ -214,6 +217,8 @@ type SendRequest struct {
 		Name  string `json:"Name"`
 		Value string `json:"Value"`
 	} `json:"EmailTags"`
+	// TenantName is SendEmail's tenant field: absent for an account-level send, which is most of them.
+	TenantName *string `json:"TenantName"`
 }
 
 func (s *Server) send(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +277,8 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	}
 	s.items = append(s.items, Email{
 		MessageID: messageID, From: email.From, To: email.To, Subject: email.Subject,
-		HTML: email.HTML, Text: email.Text, Tags: tags, Headers: headers, At: time.Now().UTC(),
+		HTML: email.HTML, Text: email.Text, Tags: tags, Headers: headers,
+		TenantName: stringOrEmpty(request.TenantName), At: time.Now().UTC(),
 	})
 	s.accepted++
 	if s.accounting && s.hasQuota {
@@ -414,6 +420,14 @@ func (s *Server) reset(w http.ResponseWriter, _ *http.Request) {
 	s.accepted, s.throttled = 0, 0
 	s.tokens, s.tokenAt = 0, time.Time{}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
+}
+
+// stringOrEmpty reads a field the request may not have carried.
+func stringOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

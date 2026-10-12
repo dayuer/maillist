@@ -270,6 +270,11 @@ func TestSESErrorsMapToRetryPauseOrFail(t *testing.T) {
 		{"Throttling", "Throttling", ErrorThrottle},
 		{"", "Sending is off (SENDING_ENABLED is not true)", ErrorRetry},
 		{"SendingPausedException", "SendingPausedException", ErrorPause},
+		// 租户：SendEmail 的错误表里没有租户专用的码——租户不存在就是 NotFoundException（"The resource
+		// you attempted to access doesn't exist"，HTTP 404），租户被停用就是 SendingPausedException。
+		// 两个都已经在 pause 那一类里，这一条把租户这个用法钉住。
+		{"NotFoundException", "The tenant t-123 does not exist", ErrorPause},
+		{"SendingPausedException", "Sending from tenant t-123 is disabled", ErrorPause},
 		{"AccountSuspendedException", "AccountSuspendedException", ErrorPause},
 		{"LimitExceededException", "LimitExceededException", ErrorPause},
 		{"MessageRejected", "Email address is not verified. The following identities failed", ErrorPause},

@@ -56,6 +56,61 @@ func TestAThrottledMessageIsRetriedAndAcceptedOnce(t *testing.T) {
 	}
 }
 
+// 租户不存在、或租户被停用：和「账号发信被停」是同一类——不是这一封的问题，暂停 campaign、不计失败、
+// 也不重试。
+//
+// SendEmail's error list has no tenant-specific code: a tenant that is not there answers
+// NotFoundException ("The resource you attempted to access doesn't exist", HTTP 404) and a tenant
+// whose sending is disabled answers SendingPausedException. Both are already classified as a pause,
+// which is what this pins down — the send is never the thing that was wrong, so nothing is counted
+// against the list and nothing is retried into a wall that is still there.
+//
+// The real wording of those two answers is unverified: this repository does not talk to AWS.
+func TestATenantProblemPausesWithoutFailingAnything(t *testing.T) {
+	for _, code := range []string{"NotFoundException", "SendingPausedException"} {
+		t.Run(code, func(t *testing.T) {
+			f := newFixture(t, 3)
+			ctx := context.Background()
+			if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+				t.Fatal(err)
+			}
+			for _, contact := range f.contacts {
+				f.fake.FailWith(contact.Email, code, "tenant t-123 is not accepting mail")
+			}
+
+			result, err := f.engine.SendBatch(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Failed != 0 || result.Sent != 0 {
+				t.Fatalf("result = %+v, want nothing sent and nothing counted as failed", result)
+			}
+			if result.Retry {
+				t.Error("a paused campaign reported as retryable would tell the operator to run it again")
+			}
+			campaign, err := f.db.Campaign(ctx, f.campaign.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if campaign.Status != model.CampaignPaused {
+				t.Fatalf("status = %s, want paused", campaign.Status)
+			}
+			// The messages go back to the queue rather than being marked failed: after the tenant is
+			// put right, resuming sends them.
+			if claimed, unknown, pending := claimedCount(t, f.db); claimed != 0 || unknown != 0 || pending != 3 {
+				t.Fatalf("claimed = %d, unknown = %d, pending = %d, want 0/0/3", claimed, unknown, pending)
+			}
+			counters, _, err := f.db.CampaignCountersOf(ctx, f.campaign.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if counters.Failed != 0 {
+				t.Fatalf("failed counter = %d, want 0", counters.Failed)
+			}
+		})
+	}
+}
+
 // 限流把速率减半，桶跟着走：控制器决定速率，桶执行速率，两者必须是同一个数。
 func TestAThrottleHalvesTheRateAndTheBucketFollows(t *testing.T) {
 	control := ratectl.New(ratectl.Config{Headroom: 0.9})

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -50,8 +51,13 @@ type Config struct {
 	// task role — which is the better answer on AWS.
 	SESAccessKeyID     string
 	SESSecretAccessKey string
-	SESTopicARN        string
-	ArchiveHosts       string
+	// SESTenantName is SES_TENANT_NAME: the SES tenant every send goes through. Empty is the ordinary
+	// case — the account itself. A tenant is how one account keeps several senders' reputations apart,
+	// so a deployment that runs several of them sets it; the tenant has to exist in SES first, with the
+	// sending identity and the configuration set associated with it.
+	SESTenantName string
+	SESTopicARN   string
+	ArchiveHosts  string
 	// TrustedProxies are the networks whose X-Forwarded-For may be believed (TRUSTED_PROXIES).
 	// Empty means none: the peer address is used, which is the safe default and the right one for a
 	// process serving traffic directly.
@@ -144,6 +150,15 @@ func Load(env map[string]string) (Config, error) {
 			"SES_REGION (and SES_ACCESS_KEY_ID/SES_SECRET_ACCESS_KEY, or an instance role), or point "+
 			"SES_ENDPOINT at a local fake SES, or set NIBWIRE_FAKE_SES_LOG to write sends to a file.")
 	}
+	// A tenant name that SES would refuse is a deployment that cannot send, and it is much better to
+	// hear about it at startup than from the first message: the name travels in every request, so a
+	// typo is not a request that fails but a deployment that never works.
+	tenantName := strings.TrimSpace(env["SES_TENANT_NAME"])
+	if tenantName != "" && !tenantNamePattern.MatchString(tenantName) {
+		problems = append(problems, fmt.Sprintf(
+			"SES_TENANT_NAME %q is not a tenant name: SES allows up to 64 letters, numbers, hyphens "+
+				"and underscores only (see docs/ses-smoke.md).", tenantName))
+	}
 	if len(problems) > 0 {
 		return Config{}, errors.New("nibwire can't start. " + strings.Join(problems, " "))
 	}
@@ -163,6 +178,7 @@ func Load(env map[string]string) (Config, error) {
 		SESEndpoint:        env["SES_ENDPOINT"],
 		SESAccessKeyID:     env["SES_ACCESS_KEY_ID"],
 		SESSecretAccessKey: env["SES_SECRET_ACCESS_KEY"],
+		SESTenantName:      tenantName,
 		SESTopicARN:        env["SES_SNS_TOPIC_ARN"],
 		ArchiveHosts:       env["ARCHIVE_HOSTS"],
 		TrustedProxies:     splitList(env["TRUSTED_PROXIES"]),
@@ -183,6 +199,11 @@ func Load(env map[string]string) (Config, error) {
 		},
 	}, nil
 }
+
+// tenantNamePattern is SES's rule for a tenant name, from the CreateTenant reference: "The name can
+// contain up to 64 alphanumeric characters, including letters, numbers, hyphens (-) and underscores
+// (_) only."
+var tenantNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 func or(v, fallback string) string {
 	if v == "" {

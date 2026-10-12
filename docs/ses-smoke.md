@@ -92,6 +92,35 @@ DRY_RUN=1 … scripts/ses-smoke.sh
 - 不需要 `ses:ListIdentities`（没有 v2 前缀）：那是 SES v1 的操作，应用用的是 v2。
 - 代码里调用的操作与这张表由测试钉住（`internal/mailer/ses_permissions_test.go`）：加一次 SES 调用而没加权限说明，测试会红。
 
+## SES Tenants（可选）
+
+托管版多个实例共用一个 SES 账户时，`SES_TENANT_NAME` 让每个实例按租户隔离发信信誉：设置后每次
+`SendEmail` 都带上这个租户名，出问题时可以在 SES 里单独停掉一个租户而不影响其他实例。
+
+| 设置 | 作用 |
+|---|---|
+| `SES_TENANT_NAME` | 发信经由哪个租户。留空＝以账号本身发（默认，也是绝大多数部署的情形） |
+
+**前置条件都在 SES 里做，本仓库不创建也不管理租户**：
+
+1. 租户已存在：`aws sesv2 create-tenant --tenant-name <name>`。名字最多 64 个字符，只能是字母、数字、
+   连字符、下划线（[CreateTenant 参考](https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_CreateTenant.html)）。
+   应用按同一条规则校验 `SES_TENANT_NAME`，不合法**拒绝启动**并指出是哪一条规则。
+2. 发信身份与 configuration set **已关联到该租户**：SES 只在"这次请求点到的每个资源（身份、configuration set、模板）都属于这个租户"时才接受发送（[SendEmail 参考](https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html) 的 `TenantName`）。
+
+**租户出问题时**：租户不存在返回 `NotFoundException`（HTTP 404，"The resource you attempted to access
+doesn't exist"），租户被停用返回 `SendingPausedException`——两个都会被归入「暂停 campaign + 告警、
+**不计失败、不重试**」，与账号级的发信暂停同一类处理。
+
+**未验证的两处**（本仓库不接触 AWS）：
+
+1. **错误码**：SES 的 `SendEmail` 错误表里**没有租户专用的码**，上面两个是表里最贴近的条目，没在真实
+   账号上验证过。若实际返回别的码，症状是那一封按普通失败处理（计一次 `failed`，不重发、不静默丢失）。
+2. **IAM**：`SendEmail` 的参考页只把 `TenantName` 列为可选的请求参数，没有提权限；会写清租户 ARN 的是
+   [服务授权参考的 SES v2 一页](https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazonsimpleemailservicev2.html)，
+   而那个页面在本仓库的环境里取不回来（脚本渲染）。所以先按上面那份最小 policy 跑：**带租户的第一批信
+   如果报授权错误，就是这里缺了一条**——那是唯一能确诊的方式。
+
 ## 发信速率（阶段 8）
 
 发信速率不是配置出来的，是**问出来的**：应用向 `GetAccount` 读账号的 `MaxSendRate` 与 24 小时额度，

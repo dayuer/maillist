@@ -249,6 +249,55 @@ func TestTheRealIdentityClientCanListThroughTheFake(t *testing.T) {
 	}
 }
 
+// 设了租户就每一封都带 TenantName，没设就一封都不带。这条走真客户端，所以线格式也是被验证的那部分。
+//
+// A tenant that reached some requests and not others would be the worst kind of bug here: half a
+// deployment's mail isolated from the other half's reputation, and nothing in the reports to say so.
+func TestTheTenantNameTravelsWithEverySendOrWithNone(t *testing.T) {
+	fake := New(nil)
+	server := httptest.NewServer(fake.Handler())
+	defer server.Close()
+
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+
+	// Two senders against one fake: one deployment that names a tenant, one that does not.
+	send := func(tenant string, addresses func(int) string) {
+		t.Helper()
+		sender, err := mailer.NewSES(context.Background(), mailer.SESOptions{
+			Region: "eu-west-1", Endpoint: server.URL, AccessKeyID: "test", SecretKey: "test",
+			TenantName: tenant,
+		}, "", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 2; i++ {
+			if _, err := sender.Send(context.Background(), rules.RecipientEmail{
+				From: "jane@example.net", To: addresses(i), Subject: "x",
+				HTML: "<p>x</p>", Text: "x",
+			}, nil); err != nil {
+				t.Fatalf("send %d: %v", i, err)
+			}
+		}
+	}
+	send("", func(i int) string { return fmt.Sprintf("account%d@example.com", i) })
+	send("t-123", func(i int) string { return fmt.Sprintf("tenant%d@example.com", i) })
+
+	sent := fake.Sent()
+	if len(sent) != 4 {
+		t.Fatalf("the fake recorded %d sends, want 4", len(sent))
+	}
+	for _, email := range sent {
+		want := ""
+		if strings.HasPrefix(email.To, "tenant") {
+			want = "t-123"
+		}
+		if email.TenantName != want {
+			t.Errorf("%s carried tenant %q, want %q", email.To, email.TenantName, want)
+		}
+	}
+}
+
 // 注入的失败按 SES 的形状答复：__type + message，SDK 分类器读的就是这两个。
 func TestInjectedFailuresAnswerLikeSES(t *testing.T) {
 	inner := mailer.NewFake()
