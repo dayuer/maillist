@@ -137,6 +137,50 @@ func TestResumingChecksTheAllowanceToo(t *testing.T) {
 	}
 }
 
+// 可发上限是账号剩余与本实例当日余量取最小，谁小谁说了算，报文要说清是哪一个。
+//
+// 托管版多个实例共用一个 SES 账户：运维给每个实例写 MAX_SENDS_PER_DAY，各实例加起来不超过账号日配额。
+// 两个上限都要在**建 message 之前**判定，而且报文里的数字必须是真正拦下这一步的那个——"预算用完"与
+// "账号今天就剩这些"是给运维的两种不同答案。
+func TestTheLowerOfTheTwoDayCeilingsRefusesTheStep(t *testing.T) {
+	control := ratectl.New(ratectl.Config{Headroom: 0.9})
+	f := newFixtureConfigured(t, 400, func(cfg *Config) { cfg.RateControl = control })
+	ctx := context.Background()
+
+	// 账号还剩一千，本实例今天只剩一百：本实例的预算说了算。
+	f.engine.cfg.Limits.MaxSendsPerDay = 100
+	control.SetQuota(ratectl.Quota{MaxSendRate: 500, Max24HourSend: 1_000}, time.Now().UTC())
+	queued, err := f.engine.Queue(ctx, f.campaign.ID, Charge{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.Queued {
+		t.Fatalf("queued = %+v, want the instance's own budget to refuse it", queued)
+	}
+	if !strings.Contains(queued.Reason, "MAX_SENDS_PER_DAY") {
+		t.Fatalf("reason = %q, want the ceiling that refused it", queued.Reason)
+	}
+
+	// 反过来：本实例的预算充足，账号只剩一百：账号说了算。
+	f.engine.cfg.Limits.MaxSendsPerDay = 50_000
+	control.SetQuota(ratectl.Quota{MaxSendRate: 500, Max24HourSend: 100}, time.Now().UTC())
+	if queued, err = f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	} else if queued.Queued {
+		t.Fatalf("queued = %+v, want the account's allowance to refuse it", queued)
+	} else if !strings.Contains(queued.Reason, "24-hour window") {
+		t.Fatalf("reason = %q, want the account's ceiling", queued.Reason)
+	}
+
+	// 两个都够：整批发出去。
+	control.SetQuota(ratectl.Quota{MaxSendRate: 500, Max24HourSend: 400}, time.Now().UTC())
+	if queued, err = f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	} else if !queued.Queued || queued.Recipients != 400 {
+		t.Fatalf("queued = %+v, want all four hundred", queued)
+	}
+}
+
 // 速率与剩余额度的读数：读不到配额时是下限与「未知」，不是 0/s 也不是「还剩 0 封」。
 func TestSendingRateReportsTheQuotaAndTheEstimate(t *testing.T) {
 	control := ratectl.New(ratectl.Config{Headroom: 0.9})

@@ -329,6 +329,52 @@ func TestTheRealQuotaClientAgreesWithTheFakeOnGetAccount(t *testing.T) {
 	}
 }
 
+// 会计：假 SES 接受一封，GetAccount 的 SentLast24Hours 就多一。真实账号就是这样，而共用同一个账号的
+// 多个实例读到的必须是这同一个数——否则每个实例都会以为自己还有一整天的额度。
+func TestTheFakeCanCountWhatItAcceptedTowardsTheDay(t *testing.T) {
+	counting := New(nil, WithQuota(Quota{MaxSendRate: 500, Max24HourSend: 1000}),
+		WithQuotaAccounting())
+	server := httptest.NewServer(counting.Handler())
+	defer server.Close()
+
+	reader, err := mailer.NewSESQuota(context.Background(), mailer.SESOptions{
+		Region: "eu-west-1", Endpoint: server.URL, AccessKeyID: "test", SecretKey: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quota, err := reader.Quota(context.Background()); err != nil || quota.SentLast24Hours != 0 {
+		t.Fatalf("quota = %+v %v", quota, err)
+	}
+	if status, body := postSend(t, server.URL, "reader@example.com"); status != 200 {
+		t.Fatalf("send = %d %v", status, body)
+	}
+	quota, err := reader.Quota(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quota.SentLast24Hours != 1 {
+		t.Fatalf("SentLast24Hours = %v after one accepted send, want 1", quota.SentLast24Hours)
+	}
+	// And a fake without it reports the number it was given, which is how the tests that want to hold
+	// the account still can.
+	plain := New(nil, WithQuota(Quota{MaxSendRate: 500, Max24HourSend: 1000}))
+	plainServer := httptest.NewServer(plain.Handler())
+	defer plainServer.Close()
+	plainReader, err := mailer.NewSESQuota(context.Background(), mailer.SESOptions{
+		Region: "eu-west-1", Endpoint: plainServer.URL, AccessKeyID: "test", SecretKey: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, body := postSend(t, plainServer.URL, "reader@example.com"); body == nil {
+		t.Fatal("the send did not answer")
+	}
+	if quota, err := plainReader.Quota(context.Background()); err != nil || quota.SentLast24Hours != 0 {
+		t.Fatalf("quota = %+v %v, want the number it was given", quota, err)
+	}
+}
+
 // 假 SES 没有配额时，真客户端拿到的是错误而不是一个零值的成功——零值会让应用以为账号不能发信。
 func TestAQuotaTheFakeWasNotGivenIsAnError(t *testing.T) {
 	server := httptest.NewServer(New(nil).Handler())

@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,6 +64,17 @@ type world struct {
 
 func newWorld(t *testing.T, contacts int, options ...fakessesrv.Option) *world {
 	t.Helper()
+	fake := mailer.NewFake()
+	server := httptest.NewServer(fakessesrv.New(fake, options...).Handler())
+	t.Cleanup(server.Close)
+	return newWorldAt(t, server, fake, contacts)
+}
+
+// newWorldAt is one instance against an existing fake SES. The managed deployment runs several
+// processes against one account: each has its own database and its own ledger, and neither of those
+// is what SES counts.
+func newWorldAt(t *testing.T, server *httptest.Server, fake *mailer.Fake, contacts int) *world {
+	t.Helper()
 	ctx := context.Background()
 
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "throughput.db"))
@@ -75,9 +87,6 @@ func newWorld(t *testing.T, contacts int, options ...fakessesrv.Option) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := mailer.NewFake()
-	server := httptest.NewServer(fakessesrv.New(fake, options...).Handler())
-	t.Cleanup(server.Close)
 
 	// The SDK signs what it sends; the fake does not check the signature.
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
@@ -294,6 +303,59 @@ func TestASpentAllowanceRefusesTheWholeStep(t *testing.T) {
 	}
 	if messages != 0 {
 		t.Fatalf("%d messages were written for a step that was refused", messages)
+	}
+}
+
+// 两个实例共用一个 SES 账户：各库各有各的 ledger，而账号的当日剩余是两份共用的一个数。
+//
+// SentLast24Hours 是整个账户的发送量，已经包含另一个实例发出的邮件——所以它要照读，不能再减一次本实例
+// 的 ledger。这条把两半都测了：第二个实例拒绝一步账号装不下的发送（它自己的当日一分没花），并且接受一步
+// 装得下的（多减一次就会把这一步也拒掉）。
+func TestTwoInstancesShareOneAccountsAllowance(t *testing.T) {
+	fake := mailer.NewFake()
+	server := httptest.NewServer(fakessesrv.New(fake,
+		fakessesrv.WithQuota(fakessesrv.Quota{MaxSendRate: 500, Max24HourSend: 1_000}),
+		fakessesrv.WithQuotaAccounting(),
+	).Handler())
+	t.Cleanup(server.Close)
+
+	// The first instance spends four hundred of the account's thousand.
+	first := newWorldAt(t, server, fake, 400)
+	if queued, err := first.engine.Queue(context.Background(), first.campaign.ID,
+		mailer.Charge{}); err != nil {
+		t.Fatal(err)
+	} else if !queued.Queued {
+		t.Fatalf("the first instance could not send its four hundred: %+v", queued)
+	}
+	first.drain(t, time.Minute)
+	if accepted := fake.SentCount(); accepted != 400 {
+		t.Fatalf("the first instance sent %d messages, want 400", accepted)
+	}
+
+	// The second has an empty ledger of its own and reads the account: six hundred are left.
+	second := newWorldAt(t, server, fake, 700)
+	if rate := second.engine.SendingRate(); !rate.Known || rate.Remaining24h != 600 {
+		t.Fatalf("the second instance reads %+v, want the account's remaining six hundred", rate)
+	}
+	queued, err := second.engine.Queue(context.Background(), second.campaign.ID, mailer.Charge{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.Queued {
+		t.Fatalf("the second instance queued 700 messages with 600 left in the account")
+	}
+	if !strings.Contains(queued.Reason, "24-hour window") {
+		t.Fatalf("reason = %q, want the account's ceiling", queued.Reason)
+	}
+
+	// A step that fits the account goes, although the account is not empty and this instance has
+	// already spent nothing: subtracting this instance's ledger a second time would refuse it.
+	third := newWorldAt(t, server, fake, 500)
+	if queued, err := third.engine.Queue(context.Background(), third.campaign.ID,
+		mailer.Charge{}); err != nil {
+		t.Fatal(err)
+	} else if !queued.Queued || queued.Recipients != 500 {
+		t.Fatalf("the third instance = %+v, want all five hundred to go", queued)
 	}
 }
 

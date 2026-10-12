@@ -65,6 +65,44 @@ func TestACapWinsWhenItIsLower(t *testing.T) {
 	}
 }
 
+// 上限是硬上限：回升也不能越过去。
+//
+// 托管版多个实例共用一个 SES 账户，运维给每个实例写 SEND_RATE_PER_SECOND，各实例加起来可以超过账号的
+// MaxSendRate，超出的部分靠 AIMD 退让消化。所以上限必须比 target 更硬——回升是往 target 走，而 target
+// 已经被上限压住了。十分钟无限流是「最久的那段回升」：按 30 s 一档、一档 10%，从下限爬到上限早就到了。
+func TestTheCapIsHarderThanTheTarget(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Cap = 100
+	c := New(cfg)
+	c.SetQuota(quota(), t0)
+	if got := c.Rate(t0); got != 100 {
+		t.Fatalf("rate = %v, want the cap", got)
+	}
+
+	// 被打下去，再让它在没有限流的情况下回升十分钟。
+	c.OnThrottle(t0)
+	if got := c.Rate(t0); got != 50 {
+		t.Fatalf("rate after a throttle = %v, want 50", got)
+	}
+	now := t0
+	for i := 0; i < 20; i++ {
+		now = now.Add(30 * time.Second)
+		c.OnSuccess(now)
+	}
+	if got := c.Rate(now); got != 100 {
+		t.Fatalf("rate after ten unthrottled minutes = %v, want the cap and no more", got)
+	}
+	// And it went back to aiming at the cap rather than at the account: another ten minutes change
+	// nothing.
+	for i := 0; i < 20; i++ {
+		now = now.Add(30 * time.Second)
+		c.OnSuccess(now)
+	}
+	if got := c.Rate(now); got != 100 {
+		t.Fatalf("rate after twenty unthrottled minutes = %v, want the cap", got)
+	}
+}
+
 // 限流减半，连续限流不低过下限。
 func TestThrottlingHalvesAndNeverGoesBelowTheFloor(t *testing.T) {
 	c := New(defaultConfig())
