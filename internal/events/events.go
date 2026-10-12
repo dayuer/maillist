@@ -127,7 +127,9 @@ func (h *Handler) ApplyTracking(ctx context.Context, messageID string, eventType
 // tag, which covers an event that arrives before the send was written back.
 func (h *Handler) findMessage(ctx context.Context, plan sesmap.Plan) (model.Message, bool, error) {
 	if plan.ProviderMessageID != "" {
-		message, err := h.store.MessageByProviderID(ctx, plan.ProviderMessageID)
+		// Every event comes from SES on the default channel today; once webhooks are routed per
+		// channel, the caller passes the channel the event arrived on.
+		message, err := h.store.MessageByProviderID(ctx, model.DefaultChannel, plan.ProviderMessageID)
 		if err == nil {
 			return message, true, nil
 		}

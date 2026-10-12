@@ -182,6 +182,10 @@ type Contact struct {
 	CreatedAt      time.Time
 }
 
+// DefaultChannel is the channel the SES_* settings describe, and the one every message used before
+// there were others.
+const DefaultChannel = "default"
+
 type Message struct {
 	ID                string
 	Kind              MessageKind
@@ -192,15 +196,18 @@ type Message struct {
 	Provider          string // the recipient's mailbox provider (gmail, outlook, …), from core/providers
 	Status            MessageStatus
 	ProviderMessageID string // the id the sending channel returned; "" until sent
-	Error             string
-	ClaimedAt         *time.Time
-	SentAt            *time.Time
-	DeliveredAt       *time.Time
-	OpenedAt          *time.Time
-	ClickedAt         *time.Time
-	BouncedAt         *time.Time
-	ComplainedAt      *time.Time
-	CreatedAt         time.Time
+	// Channel is the sending channel that carries this message; "default" is the SES account the
+	// SES_* settings describe. Empty when written means "default".
+	Channel      string
+	Error        string
+	ClaimedAt    *time.Time
+	SentAt       *time.Time
+	DeliveredAt  *time.Time
+	OpenedAt     *time.Time
+	ClickedAt    *time.Time
+	BouncedAt    *time.Time
+	ComplainedAt *time.Time
+	CreatedAt    time.Time
 }
 
 // Limits are the sending thresholds. SES reviews an account at 5% bounces or 0.1% complaints; pause

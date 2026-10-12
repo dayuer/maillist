@@ -19,7 +19,15 @@ const InsertChunkSize = 1000
 // messageColumns is the SELECT list every message query shares, in scanMessage order.
 const messageColumns = `id, kind, campaign_id, newsletter_id, contact_id, email, provider, status,
     provider_message_id, error, claimed_at, sent_at, delivered_at, opened_at, clicked_at, bounced_at,
-    complained_at, created_at`
+    complained_at, created_at, channel`
+
+// channelOf is the channel a message is written with: the default channel when none was chosen.
+func channelOf(m model.Message) string {
+	if m.Channel == "" {
+		return model.DefaultChannel
+	}
+	return m.Channel
+}
 
 // markReservedDayTx records, in the same transaction as the reservation, which day a campaign's
 // audience was reserved for.
@@ -95,18 +103,18 @@ func insertMessagesTx(ctx context.Context, tx *sql.Tx, chunk []model.Message) (i
 	}
 	var builder strings.Builder
 	builder.WriteString(`INSERT OR IGNORE INTO messages (` + messageColumns + `) VALUES `)
-	args := make([]any, 0, len(chunk)*18)
+	args := make([]any, 0, len(chunk)*19)
 	for i, m := range chunk {
 		if i > 0 {
 			builder.WriteString(",")
 		}
-		builder.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+		builder.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 		args = append(args,
 			m.ID, string(m.Kind), m.CampaignID, m.NewsletterID, m.ContactID, m.Email,
 			m.Provider, string(m.Status), m.ProviderMessageID, m.Error,
 			formatTimePtr(m.ClaimedAt), formatTimePtr(m.SentAt), formatTimePtr(m.DeliveredAt),
 			formatTimePtr(m.OpenedAt), formatTimePtr(m.ClickedAt), formatTimePtr(m.BouncedAt),
-			formatTimePtr(m.ComplainedAt), formatTime(m.CreatedAt))
+			formatTimePtr(m.ComplainedAt), formatTime(m.CreatedAt), channelOf(m))
 	}
 	result, err := tx.ExecContext(ctx, builder.String(), args...)
 	if err != nil {
@@ -289,7 +297,7 @@ func scanMessage(row interface{ Scan(...any) error }) (model.Message, error) {
 	)
 	err := row.Scan(&m.ID, &kind, &m.CampaignID, &m.NewsletterID, &m.ContactID, &m.Email, &m.Provider,
 		&status, &m.ProviderMessageID, &m.Error, &claimedAt, &sentAt, &delivered, &openedAt, &clickedAt,
-		&bouncedAt, &complained, &createdAt)
+		&bouncedAt, &complained, &createdAt, &m.Channel)
 	if err != nil {
 		return model.Message{}, err
 	}
@@ -431,7 +439,7 @@ func (db *DB) InsertSignupMessage(ctx context.Context, message model.Message, ne
 			message.Email, message.Provider, string(message.Status), message.ProviderMessageID, message.Error,
 			formatTimePtr(message.ClaimedAt), formatTimePtr(message.SentAt), formatTimePtr(message.DeliveredAt),
 			formatTimePtr(message.OpenedAt), formatTimePtr(message.ClickedAt), formatTimePtr(message.BouncedAt),
-			formatTimePtr(message.ComplainedAt), formatTime(message.CreatedAt),
+			formatTimePtr(message.ComplainedAt), formatTime(message.CreatedAt), channelOf(message),
 			newsletterID, formatTime(since),
 		}
 		for _, kind := range kinds {
@@ -460,7 +468,7 @@ func (db *DB) InsertSignupMessage(ctx context.Context, message model.Message, ne
 //nolint:gosec // G202: the only interpolated text is a run of "?" placeholders, one per kind.
 func insertSignupQuery(kinds int) string {
 	return `INSERT OR IGNORE INTO messages (` + messageColumns + `)
-        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
         WHERE (SELECT count(*) FROM messages
                WHERE newsletter_id = ? AND created_at >= ? AND kind IN (` +
 		strings.TrimSuffix(strings.Repeat("?,", kinds), ",") + `)) < ?`
@@ -600,11 +608,17 @@ func (db *DB) SetMessageError(ctx context.Context, id, message string) error {
 }
 
 // MessageByProviderID loads the message a channel's own id names, which is how most events arrive.
-func (db *DB) MessageByProviderID(ctx context.Context, providerMessageID string) (model.Message, error) {
+//
+// The id is only unique within its channel: two providers can hand out the same one, so the lookup
+// names the channel. Requiring a non-empty provider_message_id as well is what lets SQLite answer it
+// from the partial (channel, provider_message_id) index.
+func (db *DB) MessageByProviderID(ctx context.Context, channel, providerMessageID string) (model.Message, error) {
 	message, err := scanMessage(db.sql.QueryRowContext(ctx,
-		"SELECT "+messageColumns+" FROM messages WHERE provider_message_id = ?", providerMessageID))
+		"SELECT "+messageColumns+" FROM messages WHERE channel = ? AND provider_message_id = ? AND provider_message_id <> ''",
+		channel, providerMessageID))
 	if errors.Is(err, sql.ErrNoRows) {
-		return model.Message{}, fmt.Errorf("message with provider id %s: %w", providerMessageID, ErrNotFound)
+		return model.Message{}, fmt.Errorf("message with provider id %s on channel %s: %w", providerMessageID, channel,
+			ErrNotFound)
 	}
 	return message, err
 }
