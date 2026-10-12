@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"nibwire/internal/alerts"
 	"nibwire/internal/config"
 	"nibwire/internal/core/ids"
 	"nibwire/internal/core/model"
@@ -76,6 +77,11 @@ func newTestServerWith(t *testing.T, tweak func(*config.Config)) *testServer {
 
 	server := New(cfg, db, signer, events.New(db, testLogger(t)), engine, testVerifier(t), testLogger(t))
 	server.Subscribe = func(context.Context, string) error { return nil }
+	// The operator's alerts go to the same fake sender, so a test can read what they would say.
+	server.Alerts = &alerts.Notifier{
+		Store: db, Sender: fake, From: "alerts@example.net", To: "admin@example.net",
+		AppURL: cfg.AppURL, SendingOn: true, Log: testLogger(t),
+	}
 	server.now = func() time.Time { return now }
 	return &testServer{Server: server, store: db, signer: signer, fake: fake, engine: engine, now: now}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"nibwire/internal/alerts"
 	"nibwire/internal/config"
 	"nibwire/internal/core/sign"
 	"nibwire/internal/core/sns"
@@ -35,7 +36,11 @@ type Server struct {
 	Verifier *sns.Verifier
 	// Subscribe confirms an SNS subscription; it is a field so tests can stand in for SNS.
 	Subscribe Subscriber
-	Log       *slog.Logger
+	// Alerts tells the operator about something a person has to look at: a signup flood, an API key
+	// that is filling the list. Optional — a deployment with no alerts configured leaves it nil, and
+	// Send is a no-op rather than a nil dereference.
+	Alerts *alerts.Notifier
+	Log    *slog.Logger
 	// trustedProxies are the networks whose X-Forwarded-For is believed. Empty means "believe
 	// nobody", which is the safe default.
 	trustedProxies []*net.IPNet

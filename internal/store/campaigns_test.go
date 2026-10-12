@@ -43,6 +43,52 @@ func TestArchiveListedColumnDefaultsToListed(t *testing.T) {
 	}
 }
 
+// 结算是一条语句："没有任何未完成的东西"与"置为 sent"分开做，中间就有窗口——另一个进程 release 或
+// claim 一条消息，就留下 sent 底下还有 pending 的 campaign，而那些消息永远不会被领取，因为 sent 的
+// campaign 不再 sending（#35，阶段 1-3 审计的 C2）。
+func TestSettlingRefusesWhileAnythingIsUnfinished(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	campaign := sendingCampaign(t, db)
+	messages := campaignMessages(t, db, campaign, 2)
+	if _, err := db.InsertMessages(ctx, messages); err != nil {
+		t.Fatal(err)
+	}
+
+	// Waiting is not finished.
+	if moved, err := db.SettleCampaign(ctx, campaign.ID); err != nil || moved {
+		t.Fatalf("moved = %v %v, want a campaign with a waiting message to stay sending", moved, err)
+	}
+	// Neither is claimed: in flight is not done.
+	claimed, err := db.ClaimMessages(ctx, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim = %d %v", len(claimed), err)
+	}
+	if moved, err := db.SettleCampaign(ctx, campaign.ID); err != nil || moved {
+		t.Fatalf("moved = %v %v, want a claimed message to count as unfinished", moved, err)
+	}
+
+	// With every message in its final state it settles, and settling again does nothing.
+	for _, message := range messages {
+		if err := db.MarkMessageSent(ctx, message.ID, "ses-"+message.ID, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if moved, err := db.SettleCampaign(ctx, campaign.ID); err != nil || !moved {
+		t.Fatalf("moved = %v %v, want the campaign to settle", moved, err)
+	}
+	loaded, err := db.Campaign(ctx, campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != model.CampaignSent {
+		t.Fatalf("status = %s, want sent", loaded.Status)
+	}
+	if moved, err := db.SettleCampaign(ctx, campaign.ID); err != nil || moved {
+		t.Fatalf("moved = %v, want nothing to happen to a campaign that is already sent", moved)
+	}
+}
+
 // 编辑是读—改—写：写回的列里不能再带上状态机拥有的那些，否则并发做过的状态迁移会被安静地回滚。
 //
 // The hazard is an interleaving, not parallel goroutines, so the test is the interleaving: the editor

@@ -576,6 +576,15 @@ func runCampaignReport(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
+		// Messages still waiting under a campaign that is not sending: it should never happen, and when
+		// it does the report is the only place a person would see it — the issue looks sent, and those
+		// recipients never got it (phase 9 #37).
+		stranded := 0
+		if !campaign.Status.Queueable() && campaign.Status != model.CampaignSending {
+			if stranded, err = a.Store.CountUnfinishedCampaignMessages(ctx, campaign.ID); err != nil {
+				return err
+			}
+		}
 		providers, err := a.Store.ProviderBreakdown(ctx, campaign.ID)
 		if err != nil {
 			return err
@@ -587,10 +596,10 @@ func runCampaignReport(cmd *cobra.Command, args []string) error {
 		if jsonOutput(cmd) {
 			return printJSON(cmd, map[string]any{
 				"campaign": campaign, "stats": counters, "lastChance": lastChance,
-				"providers": providers, "remaining": remaining,
+				"providers": providers, "remaining": remaining, "strandedMessages": stranded,
 			})
 		}
-		printCampaignReport(cmd, campaign, counters, lastChance, providers, remaining)
+		printCampaignReport(cmd, campaign, counters, lastChance, providers, remaining, stranded)
 		return nil
 	})
 }
@@ -614,11 +623,16 @@ func remainingContacts(ctx context.Context, a *app.App, campaign model.Campaign,
 }
 
 func printCampaignReport(cmd *cobra.Command, campaign model.Campaign, counters store.CampaignCounters,
-	lastChance store.LastChanceCounters, providerRows []store.ProviderRow, remaining int) {
+	lastChance store.LastChanceCounters, providerRows []store.ProviderRow, remaining, stranded int) {
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out, "%s  (%s)\n", campaign.Subject, campaign.Status)
 	if campaign.SentAt != nil {
 		_, _ = fmt.Fprintf(out, "sent %s\n", campaign.SentAt.UTC().Format(time.RFC3339))
+	}
+	if stranded > 0 {
+		_, _ = fmt.Fprintf(out, "%s messages are still waiting under this campaign and nobody is "+
+			"claiming them: it is not sending any more. Queue them again or they never go out\n",
+			stats.FormatNumber(stranded))
 	}
 	if campaign.AudienceLimit > 0 {
 		_, _ = fmt.Fprintf(out, "capped at %d contacts\n", campaign.AudienceLimit)

@@ -75,6 +75,52 @@ func TestReserveAndInsertChargesOnlyForWhatItWrote(t *testing.T) {
 	}
 }
 
+// 多于一块的步骤由 ReserveAndInsert 一次写完，账本上正好是新增的那些（#38）。
+//
+// The leak this replaces: the first chunk went in with the reservation and the rest was the caller's
+// job, so a process that died in between had charged the day for messages that were never written —
+// and the ledger, a count per day and pool with nothing saying which messages it paid for, cannot be
+// reconciled afterwards. The assertion that would have failed then is the second one: inserted is the
+// whole step, not one chunk of it.
+func TestAStepWritesEveryChunkAndIsChargedExactlyOnce(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	campaign := sendingCampaign(t, db)
+	day := Day(time.Now().UTC())
+
+	const messages = 2500 // more than two chunks of InsertChunkSize
+	step := campaignMessages(t, db, campaign, messages)
+	fits, inserted, err := db.ReserveAndInsert(ctx, day, "", len(step), 100_000, 0, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fits || inserted != messages {
+		t.Fatalf("fits = %v, inserted = %d, want %d written by the reservation itself",
+			fits, inserted, messages)
+	}
+	recipients, _, err := db.CountCampaignMessages(ctx, campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recipients != messages {
+		t.Fatalf("%d messages in the database, want %d", recipients, messages)
+	}
+	if reserved, err := db.Reserved(ctx, day, ""); err != nil || reserved != messages {
+		t.Fatalf("reserved = %d %v, want exactly the step", reserved, err)
+	}
+
+	// The same step again — new ids, the same addresses — writes nothing and charges nothing: the
+	// charge follows the rows, not the attempt.
+	fits, inserted, err = db.ReserveAndInsert(ctx, day, "", messages, 100_000, 0,
+		campaignMessagesFor(t, db, campaign, step))
+	if err != nil || !fits || inserted != 0 {
+		t.Fatalf("second pass: fits = %v, inserted = %d, %v", fits, inserted, err)
+	}
+	if reserved, err := db.Reserved(ctx, day, ""); err != nil || reserved != messages {
+		t.Fatalf("reserved = %d after the same step twice, want %d", reserved, messages)
+	}
+}
+
 // 退还要把当天的额度还回去，且不会退成负数。
 func TestRefund(t *testing.T) {
 	db := openTemp(t)

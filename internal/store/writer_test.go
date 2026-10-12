@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
@@ -13,14 +14,56 @@ import (
 	"time"
 
 	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
 )
 
-// TestMain lets this test binary act as the child writer of TestConcurrentProcessWrites.
+// TestMain lets this test binary act as one of two child processes: the second writer of
+// TestConcurrentProcessWrites, or the step writer of
+// TestAStepKilledInTheMiddleIsWrittenAndChargedTogetherOrNotAtAll.
 func TestMain(m *testing.M) {
 	if path := os.Getenv("NIBWIRE_TEST_CHILD_DB"); path != "" {
+		if os.Getenv("NIBWIRE_TEST_CHILD_MODE") == "reserve-step" {
+			os.Exit(runChildReservingAStep(path))
+		}
 		os.Exit(runChildWriter(path))
 	}
 	os.Exit(m.Run())
+}
+
+// crashStepMessages is big enough that writing it takes long enough for the parent to kill the child
+// in the middle rather than before it starts.
+const crashStepMessages = 50_000
+
+// runChildReservingAStep writes one step's messages through ReserveAndInsert. It says so on stdout
+// first, so the parent can aim its signal at the writing rather than at process startup.
+func runChildReservingAStep(path string) int {
+	ctx := context.Background()
+	db, err := Open(ctx, path)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "child open:", err)
+		return 1
+	}
+	defer func() { _ = db.Close() }()
+
+	campaignID := os.Getenv("NIBWIRE_TEST_CHILD_CAMPAIGN")
+	now := time.Now().UTC()
+	messages := make([]model.Message, 0, crashStepMessages)
+	for i := 0; i < crashStepMessages; i++ {
+		messages = append(messages, model.Message{
+			ID: ids.New(), Kind: model.KindCampaign, CampaignID: campaignID,
+			NewsletterID: campaignID, ContactID: ids.New(),
+			Email: fmt.Sprintf("reader%d@example.com", i), Status: model.MessagePending,
+			CreatedAt: now,
+		})
+	}
+	fmt.Println("writing")
+	if _, _, err := db.ReserveAndInsert(ctx, Day(now), "", len(messages), 100_000, 0,
+		messages); err != nil {
+		fmt.Fprintln(os.Stderr, "child reserve:", err)
+		return 1
+	}
+	fmt.Println("written")
+	return 0
 }
 
 // TestStoreChild never runs in the normal suite: TestMain turns the process into the child writer
@@ -58,6 +101,81 @@ func insertNewsletter(ctx context.Context, tx *sql.Tx, source string) error {
         VALUES (?, ?, ?, ?, ?, ?)`,
 		ids.New(), slug, source, source+"@example.com", now, now)
 	return err
+}
+
+// 一步的消息与它占的预算在同一个事务里：进程在写这一批的中途被 SIGKILL 时，要么整步都在（消息在、当天
+// 账本也算着它们），要么整步都不在——绝不能出现"预算占了、消息没落地"（#38）。
+//
+// The child is the real ReserveAndInsert, killed by the parent rather than by a fault injected into
+// the store: what is being tested is what a crash leaves behind, and a crash is a process. Both
+// outcomes are correct, so the test cannot flake; the one it must never see is the half state.
+func TestAStepKilledInTheMiddleIsWrittenAndChargedTogetherOrNotAtAll(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts and kills a subprocess")
+	}
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "nibwire.db")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newsletter := seedNewsletter(t, db)
+	campaign := model.NewCampaign(newsletter.ID, "Issue", time.Now().UTC())
+	campaign.Status = model.CampaignSending
+	if err := db.CreateCampaign(ctx, campaign); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	child := exec.Command(os.Args[0], "-test.run=TestStoreChild")
+	child.Env = append(os.Environ(),
+		"NIBWIRE_TEST_CHILD_DB="+path,
+		"NIBWIRE_TEST_CHILD_MODE=reserve-step",
+		"NIBWIRE_TEST_CHILD_CAMPAIGN="+campaign.ID,
+	)
+	stdout, err := child.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	lines := bufio.NewScanner(stdout)
+	if !lines.Scan() || lines.Text() != "writing" {
+		t.Fatalf("the child never said it was writing: %q", lines.Text())
+	}
+	// Long enough to be inside a fifty-thousand-row insert, short enough that it usually is.
+	time.Sleep(100 * time.Millisecond)
+	if err := child.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = child.Wait()
+
+	after, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = after.Close() }()
+	var written int
+	if err := after.Row(ctx, "SELECT count(*) FROM messages WHERE campaign_id = ?",
+		campaign.ID).Scan(&written); err != nil {
+		t.Fatal(err)
+	}
+	reserved, err := after.Reserved(ctx, Day(time.Now().UTC()), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch {
+	case written == 0 && reserved == 0:
+		// Killed before the transaction committed. Nothing happened, which is the point.
+	case written == crashStepMessages && reserved == crashStepMessages:
+		// It got to the end before the signal: the whole step, written and paid for.
+	default:
+		t.Fatalf("half a step: %d messages written and %d charged, want both or neither",
+			written, reserved)
+	}
 }
 
 // 1500 writes from two processes must all land: the writer retries a busy database instead of

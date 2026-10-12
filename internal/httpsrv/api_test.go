@@ -236,6 +236,47 @@ func TestAPIContactsVisitorLimit(t *testing.T) {
 	}
 }
 
+// 一个 key 填满了名单：拒绝，并且告诉运维（#48，上游 app/api/v1/contacts/route.js 的那条 sendAlert）。
+//
+// 每封注册都可能发一封欢迎信，所以上限低、命中就停下——而"若不是你的站点，就是别人拿着这把钥匙"这句
+// 只有告警能说。
+func TestAnAPIKeyFloodIsRefusedAndAlerted(t *testing.T) {
+	server := newTestServer(t)
+	server.seedNewsletter(t)
+	ctx := context.Background()
+	key := server.seedKey(t, creds.ScopeWrite)
+	credential, err := server.store.CredentialByHash(ctx, creds.Hash(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The key is already over its hourly limit.
+	for i := 0; i < contactsPerKeyLimit.Count; i++ {
+		server.Limiter.Limited(contactsPerKeyLimit, credential.ID, server.now)
+	}
+
+	response := server.postAPI(t, "/api/v1/contacts", key,
+		`{"newsletter":"field-notes","email":"reader@example.com"}`)
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want the key's signups refused", response.StatusCode)
+	}
+	rows, err := server.store.Alerts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Key != "api-signup-flood:"+credential.ID ||
+		rows[0].Title != "API signups paused" {
+		t.Fatalf("alert rows = %+v", rows)
+	}
+	alert := emailed(t, server, "API signups paused")
+	for _, want := range []string{"600", credential.Name, "refused", "credentials revoke"} {
+		if !strings.Contains(alert.Email.Text, want) {
+			t.Errorf("the alert does not say %q: %s", want, alert.Email.Text)
+		}
+	}
+}
+
 // 草稿：校验、落库，archiveSlug 唯一，缩略图来自正文里的第一张图。
 func TestAPICampaignsCreate(t *testing.T) {
 	server := newTestServer(t)

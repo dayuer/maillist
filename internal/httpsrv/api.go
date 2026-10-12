@@ -3,12 +3,14 @@ package httpsrv
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
+	"nibwire/internal/alerts"
 	"nibwire/internal/audit"
 	"nibwire/internal/core/archive"
 	"nibwire/internal/core/content"
@@ -140,9 +142,16 @@ func (s *Server) handleAPIContactsPost(w http.ResponseWriter, r *http.Request) {
 	}
 	now := s.clock()
 	if s.Limiter.Limited(contactsPerKeyLimit, credential.ID, now) {
-		// The alert email of the original is phase 7's; the log line is what this phase can promise.
-		s.Log.Warn("API signups paused: over the hourly key limit",
-			"credential", credential.Name, "limit", contactsPerKeyLimit.Count)
+		// A leaked key, or a site without its own limit, can fill the list — and every signup can send
+		// a welcome email, so the ceiling is low and hitting it stops the key until it slows down. The
+		// operator has to hear about it: if it is not their site, the key is somebody else's.
+		s.Alerts.Send(r.Context(), alerts.Alert{
+			Key: "api-signup-flood:" + credential.ID, Title: "API signups paused",
+			Detail: fmt.Sprintf("The %q key sent over %d signups in an hour. New ones are refused "+
+				"until it slows down. If that isn't your site, revoke it: "+
+				"nibwire credentials revoke %s",
+				credential.Name, contactsPerKeyLimit.Count, credential.Name),
+		})
 		apiError(w, http.StatusTooManyRequests, "Too many signups, try again later")
 		return
 	}
