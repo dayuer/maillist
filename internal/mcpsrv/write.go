@@ -344,7 +344,11 @@ type sendOut struct {
 // scheduler picks up, and the campaign's own status is what says how far it got.
 //
 // There is no force argument, and there cannot be one: the checks run here are the same ones the
-// engine enforces, and a blocking one ends the call (design §11, layer 0).
+// engine enforces, and a blocking one ends the call (design §11, layer 0). The same goes for the
+// status itself: without a limit this is a fresh send, which the engine's Queue only starts from
+// draft, scheduled or paused, and with one it is a stepped send (QueueStep), which only continues a
+// campaign that has gone out. Refusing here is what the CLI gets from the engine synchronously —
+// and it leaves no job and no audit row, because nothing was sent.
 func sendCampaign(ctx context.Context, sess *session, credential store.Credential, in sendCampaignIn) (sendOut, error) {
 	if in.Limit < 0 {
 		return sendOut{}, errors.New("limit cannot be negative")
@@ -352,6 +356,15 @@ func sendCampaign(ctx context.Context, sess *session, credential store.Credentia
 	campaign, err := campaignByRef(ctx, sess.deps.Store, in.Campaign)
 	if err != nil {
 		return sendOut{}, err
+	}
+	if in.Limit > 0 {
+		if campaign.Status != model.CampaignSent {
+			return sendOut{}, fmt.Errorf(
+				"the campaign is %s: only a sent one can be sent in steps", campaign.Status)
+		}
+	} else if !campaign.Status.Queueable() {
+		return sendOut{}, fmt.Errorf(
+			"the campaign is %s: only a draft, scheduled or paused one can be sent", campaign.Status)
 	}
 	if err := sess.checkCampaignIsSendable(ctx, campaign); err != nil {
 		return sendOut{}, err

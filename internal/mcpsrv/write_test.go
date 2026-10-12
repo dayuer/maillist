@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"mailcheap/internal/core/model"
+	"mailcheap/internal/creds"
 	"mailcheap/internal/store"
 )
 
@@ -285,5 +286,57 @@ func TestScheduleCampaignQueuesForTheChosenTime(t *testing.T) {
 		"campaign": "Issue 12", "at": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339),
 	}); !strings.Contains(message, "future") {
 		t.Fatalf("scheduling in the past said %q", message)
+	}
+}
+
+// send 的状态门槛与引擎一致：不传 limit 是一次全新的发送，只认 draft/scheduled/paused；传了
+// limit 是补发（QueueStep），只认已发完的。拦在门口的调用不建 job、不写审计——那是发送，不是尝试。
+func TestSendChecksTheStatusTheEngineWouldCheck(t *testing.T) {
+	f := newFixture(t)
+	f.seedNewsletter(t, 2)
+	campaign := f.seedCampaign(t, "Issue 12")
+	session := f.connect(t)
+
+	// 草稿不传 limit：合法，入队。
+	sent := call[sendOut](t, session, "send_campaign", map[string]any{"campaign": campaign.ID})
+	if sent.JobID == "" {
+		t.Fatalf("send_campaign on a draft = %+v", sent)
+	}
+
+	// 已发完的不传 limit 再整体发一次：引擎会在 Queue 里拒，这里要在门口拒。
+	if moved, err := f.store.SetCampaignStatus(context.Background(), campaign.ID,
+		[]model.CampaignStatus{model.CampaignDraft}, model.CampaignSent); err != nil || !moved {
+		t.Fatal(err)
+	}
+	if message := callError(t, session, "send_campaign", map[string]any{
+		"campaign": campaign.ID,
+	}); !strings.Contains(message, "only a draft, scheduled or paused one") {
+		t.Fatalf("sending a sent campaign said %q", message)
+	}
+	if pending, err := f.deps.Jobs.Pending(context.Background(), 10); err != nil || len(pending) != 1 {
+		t.Fatalf("the refused send left %d pending jobs (%v), want only the draft's", len(pending), err)
+	}
+	if entries, err := f.store.AuditLog(context.Background(),
+		store.AuditFilter{Action: "campaign.send", Limit: 50}); err != nil {
+		t.Fatal(err)
+	} else if len(entries) != 1 {
+		t.Fatalf("the refused send was audited: %d campaign.send entries, want the one legit draft send", len(entries))
+	}
+}
+
+// limit 是补发：草稿还没发出去，谈不上「下一批」。
+func TestASteppedSendNeedsACampaignThatHasGoneOut(t *testing.T) {
+	f := newFixture(t)
+	f.seedNewsletter(t, 2)
+	draft := f.seedCampaign(t, "Issue 12")
+	session := f.connect(t)
+
+	if message := callError(t, session, "send_campaign", map[string]any{
+		"campaign": draft.ID, "limit": 10,
+	}); !strings.Contains(message, "only a sent one") {
+		t.Fatalf("stepping a draft said %q", message)
+	}
+	if pending, err := f.deps.Jobs.Pending(context.Background(), 10); err != nil || len(pending) != 0 {
+		t.Fatalf("the refused step left %d jobs (%v)", len(pending), err)
 	}
 }
