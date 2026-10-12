@@ -278,6 +278,11 @@ type CampaignCheck struct {
 	Audience int            `json:"audience"`
 	Checks   []checks.Check `json:"checks"`
 	Blocked  *checks.Check  `json:"blocked,omitempty"`
+	// Sending is the rate and the account's remaining allowance, and Estimated is how long this
+	// audience takes at it (D17, D18). An agent asking "may I send this" also wants to know whether
+	// the answer is "in a minute" or "tomorrow".
+	Sending   mailer.SendingRate `json:"sending"`
+	Estimated string             `json:"estimated"`
 }
 
 func checkCampaign(ctx context.Context, sess *session, _ store.Credential, in campaignRefIn) (CampaignCheck, error) {
@@ -289,7 +294,11 @@ func checkCampaign(ctx context.Context, sess *session, _ store.Credential, in ca
 	if err != nil {
 		return CampaignCheck{}, err
 	}
-	out := CampaignCheck{Campaign: campaign.ID, Audience: audience, Checks: report}
+	rate := sess.deps.Mailer.SendingRate()
+	out := CampaignCheck{
+		Campaign: campaign.ID, Audience: audience, Checks: report,
+		Sending: rate, Estimated: rate.Estimate(audience).Round(time.Second).String(),
+	}
 	if blocked, bad := checks.Blocked(report); bad {
 		out.Blocked = &blocked
 	}

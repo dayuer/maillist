@@ -768,8 +768,8 @@ func (s *session) checkCampaignIsSendable(ctx context.Context, campaign model.Ca
 }
 
 // checkBudget answers "would this fit" before the job is queued, so an agent learns immediately
-// rather than through a job's last_error. Both ceilings are checked, the day's global one and the
-// credential's own.
+// rather than through a job's last_error. Three ceilings are checked: the day's global one, the
+// credential's own, and the SES account's remaining 24-hour allowance (D18).
 //
 // Its count is an upper bound: the whole active audience, capped by the campaign's own limit and by
 // this call's. The authoritative reservation is the engine's, made when the job runs — this one can
@@ -808,6 +808,16 @@ func (s *session) checkBudget(ctx context.Context, credential store.Credential, 
 				"this credential's daily_budget is %d and %d of it is already reserved today; %d more would go over",
 				credential.DailyBudget, spent, wanted)
 		}
+	}
+	// The account's own allowance is the ceiling SES enforces, and the one nothing else here can see.
+	// An unread quota is not checked: without a reading the number would be a guess, and refusing a
+	// send on a deployment that does not read one is worse than finding out from the job.
+	rate := s.deps.Mailer.SendingRate()
+	if rate.Known && wanted > rate.Remaining24h {
+		return fmt.Errorf(
+			"the SES account has %d sends left in its 24-hour window and this would be %d: send it in "+
+				"steps with the limit argument, or wait for the window to reset",
+			rate.Remaining24h, wanted)
 	}
 	return nil
 }

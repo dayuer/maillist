@@ -66,6 +66,79 @@ type BatchResult struct {
 // Done is how many messages the batch disposed of, one way or another.
 func (r BatchResult) Done() int { return r.Sent + r.Failed + r.Suppressed + r.Skipped }
 
+// SendingRate is how fast this deployment may send and how much of the account's 24-hour allowance is
+// left. `campaign check` prints it, and the estimate it implies, because "queue 200,000 recipients"
+// should not look like the same thing as "queue 200" (D17, D18).
+type SendingRate struct {
+	// PerSecond is the current ceiling, in sends per second.
+	PerSecond float64 `json:"perSecond"`
+	// Remaining24h is what the account has left in its 24-hour window, or ratectl.Unlimited.
+	Remaining24h int `json:"remaining24h"`
+	// Known is false before a quota has been read: PerSecond is then the floor rather than a reading,
+	// and Remaining24h is 0 rather than a promise.
+	Known bool `json:"quotaKnown"`
+}
+
+// Estimate is how long n sends take at this rate.
+func (r SendingRate) Estimate(n int) time.Duration {
+	rate := r.PerSecond
+	if rate <= 0 {
+		rate = 1
+	}
+	return time.Duration(float64(n) / rate * float64(time.Second))
+}
+
+// SendingRate reports the rate and the allowance.
+//
+// Without a controller there is no quota to read — this process paces its sends by the bucket alone —
+// so the ceiling is the bucket's own rate and the allowance is not claimed to be known.
+func (e *Engine) SendingRate() SendingRate {
+	// A nil engine is a server built without a mailer, which is what a tools-only test does: there is
+	// no rate, and asking must not be a nil dereference.
+	if e == nil {
+		return SendingRate{}
+	}
+	if e.control == nil {
+		return SendingRate{PerSecond: e.bucket.Rate()}
+	}
+	_, known := e.control.Quota()
+	return SendingRate{
+		PerSecond:    e.control.Rate(time.Now().UTC()),
+		Remaining24h: e.control.Remaining24h(),
+		Known:        known,
+	}
+}
+
+// sesQuotaRefusal is D18's third ceiling: the account's own 24-hour allowance, which is the one SES
+// enforces and the only one nothing else here can see.
+//
+// It is checked before anything is written, so a step that does not fit is refused whole — no
+// messages, no charge against the day, and the campaign stays where it is. Sending the part that fits
+// would leave the campaign looking half sent with no record of why, and the operator is the one who
+// gets to decide to split a send: that is what --limit is for.
+func (e *Engine) sesQuotaRefusal(n int) string {
+	if e.control == nil {
+		return ""
+	}
+	// An allowance nobody has read is not an allowance of zero. ratectl answers 0 there, and refusing
+	// every send on that number would turn "the quota could not be read" into "the deployment cannot
+	// send at all" — the opposite of what D8-2 chose: one alert and one email per second, slowly,
+	// which is what the rate floor is for.
+	if _, known := e.control.Quota(); !known {
+		return ""
+	}
+	remaining := e.control.Remaining24h()
+	if n <= remaining {
+		return ""
+	}
+	if remaining <= 0 {
+		return fmt.Sprintf("the SES account has no sends left in its 24-hour window and this step is "+
+			"%d: the window opens as the previous day's sends age out", n)
+	}
+	return fmt.Sprintf("the SES account has %d sends left in its 24-hour window and this step is %d: "+
+		"send it with --limit %d, or wait for the window to reset", remaining, n, remaining)
+}
+
 // QueueResult is what Queue and QueueStep report back.
 type QueueResult struct {
 	Recipients int
@@ -819,6 +892,12 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		if recipients+lastChance == 0 {
 			return QueueResult{Reason: "No active contacts to send to"}, nil
 		}
+		// The audience was chosen and the day reserved when this campaign first started, so neither of
+		// those is decided again — but the account's own allowance has moved since, and resuming on a
+		// spent one would only produce a batch of throttles.
+		if refusal := e.sesQuotaRefusal(recipients + lastChance); refusal != "" {
+			return QueueResult{Reason: refusal}, nil
+		}
 	} else {
 		// The archive page's address is decided as the issue goes out (upstream assignArchiveSlug), so
 		// the page exists before the first email links to it.
@@ -860,6 +939,11 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		}
 		if len(messages) == 0 {
 			return QueueResult{Reason: "No active contacts to send to"}, nil
+		}
+		// Checked before the day is charged: a step the account cannot send must not spend the
+		// deployment's own budget either, or a refused send would keep the next one from going out.
+		if refusal := e.sesQuotaRefusal(len(messages)); refusal != "" {
+			return QueueResult{Reason: refusal}, nil
 		}
 		fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
 			e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
@@ -1033,6 +1117,9 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 	messages, err := e.stepMessages(ctx, campaign, newsletter, fresh, nil)
 	if err != nil {
 		return QueueResult{}, err
+	}
+	if refusal := e.sesQuotaRefusal(len(messages)); refusal != "" {
+		return QueueResult{Reason: refusal}, nil
 	}
 	fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
 		e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)

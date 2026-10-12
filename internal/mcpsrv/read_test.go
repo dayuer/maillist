@@ -120,6 +120,23 @@ func TestPagingThroughContacts(t *testing.T) {
 	}
 }
 
+// check_campaign 也回答「多快」：agent 问「现在能发吗」，答案可能是「一分钟」也可能是「明天」，而
+// 前者才该让它接着调 send_campaign。
+func TestCheckCampaignReportsHowFastTheAudienceGoesOut(t *testing.T) {
+	f := newFixture(t)
+	f.seedNewsletter(t, 3)
+	f.seedCampaign(t, "Issue 12")
+	session := f.connect(t)
+
+	out := call[CampaignCheck](t, session, "check_campaign", map[string]any{"campaign": "Issue 12"})
+	if out.Sending.PerSecond <= 0 {
+		t.Fatalf("check_campaign = %+v, want the rate it would send at", out)
+	}
+	if out.Estimated == "" {
+		t.Fatal("check_campaign said nothing about how long the audience takes")
+	}
+}
+
 // 未验证的域名是 blocking 的：阶段 4 恢复的那条检查在 MCP 上同样成立，所以 send_campaign 也拦得住。
 func TestCheckCampaignBlocksOnAnUnverifiedDomain(t *testing.T) {
 	f := newFixture(t)
