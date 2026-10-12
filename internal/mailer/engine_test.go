@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,8 @@ type fixture struct {
 	newsletter model.Newsletter
 	campaign   model.Campaign
 	contacts   []model.Contact
+	// logs is what the engine said, which is where the things only an operator sees end up.
+	logs *logCapture
 }
 
 func newFixture(t *testing.T, contacts int) *fixture {
@@ -38,6 +41,14 @@ func newFixture(t *testing.T, contacts int) *fixture {
 // newFixtureWith is newFixture with options for the fake, for the tests that need it to behave in a
 // particular way (see WithContextCancellation).
 func newFixtureWith(t *testing.T, contacts int, options ...FakeOption) *fixture {
+	t.Helper()
+	return newFixtureConfigured(t, contacts, nil, options...)
+}
+
+// newFixtureConfigured is the fixture with a hook for the engine's configuration, which is where the
+// rate controller goes: the tests about the rate following SES need one, the rest do not.
+func newFixtureConfigured(t *testing.T, contacts int, configure func(*Config),
+	options ...FakeOption) *fixture {
 	t.Helper()
 	ctx := context.Background()
 	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "mailcheap.db"))
@@ -81,7 +92,7 @@ func newFixtureWith(t *testing.T, contacts int, options ...FakeOption) *fixture 
 	}
 
 	fake := NewFake(options...)
-	engine := NewEngine(db, fake, signer, Config{
+	cfg := Config{
 		AppURL: testAppURL, SendingOn: true, SendRatePerSec: 1000,
 		Limits: model.Limits{MaxEmailBytes: 100_000, BounceRate: 0.02, ComplaintRate: 0.0008,
 			MaxSendsPerDay: 50_000, WelcomeEmailsPer10Minute: 100},
@@ -91,18 +102,55 @@ func newFixtureWith(t *testing.T, contacts int, options ...FakeOption) *fixture 
 		// claimed) have to hold when sixteen sends are in the air, not only when they are queued up
 		// one at a time. A test that needs a single file sets it back to 1.
 		SendConcurrency: 16,
-	}, slog.New(slog.NewTextHandler(&testLogWriter{t}, nil)))
+	}
+	if configure != nil {
+		configure(&cfg)
+	}
+	logs := newLogCapture(t)
+	engine := NewEngine(db, fake, signer, cfg, slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(engine.Close)
 
-	return &fixture{db: db, engine: engine, fake: fake, signer: signer,
+	return &fixture{db: db, engine: engine, fake: fake, signer: signer, logs: logs,
 		newsletter: newsletter, campaign: campaign, contacts: audience}
 }
 
+// testLogWriter is a logger that writes to the test's own output, so a failing test shows what the
+// engine said. logCapture is the same thing with a memory: a pause's reason reaches the log and the
+// alert and nothing else, so this is where a test can read it back.
 type testLogWriter struct{ t *testing.T }
 
 func (w *testLogWriter) Write(p []byte) (int, error) {
 	w.t.Log(strings.TrimSpace(string(p)))
 	return len(p), nil
+}
+
+type logCapture struct {
+	t     *testing.T
+	mu    sync.Mutex
+	lines []string
+}
+
+func newLogCapture(t *testing.T) *logCapture { return &logCapture{t: t} }
+
+func (c *logCapture) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	c.mu.Lock()
+	c.lines = append(c.lines, line)
+	c.mu.Unlock()
+	c.t.Log(line)
+	return len(p), nil
+}
+
+// says is whether any line contains substring.
+func (c *logCapture) says(substring string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, line := range c.lines {
+		if strings.Contains(line, substring) {
+			return true
+		}
+	}
+	return false
 }
 
 // serial puts the fixture back to one send at a time.

@@ -45,6 +45,13 @@ type Config struct {
 	// IncreaseFactor is how much it creeps by. Additive decrease, multiplicative increase: that is
 	// AIMD, and it is what makes the rate stable rather than oscillating against the account's limit.
 	IncreaseFactor float64
+	// DecreaseEvery is the shortest interval between two decreases.
+	//
+	// It exists because sending is concurrent: sixteen workers that meet the same wall in the same
+	// instant are reporting one event, and halving for each of them would take 450 a second to the
+	// floor — from where the creep back up is one step per IncreaseEvery, hours rather than seconds.
+	// One decrease per interval is the honest count.
+	DecreaseEvery time.Duration
 }
 
 // Controller is the state: the current rate, the target it is aiming at, and when it last moved.
@@ -63,6 +70,8 @@ type Controller struct {
 	// lastIncrease is when the creep last moved, so it moves once per interval rather than once per
 	// call.
 	lastIncrease time.Time
+	// lastDecrease is when the rate last halved, so a burst of throttles counts once.
+	lastDecrease time.Time
 }
 
 // New returns a controller that has not read a quota yet: it will send at the floor until one
@@ -79,6 +88,9 @@ func New(cfg Config) *Controller {
 	}
 	if cfg.IncreaseFactor <= 1 {
 		cfg.IncreaseFactor = 1.1
+	}
+	if cfg.DecreaseEvery <= 0 {
+		cfg.DecreaseEvery = time.Second
 	}
 	return &Controller{cfg: cfg, rate: float64(cfg.Floor)}
 }
@@ -110,16 +122,23 @@ func (c *Controller) SetQuota(q Quota, now time.Time) {
 }
 
 // OnThrottle is SES saying "too fast": the rate halves, down to the floor.
+//
+// A second throttle within DecreaseEvery is the same overload seen again — the workers that were
+// already in flight come back with it — and does not halve a second time.
 func (c *Controller) OnThrottle(now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.backedOff = true
+	if c.lastIncrease.IsZero() {
+		c.lastIncrease = now
+	}
+	if !c.lastDecrease.IsZero() && now.Sub(c.lastDecrease) < c.cfg.DecreaseEvery {
+		return
+	}
+	c.lastDecrease = now
 	c.rate = c.rate / 2
 	if c.rate < float64(c.cfg.Floor) {
 		c.rate = float64(c.cfg.Floor)
-	}
-	if c.lastIncrease.IsZero() {
-		c.lastIncrease = now
 	}
 }
 

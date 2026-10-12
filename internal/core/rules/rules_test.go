@@ -258,13 +258,16 @@ func TestCampaignsPauseAboveTheBounceOrComplaintLimit(t *testing.T) {
 	}
 }
 
-// tests/sending.test.mjs "SES errors map to retry later, pause the campaign, or fail one message".
+// tests/sending.test.mjs "SES errors map to retry later, pause the campaign, or fail one message",
+// with the phase 8 split of "too fast" from "out of allowance".
 func TestSESErrorsMapToRetryPauseOrFail(t *testing.T) {
 	for _, tc := range []struct {
 		code, message string
 		want          ErrorAction
 	}{
-		{"TooManyRequestsException", "TooManyRequestsException", ErrorRetry},
+		{"TooManyRequestsException", "TooManyRequestsException", ErrorThrottle},
+		{"ThrottlingException", "Maximum sending rate exceeded", ErrorThrottle},
+		{"Throttling", "Throttling", ErrorThrottle},
 		{"", "Sending is off (SENDING_ENABLED is not true)", ErrorRetry},
 		{"SendingPausedException", "SendingPausedException", ErrorPause},
 		{"AccountSuspendedException", "AccountSuspendedException", ErrorPause},
@@ -273,6 +276,14 @@ func TestSESErrorsMapToRetryPauseOrFail(t *testing.T) {
 		{"MessageRejected", "Message contains a virus", ErrorFail},
 		{"BadRequestException", "BadRequestException", ErrorFail},
 		{"", "", ErrorFail},
+		// A spent 24-hour allowance, however SES spells it: same codes, different message, and the
+		// difference between slowing down and stopping until tomorrow.
+		{"Throttling", "Daily message quota exceeded", ErrorQuota},
+		{"ThrottlingException", "You have exceeded your daily message quota", ErrorQuota},
+		{"LimitExceededException", "Sending quota exceeded", ErrorQuota},
+		{"TooManyRequestsException", "The sending quota for this account has been reached", ErrorQuota},
+		// "quota" alone says nothing about the day: a rate message stays a rate message.
+		{"Throttling", "Rate exceeded for this quota period", ErrorThrottle},
 	} {
 		if got := SendErrorAction(tc.code, tc.message); got != tc.want {
 			t.Errorf("SendErrorAction(%q, %q) = %q, want %q", tc.code, tc.message, got, tc.want)
