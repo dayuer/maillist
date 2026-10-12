@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"mailcheap/internal/core/checks"
+	"mailcheap/internal/core/cleanup"
 	"mailcheap/internal/core/content"
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/importer"
@@ -897,4 +898,76 @@ func sluggable(value string) bool {
 // written so nothing has to walk every body later.
 func firstImage(format model.Format, body string) string {
 	return content.FirstImageOf(format, body)
+}
+
+type runCleanupIn struct {
+	Newsletter string `json:"newsletter" jsonschema:"newsletter id or slug"`
+	DryRun     bool   `json:"dry_run,omitempty" jsonschema:"report what would happen, and write nothing"`
+	Limit      int    `json:"limit,omitempty" jsonschema:"count it as a send of at most this many issue recipients"`
+}
+
+type runCleanupOut struct {
+	Newsletter string          `json:"newsletter"`
+	Settings   cleanupSettings `json:"settings"`
+	Totals     cleanup.Totals  `json:"totals"`
+	// WouldSend is what the next send would do, at Limit when one was given.
+	WouldSend cleanup.Counts `json:"wouldSend"`
+	Moved     int            `json:"moved"`
+}
+
+type cleanupSettings struct {
+	Enabled bool `json:"enabled"`
+	Issues  int  `json:"issues"`
+	Days    int  `json:"days"`
+}
+
+// runCleanup reports what the list cleanup would do, and with dry_run false performs the part a send
+// would perform anyway: contacts warned 14 days ago or more become dormant. Nobody is ever
+// unsubscribed or deleted (design §13) — this is the newest tool on the surface and still one that
+// cannot remove anything.
+func runCleanup(ctx context.Context, sess *session, credential store.Credential, in runCleanupIn) (runCleanupOut, error) {
+	newsletter, err := newsletterByRef(ctx, sess.deps.Store, in.Newsletter)
+	if err != nil {
+		return runCleanupOut{}, err
+	}
+	if in.Limit < 0 {
+		return runCleanupOut{}, errors.New("limit cannot be negative")
+	}
+	settings := cleanup.SettingsOf(newsletter)
+	totals, err := sess.deps.Store.CleanupTotals(ctx, newsletter.ID)
+	if err != nil {
+		return runCleanupOut{}, err
+	}
+	audience, err := sess.deps.Store.SelectAudience(ctx, newsletter.ID, 0)
+	if err != nil {
+		return runCleanupOut{}, err
+	}
+	// The same walk the send makes, counted at the limit the caller asked about: "what would a send of
+	// N do" is the question this tool exists to answer.
+	preview := cleanup.EmptyPreview()
+	preview.Add(audience, cleanup.SplitInput{Settings: settings, Now: time.Now().UTC()})
+	out := runCleanupOut{
+		Newsletter: newsletter.Slug,
+		Settings:   cleanupSettings{Enabled: settings.Enabled, Issues: settings.Issues, Days: settings.Days},
+		Totals:     totals,
+		WouldSend:  preview.Summarize(in.Limit),
+	}
+	if in.DryRun {
+		return out, nil
+	}
+
+	split := cleanup.SplitAudience(audience, cleanup.SplitInput{Settings: settings, Now: time.Now().UTC()})
+	ids := make([]string, 0, len(split.Dormant))
+	for _, contact := range split.Dormant {
+		ids = append(ids, contact.ID)
+	}
+	moved, err := sess.deps.Store.MakeDormant(ctx, ids)
+	if err != nil {
+		return runCleanupOut{}, err
+	}
+	out.Moved = moved
+	sess.note(ctx, credential, "cleanup.run", newsletter.Slug, map[string]any{
+		"newsletter": newsletter.Slug, "moved": moved,
+	})
+	return out, nil
 }

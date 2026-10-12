@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"mailcheap/internal/core/cleanup"
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/importer"
 	"mailcheap/internal/core/model"
@@ -676,4 +677,62 @@ func derefFloat(value *float64) any {
 		return nil
 	}
 	return *value
+}
+
+// MakeDormant puts contacts to sleep: they stop receiving issues, and they are never unsubscribed and
+// never deleted (upstream makeDormant).
+//
+// Only a contact who is still active and still counted as ignoring issues moves, so a sign of life
+// that arrived between the list being read and this write leaves them alone. The number that actually
+// moved comes back, because that is the number the campaign's report should show.
+func (db *DB) MakeDormant(ctx context.Context, contactIDs []string) (int, error) {
+	if len(contactIDs) == 0 {
+		return 0, nil
+	}
+	moved := 0
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(contactIDs)), ",")
+	args := make([]any, 0, len(contactIDs)+3)
+	args = append(args, string(model.ContactDormant), formatTime(time.Now()), string(model.ContactActive))
+	for _, id := range contactIDs {
+		args = append(args, id)
+	}
+	// The only interpolated text is a run of "?" placeholders; every value is bound.
+	query := "UPDATE contacts SET status = ?, updated_at = ? WHERE status = ? AND ignored_issues > 0 AND id IN (" + //nolint:gosec // G202: placeholders, not values
+		placeholders + ")"
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		moved = int(affected)
+		return nil
+	})
+	return moved, err
+}
+
+// CleanupTotals is upstream cleanupTotalsPipeline: the counts the settings screen shows, over the
+// contacts of one newsletter who ever got a last-chance email.
+//
+// waiting, kept and dormant are the three answers that email can have produced so far: no sign of
+// life since it (waiting), one (kept), or the list has moved on without them (dormant).
+func (db *DB) CleanupTotals(ctx context.Context, newsletterID string) (cleanup.Totals, error) {
+	var out cleanup.Totals
+	err := db.sql.QueryRowContext(ctx, `SELECT
+            sum(CASE WHEN status = 'active' AND NOT (last_chance_at < max(
+                coalesce(last_engaged_at, ''), coalesce(last_open_at, ''), coalesce(last_click_at, ''),
+                coalesce(confirmed_at, ''), coalesce(subscribed_at, created_at))) THEN 1 ELSE 0 END),
+            sum(CASE WHEN status = 'active' AND last_chance_at < max(
+                coalesce(last_engaged_at, ''), coalesce(last_open_at, ''), coalesce(last_click_at, ''),
+                coalesce(confirmed_at, ''), coalesce(subscribed_at, created_at)) THEN 1 ELSE 0 END),
+            sum(CASE WHEN status = 'dormant' THEN 1 ELSE 0 END)
+        FROM contacts WHERE newsletter_id = ? AND last_chance_at IS NOT NULL`, newsletterID).Scan(
+		&out.Waiting, &out.Kept, &out.Dormant)
+	if err != nil {
+		return cleanup.Totals{}, fmt.Errorf("read the cleanup totals: %w", err)
+	}
+	return out, nil
 }

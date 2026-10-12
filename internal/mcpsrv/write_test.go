@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/store"
 )
@@ -287,3 +288,72 @@ func TestScheduleCampaignQueuesForTheChosenTime(t *testing.T) {
 		t.Fatalf("scheduling in the past said %q", message)
 	}
 }
+
+// run_cleanup 报出「下一个发送会做什么」，并且只在 dry_run=false 时才动库。
+func TestRunCleanupReportsAndMoves(t *testing.T) {
+	f := newFixture(t)
+	newsletter := f.seedNewsletter(t, 0)
+	session := f.connect(t)
+	ctx := context.Background()
+
+	// 打开清理：两个忽略的期、30 天没有动静就算冷。
+	loaded, err := f.store.Newsletter(ctx, newsletter.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.CleanupEnabled, loaded.CleanupIssues, loaded.CleanupDays = true, 2, 30
+	if err := f.store.UpdateNewsletter(ctx, loaded); err != nil {
+		t.Fatal(err)
+	}
+	// 一个冷了的人，和一个警告过 15 天还没回应的人。
+	cold := model.Contact{
+		ID: ids.New(), NewsletterID: newsletter.ID, Email: "cold@example.com",
+		Status: model.ContactActive, IgnoredIssues: 3,
+		CreatedAt: time.Now().UTC().AddDate(0, 0, -400), SubscribedAt: ptrTime(time.Now().UTC().AddDate(0, 0, -400)),
+	}
+	expired := cold
+	expired.ID, expired.Email = ids.New(), "expired@example.com"
+	warned := time.Now().UTC().AddDate(0, 0, -15)
+	expired.LastChanceAt = &warned
+	for _, contact := range []model.Contact{cold, expired} {
+		if err := f.store.CreateContact(ctx, contact); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	preview := call[runCleanupOut](t, session, "run_cleanup", map[string]any{
+		"newsletter": "field-notes", "dry_run": true,
+	})
+	if !preview.Settings.Enabled || preview.WouldSend.LastChance != 1 || preview.WouldSend.Dormant != 1 {
+		t.Fatalf("preview = %+v", preview)
+	}
+	if preview.Moved != 0 {
+		t.Errorf("a dry run moved %d contacts", preview.Moved)
+	}
+	if contact, err := f.store.Contact(ctx, expired.ID); err != nil || contact.Status != model.ContactActive {
+		t.Fatalf("a dry run changed a status: %q %v", contact.Status, err)
+	}
+
+	ran := call[runCleanupOut](t, session, "run_cleanup", map[string]any{"newsletter": "field-notes"})
+	if ran.Moved != 1 {
+		t.Fatalf("ran = %+v", ran)
+	}
+	if contact, err := f.store.Contact(ctx, expired.ID); err != nil || contact.Status != model.ContactDormant {
+		t.Fatalf("status = %q %v", contact.Status, err)
+	}
+	if contact, err := f.store.Contact(ctx, cold.ID); err != nil || contact.Status != model.ContactActive {
+		t.Fatalf("the cold contact was moved too early: %q %v", contact.Status, err)
+	}
+
+	// 一次运行留一行审计，actor 还是这个凭据。
+	entries, err := f.store.AuditLog(ctx, store.AuditFilter{Action: "cleanup.run"})
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("entries = %v %v", entries, err)
+	}
+	if entries[0].ActorName != "mcp:newsletter-bot" {
+		t.Errorf("actor = %q", entries[0].ActorName)
+	}
+}
+
+// ptrTime is the one-liner the fixtures use for an optional timestamp.
+func ptrTime(at time.Time) *time.Time { return &at }
