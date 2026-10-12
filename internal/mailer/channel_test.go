@@ -3,6 +3,7 @@ package mailer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"nibwire/internal/core/model"
@@ -39,16 +40,23 @@ func TestNewChannelExposesItsParts(t *testing.T) {
 // With no classifier of its own a channel reads errors the way SES writes them.
 func TestNewChannelDefaultsToSESClassification(t *testing.T) {
 	channel := NewChannel(model.DefaultChannel, ChannelTypeSES, NewFake(), StaticQuota{}, StaticIdentity{}, nil)
-	cases := map[error]rules.ErrorAction{
-		&APIError{Code: "ThrottlingException", Message: "Maximum sending rate exceeded."}: rules.ErrorThrottle,
-		&APIError{Code: "AccountSuspendedException", Message: "suspended"}:                rules.ErrorPause,
-		&APIError{Code: "MessageRejected", Message: "Email address is not verified."}:     rules.ErrorPause,
-		&APIError{Code: "MessageRejected", Message: "Illegal address"}:                    rules.ErrorFail,
-		errors.New("connection reset"):                                                    rules.ErrorFail,
+	cases := []struct {
+		err  error
+		want rules.ErrorAction
+	}{
+		{&APIError{Code: "ThrottlingException", Message: "Maximum sending rate exceeded."}, rules.ErrorThrottle},
+		{&APIError{Code: "AccountSuspendedException", Message: "suspended"}, rules.ErrorPause},
+		{&APIError{Code: "MessageRejected", Message: "Email address is not verified."}, rules.ErrorPause},
+		{&APIError{Code: "MessageRejected", Message: "Illegal address"}, rules.ErrorFail},
+		{errors.New("connection reset"), rules.ErrorFail},
+		// What ses.go returns when sending is off: retried later, not counted as a failure.
+		{errors.New("Sending is off (SENDING_ENABLED is not true)"), rules.ErrorRetry}, //nolint:staticcheck // ST1005: upstream wording
+		// The code survives wrapping.
+		{fmt.Errorf("send: %w", &APIError{Code: "ThrottlingException", Message: "Maximum sending rate exceeded."}), rules.ErrorThrottle},
 	}
-	for err, want := range cases {
-		if got := channel.Classify(err); got != want {
-			t.Errorf("Classify(%v) = %s, want %s", err, got, want)
+	for _, c := range cases {
+		if got := channel.Classify(c.err); got != c.want {
+			t.Errorf("Classify(%v) = %s, want %s", c.err, got, c.want)
 		}
 	}
 }

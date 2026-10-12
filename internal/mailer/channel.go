@@ -26,12 +26,14 @@ type Channel interface {
 }
 
 // ClassifySES reads an error the way SES writes it: by the API error code and by the message, which
-// is where "Sending is off", "not verified" and the daily quota are told apart.
+// is where "Sending is off", "not verified" and the daily quota are told apart. err must be non-nil.
 func ClassifySES(err error) rules.ErrorAction {
 	return rules.SendErrorAction(errorCode(err), err.Error())
 }
 
-// NewChannel assembles a channel from its parts. A nil classify means ClassifySES.
+// NewChannel assembles a channel from its parts. sender, quota and identities must be non-nil. A nil
+// classify means SES's rules (ClassifySES), which suit only SES-shaped errors; other providers pass
+// their own.
 func NewChannel(name, kind string, sender Sender, quota QuotaReader, identities IdentityReader,
 	classify func(error) rules.ErrorAction) Channel {
 	if classify == nil {
