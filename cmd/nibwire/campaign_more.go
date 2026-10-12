@@ -18,11 +18,11 @@ import (
 	"nibwire/internal/core/providers"
 	"nibwire/internal/core/ratectl"
 	"nibwire/internal/core/render"
-	"nibwire/internal/core/rules"
 	"nibwire/internal/core/schedule"
 	"nibwire/internal/core/stats"
 	"nibwire/internal/jobs"
 	"nibwire/internal/mailer"
+	"nibwire/internal/presend"
 	"nibwire/internal/store"
 )
 
@@ -502,26 +502,17 @@ func runCampaignResume(cmd *cobra.Command, args []string) error {
 }
 
 // runChecks builds the pre-send checklist: the same input the send path uses, so `check` and `send`
-// can never disagree about whether a campaign is sendable. The audience comes back with it because
-// it is the number the operator sends by — "this goes to N" — and not a check of its own.
+// can never disagree about whether a campaign is sendable. The assembly is internal/presend, which
+// the MCP surface's check_campaign and send_campaign go through too, so neither can the two surfaces
+// (phase 9 #44). The audience comes back with it because it is the number the operator sends by —
+// "this goes to N" — and not a check of its own.
 func runChecks(ctx context.Context, a *app.App, campaign model.Campaign,
 	newsletter model.Newsletter) ([]checks.Check, int, error) {
-	verified, err := verifiedDomains(ctx, a)
+	report, err := presend.Assemble(ctx, a.Identities, a.Store, a.Config, campaign, newsletter)
 	if err != nil {
 		return nil, 0, err
 	}
-	audience, err := a.Store.CountActiveContacts(ctx, newsletter.ID)
-	if err != nil {
-		return nil, 0, err
-	}
-	return checks.Run(checks.Input{
-		Campaign: campaign, Newsletter: newsletter,
-		Rendered:       renderEmail(campaign, newsletter),
-		SendingOn:      a.Config.SendingOn,
-		Limits:         a.Config.Limits,
-		DomainVerified: rules.VerifiedFromDomain(verified, newsletter.FromEmail),
-		Audience:       audience,
-	}), audience, nil
+	return report.Checks, report.Audience, nil
 }
 
 // renderEmail renders a campaign's Markdown or HTML into the email a reader would get, without a

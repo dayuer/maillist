@@ -10,11 +10,10 @@ import (
 	"nibwire/internal/core/checks"
 	"nibwire/internal/core/ids"
 	"nibwire/internal/core/model"
-	"nibwire/internal/core/render"
-	"nibwire/internal/core/rules"
 	"nibwire/internal/core/stats"
 	"nibwire/internal/core/validate"
 	"nibwire/internal/mailer"
+	"nibwire/internal/presend"
 	"nibwire/internal/statsquery"
 	"nibwire/internal/store"
 )
@@ -543,32 +542,19 @@ func campaignByRef(ctx context.Context, db *store.DB, ref string) (model.Campaig
 }
 
 // preSendChecks builds the checklist for a campaign: the same inputs the send path uses, so
-// check_campaign and send_campaign can never disagree about whether a campaign is sendable.
+// check_campaign and send_campaign can never disagree about whether a campaign is sendable. The
+// assembly itself is internal/presend, which the CLI's `campaign check` goes through too, so the two
+// surfaces cannot drift apart either (phase 9 #44).
 func preSendChecks(ctx context.Context, deps Deps, campaign model.Campaign) ([]checks.Check, int, error) {
 	newsletter, err := deps.Store.Newsletter(ctx, campaign.NewsletterID)
 	if err != nil {
 		return nil, 0, err
 	}
-	verified, err := deps.Identities.Identities(ctx)
+	report, err := presend.Assemble(ctx, deps.Identities, deps.Store, deps.Config, campaign, newsletter)
 	if err != nil {
 		return nil, 0, err
 	}
-	audience, err := deps.Store.CountActiveContacts(ctx, newsletter.ID)
-	if err != nil {
-		return nil, 0, err
-	}
-	report := checks.Run(checks.Input{
-		Campaign: campaign, Newsletter: newsletter,
-		Rendered: render.Email(render.EmailInput{
-			Format: campaign.Format, Body: campaign.Body, Subject: campaign.Subject,
-			PreviewText: campaign.PreviewText, Newsletter: newsletter,
-		}),
-		SendingOn:      deps.Config.SendingOn,
-		Limits:         deps.Config.Limits,
-		DomainVerified: rules.VerifiedFromDomain(mailer.VerifiedDomains(verified), newsletter.FromEmail),
-		Audience:       audience,
-	})
-	return report, audience, nil
+	return report.Checks, report.Audience, nil
 }
 
 func knownContactStatus(status model.ContactStatus) bool {
