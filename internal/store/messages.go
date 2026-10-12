@@ -134,43 +134,72 @@ func insertMessagesTx(ctx context.Context, tx *sql.Tx, chunk []model.Message) (i
 // fits=false means the budget is spent: nothing is written and nothing is reserved.
 //
 // Every message it was given is written before it returns, so there is no "the rest" for a caller to
-// write: an error or a crash leaves nothing behind, rather than a step half written and half paid for.
+// write, and the day is charged for exactly what was new by the time it returns. What a *crash* can
+// leave behind is the whole step reserved with only part of it written: over-reserved, which is the
+// direction a budget may be wrong in.
 func (db *DB) ReserveAndInsert(ctx context.Context, day, credentialID string, n, globalMax, credentialMax int,
 	messages []model.Message) (fits bool, inserted int, err error) {
 	if n <= 0 || len(messages) == 0 {
 		return true, 0, nil
 	}
+	first := messages[:min(InsertChunkSize, len(messages))]
 	err = db.Write(ctx, func(tx *sql.Tx) error {
 		fits, inserted = false, 0
 		ok, err := reserveTx(ctx, tx, day, credentialID, n, globalMax, credentialMax)
 		if err != nil || !ok {
 			return err
 		}
-		// The whole step, chunk by chunk, inside the transaction that reserved it. Writing the first
-		// chunk here and the rest afterwards is a leak nobody can notice afterwards: a process that
-		// dies between the two has charged the day for messages that do not exist, and the ledger — a
-		// count per day and pool, with nothing saying which messages it paid for — cannot be
-		// reconciled. One transaction makes "what if it dies in between" unaskable.
-		for start := 0; start < len(messages); start += InsertChunkSize {
-			chunk := messages[start:min(start+InsertChunkSize, len(messages))]
-			count, err := insertMessagesTx(ctx, tx, chunk)
-			if err != nil {
-				return err
-			}
-			inserted += count
-			if err := markReservedDayTx(ctx, tx, day, chunk); err != nil {
-				return err
-			}
+		// The whole step's reservation, the day it belongs to, and the first chunk of messages, in one
+		// transaction. The reservation is what makes the day's ceiling true, so it must not be able to
+		// go missing; the messages follow it in chunks, because one transaction for all of them holds
+		// the single writer for as long as the audience is long — a million messages is about sixteen
+		// seconds of unsubscribe records, opens, clicks and SNS callbacks queued behind it, and a CLI
+		// write that gives up after ten (design §5.2).
+		//
+		// A process that dies partway through therefore leaves the day charged for more than exists,
+		// never for less: a reservation is a promise to send, and the failure a spend can be in is
+		// spending too much of it. Everything below corrects downwards when it can.
+		count, err := insertMessagesTx(ctx, tx, first)
+		if err != nil {
+			return err
 		}
-		// A row that already existed was not charged for: the reservation was for the whole step, and
-		// this corrects it down to what was actually new.
-		if err := refundTx(ctx, tx, day, credentialID, n-inserted); err != nil {
+		inserted = count
+		if err := markReservedDayTx(ctx, tx, day, first); err != nil {
 			return err
 		}
 		fits = true
 		return nil
 	})
-	return fits, inserted, err
+	if err != nil || !fits {
+		return fits, inserted, err
+	}
+
+	// The rest, one transaction per chunk.
+	for start := len(first); start < len(messages); start += InsertChunkSize {
+		chunk := messages[start:min(start+InsertChunkSize, len(messages))]
+		count, err := db.InsertMessages(ctx, chunk)
+		inserted += count
+		if err != nil {
+			// The messages after this point do not exist, so the day must not stay charged for them.
+			// Best effort: the ledger can be read again, a promised send cannot be un-promised by
+			// guessing.
+			if n > inserted {
+				if refundErr := db.Refund(ctx, day, credentialID, n-inserted); refundErr != nil {
+					return fits, inserted, errors.Join(err, refundErr)
+				}
+			}
+			return fits, inserted, err
+		}
+	}
+	// Rows that already existed were not charged for: the reservation was for the whole step, and this
+	// corrects it down to what was actually new (a job retried after inserting must not be charged
+	// twice).
+	if n > inserted {
+		if err := db.Refund(ctx, day, credentialID, n-inserted); err != nil {
+			return fits, inserted, err
+		}
+	}
+	return fits, inserted, nil
 }
 
 // claimableCampaign restricts a claim to messages whose campaign is still sending. A message of a
