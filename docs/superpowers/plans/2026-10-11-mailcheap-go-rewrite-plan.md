@@ -2255,8 +2255,10 @@ func Suggestions(history, taken []time.Time, now time.Time) []Suggestion
 
 ## 阶段 8：吞吐与 AWS 速率合规（方案 A：单机并发 + 配额自适应限速）
 
-> **许可（2026-10-12）**：本仓库改为 **AGPL-3.0-only + 商业授权**（设计文档的研究记录见 main 上的
-> `docs/research/` 相关提交）。上游 `marclou/mailcheap` 的 MIT 许可不受影响，`NOTICE` 照旧。
+> **许可（2026-10-12，已合并 PR #15）**：本仓库改为 **AGPL-3.0-only + 商业授权**，落在 main 上
+> （squash 为 `be3c208`：`LICENSE`、`COMMERCIAL-LICENSE.md`、`CONTRIBUTING.md`，改动 `NOTICE`、
+> `README.md`、`.dockerignore` 与 `deploy/Dockerfile` 里把 `LICENSE`/`NOTICE` 复制进镜像的那两行）。
+> 上游 `marclou/mailcheap` 的 MIT 许可不受影响，`NOTICE` 照旧；本阶段若改 `Dockerfile` 要保留那两行。
 
 依据设计 D16–D19 与第 19 节。开工前写 `docs/superpowers/plans/2026-10-12-mailcheap-phase-8.md`（步骤级）。**全程不接真实 AWS**：所有 SES 行为经 `fakeses` 与 `Fake` 验证，真实错误码与 `GetAccount` 字段映射标"未验证"。
 
