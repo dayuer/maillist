@@ -25,7 +25,10 @@ const releaseTimeout = 10 * time.Second
 
 // Config is what the engine needs from internal/config.
 type Config struct {
-	AppURL         string
+	AppURL string
+	// ArchiveHosts is the ARCHIVE_HOSTS value, so the Read-online link points at the newsletter's own
+	// archive domain when it has one (audit F2).
+	ArchiveHosts   string
 	SendingOn      bool
 	SendRatePerSec int
 	Limits         model.Limits
@@ -339,12 +342,13 @@ func (e *Engine) deliver(ctx context.Context, message model.Message, loaded stor
 	now := time.Now().UTC()
 	reference := sign.Ref{ContactID: loaded.Contact.ID, NewsletterID: loaded.Newsletter.ID}
 	input := rules.RecipientInput{
-		AppURL:     e.cfg.AppURL,
-		Campaign:   content,
-		Newsletter: loaded.Newsletter,
-		Contact:    loaded.Contact,
-		MessageID:  message.ID,
-		Kind:       message.Kind,
+		AppURL:       e.cfg.AppURL,
+		ArchiveHosts: e.cfg.ArchiveHosts,
+		Campaign:     content,
+		Newsletter:   loaded.Newsletter,
+		Contact:      loaded.Contact,
+		MessageID:    message.ID,
+		Kind:         message.Kind,
 	}
 	// Confirmation and last-chance links have to work, so those emails go out untracked.
 	if rules.Untracked(message.Kind) {

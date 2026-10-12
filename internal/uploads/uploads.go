@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/rules"
+	"mailcheap/internal/core/slug"
 	"mailcheap/internal/store"
 )
 
@@ -133,7 +133,7 @@ func Save(ctx context.Context, db *store.DB, dataDir, fileName string, content [
 	base := filepath.Base(fileName)
 	upload := store.Upload{
 		ID: id, FileName: base,
-		Slug:      rules.Slugify(strings.TrimSuffix(base, filepath.Ext(base)), 60),
+		Slug:      slug.Slug(strings.TrimSuffix(base, filepath.Ext(base)), 60),
 		MediaType: kind.MediaType, Extension: kind.Extension,
 		Bytes: len(content), CreatedAt: time.Now().UTC(),
 	}
