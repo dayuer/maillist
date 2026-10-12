@@ -103,13 +103,15 @@ func insertNewsletter(ctx context.Context, tx *sql.Tx, source string) error {
 	return err
 }
 
-// 一步的消息与它占的预算在同一个事务里：进程在写这一批的中途被 SIGKILL 时，要么整步都在（消息在、当天
-// 账本也算着它们），要么整步都不在——绝不能出现"预算占了、消息没落地"（#38）。
+// 整步的预留与第一块消息同一个事务，其余块各自提交：进程在中途被 SIGKILL 时，当天账本要么整步都占着
+// （reserved == N，消息是 1000 的整数倍），要么什么都没有。**绝不会出现"消息在、预算没占"**——预算是
+// 对发送的承诺，承诺错了方向就是超发（#38，复审后的口径）。
 //
 // The child is the real ReserveAndInsert, killed by the parent rather than by a fault injected into
 // the store: what is being tested is what a crash leaves behind, and a crash is a process. Both
-// outcomes are correct, so the test cannot flake; the one it must never see is the half state.
-func TestAStepKilledInTheMiddleIsWrittenAndChargedTogetherOrNotAtAll(t *testing.T) {
+// outcomes are correct, so the test cannot flake; the one it must never see is messages that nothing
+// paid for.
+func TestAStepKilledInTheMiddleLeavesTheDayChargedForTheWholeStep(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts and kills a subprocess")
 	}
@@ -167,14 +169,19 @@ func TestAStepKilledInTheMiddleIsWrittenAndChargedTogetherOrNotAtAll(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	if written > reserved {
+		t.Fatalf("%d messages written and only %d charged: the day is charged for less than exists",
+			written, reserved)
+	}
 	switch {
 	case written == 0 && reserved == 0:
-		// Killed before the transaction committed. Nothing happened, which is the point.
-	case written == crashStepMessages && reserved == crashStepMessages:
-		// It got to the end before the signal: the whole step, written and paid for.
+		// Killed before the first transaction committed. Nothing happened, which is the point.
+	case reserved == crashStepMessages && written%InsertChunkSize == 0:
+		// The step is reserved and partly written: over-reserved, which is the direction a budget may
+		// be wrong in. A chunk boundary, because each chunk is a transaction of its own.
 	default:
-		t.Fatalf("half a step: %d messages written and %d charged, want both or neither",
-			written, reserved)
+		t.Fatalf("reserved %d for %d written messages, want the whole step (%d) reserved and a chunk "+
+			"boundary written", reserved, written, crashStepMessages)
 	}
 }
 
