@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -159,9 +160,43 @@ func TestTheSitemapAndRobots(t *testing.T) {
 	if robots.StatusCode != http.StatusOK || !strings.HasPrefix(robots.Header.Get("Content-Type"), "text/plain") {
 		t.Fatalf("robots = %d %s", robots.StatusCode, robots.Header.Get("Content-Type"))
 	}
-	if text := body(t, robots); !strings.Contains(text, "User-agent: *") ||
-		!strings.Contains(text, "Sitemap: https://mail.example.com/archive/field-notes/sitemap") {
+	text := body(t, robots)
+	if !strings.Contains(text, "User-agent: *") {
 		t.Errorf("robots = %q", text)
+	}
+	// 机器人文件里的每一个 Sitemap 地址都必须真的能取到：一条指向 404 的 Sitemap 就是搜索引擎读不到
+	// 归档的全部原因，而这种错只有把那个地址真的取一次才发现得了（第二轮审计就是这样报出来的）。
+	assertSitemaps(t, s, text, "")
+}
+
+// assertSitemaps fetches every Sitemap line of a robots.txt from this server, on the host that serves
+// it, and requires a 200 that is really a sitemap.
+func assertSitemaps(t *testing.T, s *testServer, robots, host string) {
+	t.Helper()
+	found := 0
+	for _, line := range strings.Split(robots, "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "Sitemap:")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		found++
+		parsed, err := url.Parse(value)
+		if err != nil {
+			t.Errorf("robots names a Sitemap that is not a URL: %q", value)
+			continue
+		}
+		response := s.getOnHost(t, parsed.RequestURI(), host)
+		if response.StatusCode != http.StatusOK {
+			t.Errorf("robots names %s, which answers %d", value, response.StatusCode)
+			continue
+		}
+		if got := body(t, response); !strings.HasPrefix(got, "<?xml") {
+			t.Errorf("%s did not answer a sitemap: %.40q", value, got)
+		}
+	}
+	if found == 0 {
+		t.Errorf("robots names no sitemap: %q", robots)
 	}
 }
 
@@ -188,6 +223,9 @@ func TestArchiveHostPathsAndTheShortLink(t *testing.T) {
 			t.Errorf("%s is missing %q", path, want)
 		}
 	}
+
+	// 归档域名上的 robots 指的 sitemap 也必须取得到。
+	assertSitemaps(t, s, body(t, s.getOnHost(t, "/robots.txt", "news.example.com")), "news.example.com")
 
 	// 归档域名只服务读者的路径：管理面仍然 404。
 	if got := s.getOnHost(t, "/healthz", "news.example.com"); got.StatusCode != http.StatusOK {
