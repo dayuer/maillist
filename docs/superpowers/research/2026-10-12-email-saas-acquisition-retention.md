@@ -3,7 +3,7 @@
 - 调研日期：2026-10-12
 - 调研对象：Mailchimp、Klaviyo、Substack、beehiiv、Kit（原 ConvertKit）、MailerLite、Buttondown；第五至七节补充 Ghost、Sendy、listmonk、SparkLoop、EmailOctopus、上游 mailcheap
 - 方法：一手来源优先（S-1 招股书、官方产品页/博客、官方定价页、代理商案例、收购公告），关键数字均注明出处；付费墙来源的转引数字单独标注置信度
-- 关联：为 maillist（本仓库）的产品/GTM 决策提供参照，启示见第四节，商业模式选择见第五节，托管版发信隔离见第六节，支付意愿验证见第七节
+- 关联：为 maillist（本仓库）的产品/GTM 决策提供参照，启示见第四节，商业模式选择见第五节，托管版发信隔离见第六节，支付意愿验证见第七节，许可策略见第八节
 
 ## 一页结论
 
@@ -169,7 +169,7 @@ maillist 现有设计已覆盖其中一部分：抑制名单、at-most-once 发�
 
 1. **发信账户模型**（决定 C 是否可行）：共享一个 SES 账户时，一个客户的投诉会封掉所有客户；按客户拆 AWS 子账户（AWS Organizations）隔离好但开通重。**已调研，结论见第六节**：SES Tenants 使 C 可行。
 2. **支付意愿验证**：上游 GitHub 约 677 star（发布数日内），说明存在"受不了平台价格"的人群，但 star ≠ 付费。**已做桌面调研并给出实验设计，见第七节**。
-3. **许可策略**：上游 MIT，本仓库继承 MIT（见 NOTICE）。若走 C，是否需要像 Ghost 一样保持完全开源（信任资产），还是对托管专属组件（开通、计费）闭源——倾向后者，本体保持 MIT。
+3. **许可策略**：上游 MIT（见 NOTICE），但本仓库自身尚无 LICENSE 文件。若走 C，是否需要像 Ghost 一样保持完全开源（信任资产），还是对托管专属组件（开通、计费）闭源。**已调研，结论见第八节**：建议本体 AGPLv3、控制面闭源、自有产品名 + 商标政策；且当前仓库缺 LICENSE 文件，需立即补上。
 4. **待复核数字**：beehiiv "$20M ARR"仅见于二手转述，未找到一手来源，本文未采用。
 
 ## 六、托管版的 SES 发信账户隔离方案
@@ -332,6 +332,82 @@ AWS 实施指南原文明确："Tenant metrics contribute to the overall account
 
 现有证据只够证明**情绪存在、窗口存在、价格带清晰**：beehiiv 涨价给了一个 11 月截止的时间窗；EmailOctopus、listmonk 托管商把价格带锚在 $5–45；上游 star 数说明"厌恶按人头收费"的人很多。但 star 来自最不会付费的开发者，迁移只有情绪没有数据，而便宜的 SES 托管位置已被 EmailOctopus 占了十年。**付费意愿目前未经验证**，结论取决于 E1–E3。E1 不需要写任何托管代码，应最先做。
 
+## 八、许可策略
+
+> 本节是商业层面的分析，不构成法律意见；正式发布前的许可文本与商标事宜应请律师过目。
+
+### 8.1 现状（2026-10-12 核实）
+
+1. **仓库已公开，但没有 LICENSE 文件**。GitHub 显示 license 为空；根目录只有 `NOTICE`，内容是上游 mailcheap 的 MIT 声明。也就是说：上游移植来的部分按 MIT 授权，**本仓库新写的代码目前默认"保留所有权利"**——别人可以在 GitHub 上看和 fork，但法律上不能使用、修改或部署。这与第五至七节"开源本体作获客层"的前提矛盾，**无论最终选哪个许可，都应尽快补上**。
+2. **105 个提交全部出自同一作者**。现在选任何许可都无需征得他人同意；一旦接受外部贡献，改许可的自由度就开始收窄（见 8.5）。
+3. **直接依赖全部是宽松许可**：aws-sdk-go-v2、cobra（Apache-2.0）；go-sdk（MCP）、goldmark（MIT）；bluemonday、modernc.org/sqlite、golang.org/x/text（BSD 类）。与 MIT、Apache-2.0、AGPLv3 均兼容，**依赖不构成选择约束**。
+4. **产品名与上游相同**：二进制、Go 模块名都是 `mailcheap`，仓库名是 `maillist`。上游 MIT 授权的是代码，不是名字——这是许可之外的独立问题（见 8.6）。
+
+### 8.2 一个前提判断：代码本身不是护城河
+
+本仓库就是证据：上游 1.8 万行 JS 在约两天内被移植成 Go。任何竞争者都可以用同样方式从**上游 MIT 代码**出发，完全绕开我们选的许可。所以：
+
+- 许可能保护的只有"我们在上游之上新增的部分"（单二进制、CLI、MCP、凭据与预算、SES 租户接入）。
+- 托管业务真正的护城河在许可之外：品牌、送达运维能力（第六节）、信任（第七节 H4 的"无锁定"）。
+- 推论：**为了防竞争而选越严的许可，换来的保护越少、付出的信任代价越大**。
+
+### 8.3 先例
+
+| 项目 | 许可 | 经过 | 启示 |
+|---|---|---|---|
+| Ghost | MIT + 商标政策 | 竞争托管商可合法托管原版 Ghost；但不能自称官方、不能把改版叫 Ghost、不能用相似名字。年化过 $10M | 宽松许可 + 商标，足以支撑官方托管生意 |
+| Plausible | MIT → AGPLv3（2020） | 有公司拿其代码闭源、做成直接竞品出售；改 AGPL 后团队称"竞争者拿代码的问题基本消失"，订阅用户与自托管用户不受影响 | AGPL 挡住闭源托管竞品，且仍是 OSI 开源 |
+| listmonk | AGPLv3 | 同品类自托管工具 | 同品类先例 |
+| Sentry | BSD → BSL（2019）→ FSL（2023） | FSL：禁止两年内做竞品，两年后自动转 MIT/Apache。非 OSI 开源 | "fair source"是可选项，但不能对外称开源 |
+| HashiCorp Terraform | MPL → BSL（2023） | 数周内出现 Linux 基金会托管的 OpenTofu 分叉 | **收紧许可会招致分叉** |
+| Redis | BSD → RSAL/SSPL（2024）→ 加回 AGPLv3（2025） | 一周内云厂商支持 Valkey 分叉；改回 AGPL 也没能挽回 | **收紧后再放宽，信任回不来** |
+
+### 8.4 候选方案
+
+| 方案 | 挡得住闭源托管竞品？ | 能对外称"开源"？ | 与"无锁定"信任卖点 | 日后调整 |
+|---|---|---|---|---|
+| MIT（随上游，Ghost 路线） | 否 | 是 | 最强 | 只能收紧——有反弹风险，且已发布版本永远是 MIT |
+| Apache-2.0 | 否 | 是 | 强；另含专利授权 | 同 MIT |
+| **AGPLv3（Plausible / listmonk 路线）** | **是**：修改后提供网络服务须公开源码 | 是（OSI 认证） | 强：对用户和自托管者无额外限制，只约束改代码再托管的人 | **可随时放宽到 MIT，放宽不招反弹** |
+| FSL / BSL（fair source） | 是（禁止竞争性使用） | **否** | 弱：与"开源可迁出"叙事冲突 | 两年后自动转宽松 |
+| 开源核心 + 闭源托管控制面 | 控制面不外流 | 核心可以 | 不受影响 | 与以上任一组合 |
+
+### 8.5 建议
+
+**本体用 AGPLv3，托管控制面闭源，名字与商标单独保护。**
+
+理由：
+
+1. **调整方向不对称**。从 AGPL 放宽到 MIT 随时可做、没人反对；从 MIT 收紧到 AGPL 时，已发布的 MIT 版本永远可被拿走，还要承受 HashiCorp/Redis 式反弹。在付费意愿未验证（第七节）时，选可逆性好的一侧。
+2. **AGPL 的约束正好落在要防的人身上**：普通用户、自托管者、通过托管版使用的客户都不受影响；只有"改了代码再拿去做托管服务"的人须公开修改。这正是 Plausible 遇到并解决的问题。
+3. **仍是 OSI 开源**，不损害第七节 H4 的"开源可迁出"卖点；FSL/BSL 做不到这一点。
+4. **控制面不受 AGPL 传染**：开通、计费、租户编排（第六节 6.5）作为独立程序，通过 API 与二进制交互，不与之链接，可保持闭源。托管版对二进制的任何修改（如 `TenantName` 配置项）照常开源发布即可。
+5. **上游部分不受影响**：上游 MIT 代码在合并作品中继续保留其版权与许可声明（现有 `NOTICE` 已满足），整体以 AGPLv3 分发——MIT 允许这样做，Plausible 当年同样如此。
+
+**代价**：AGPL 会让一部分企业用户（法务禁用 AGPL）和想把 maillist 嵌入自家产品的开发者却步。对第七节的 A 类（创作者）几乎无影响；对 C 类（agent 平台想内嵌 MCP 发信能力）有影响——若 C 类验证为主要人群，应重新评估是否放宽到 MIT 或提供商业授权。
+
+**贡献政策**（在接受第一个外部 PR 之前定）：
+
+- 若保留"日后放宽到 MIT"或"双授权（AGPL + 商业）"的选项，外部贡献必须让我们有权再授权。两种做法：
+  - 贡献者许可协议（CLA）：最完整，但劝退部分贡献者；
+  - **入站 MIT、出站 AGPL**：要求贡献以 MIT 授权提交，项目整体以 AGPL 发布。入站宽松保证了日后放宽或双授权不需要逐一征得同意，摩擦比 CLA 小。
+- 仅用 DCO（Developer Certificate of Origin）只证明来源，不授予再授权权利，**不足以**保留上述选项。
+
+### 8.6 名字与商标
+
+- Ghost 的做法：代码 MIT，名字与 logo 由商标政策保护——别人可以说"托管原版 Ghost"，但不能把改版叫 Ghost，也不能用相似的名字。官方托管靠"官方"二字取胜。
+- maillist 当前二进制名 `mailcheap` 沿用上游。上游作者若主张该名字，或其他 fork 也用这个名字，托管版无法建立可区分的品牌。**建议在 E1 价格页上线前定下自有产品名**，二进制与模块名随之更改（`NOTICE` 中继续注明移植自 mailcheap），并参照 Ghost 写一份简短商标政策。
+- 商标注册的地域、类别、时机不在本文范围，需法务意见。
+
+### 8.7 行动清单
+
+| 优先级 | 动作 | 时机 |
+|---|---|---|
+| 1 | 选定许可（建议 AGPLv3），在根目录加 `LICENSE`；`NOTICE` 保留上游 MIT 声明 | 立即——当前公开仓库处于"无许可"状态 |
+| 2 | 定贡献政策（入站 MIT / CLA），写进 `CONTRIBUTING.md` | 接受第一个外部 PR 之前 |
+| 3 | 定自有产品名，改二进制与模块名；写商标政策 | E1 价格页上线前 |
+| 4 | 托管控制面建为独立仓库、独立程序（闭源），只经 API 与二进制交互 | 决定建托管版时（第七节决策规则通过后） |
+
 ## 主要来源
 
 - [Klaviyo S-1（SEC 原文）](https://www.sec.gov/Archives/edgar/data/1835830/000162828023030618/klaviyoincs-1.htm)
@@ -380,3 +456,10 @@ AWS 实施指南原文明确："Tenant metrics contribute to the overall account
 - [Getwaitlist：候补名单转化基准](https://getwaitlist.com/blog/waitlist-benchmarks-conversion-rates)
 - [Fake door 测试门槛](https://swetrix.com/blog/fake-door-test)
 - [Van Westendorp 样本量（SaaS 创始人指南）](https://thesaaslibrary.com/pricing-research-methods-saas-founders/)
+- [Plausible：为什么从 MIT 改为 AGPL（2020）](https://plausible.io/blog/open-source-licenses)
+- [Plausible：BSL 讨论与改 AGPL 后的效果](https://github.com/plausible/analytics/discussions/1195)
+- [Ghost 许可说明](https://docs.ghost.org/license/)
+- [Ghost 商标政策 v2.0](https://ghost.org/trademark/)
+- [FSL（Functional Source License）](https://fsl.software/)
+- [Fair Source 许可列表](https://fair.io/licenses/)
+- [2026 年许可变更回顾：HashiCorp、Redis、Valkey、OpenTofu](https://www.flowverify.co/blog/open-source-relicensing-2026-what-happened)
