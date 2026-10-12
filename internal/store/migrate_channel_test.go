@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -81,32 +82,56 @@ func TestProviderMessageIDIsUniquePerChannel(t *testing.T) {
 	if err := insert("m3", "default"); err == nil {
 		t.Fatal("a duplicate id on the same channel was accepted")
 	}
+
+	// An unsent message has no provider id yet; any number of them share a channel.
+	unsent := func(id string) error {
+		_, err := db.sql.ExecContext(ctx, `INSERT INTO messages
+            (id, kind, newsletter_id, contact_id, email, status, provider_message_id, channel, created_at)
+            VALUES (?, 'campaign', 'n1', ?, 'a@example.com', 'pending', '', 'default', '2026-10-01T00:00:00Z')`,
+			id, id)
+		return err
+	}
+	if err := unsent("m4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := unsent("m5"); err != nil {
+		t.Fatalf("a second unsent message on the same channel was refused: %v", err)
+	}
 }
 
 // openAt opens a database migrated up to and including `last`, the way a deployment that has not
-// upgraded yet would have it.
+// upgraded yet would have it. A name that is not a migration is an error, rather than a database
+// with every migration applied.
 func openAt(ctx context.Context, path, last string) (*DB, error) {
 	db, err := openRaw(ctx, path)
 	if err != nil {
 		return nil, err
 	}
+	if err := migrateTo(ctx, db, last); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func migrateTo(ctx context.Context, db *DB, last string) error {
 	if _, err := db.sql.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
         version    TEXT PRIMARY KEY,
         applied_at TEXT NOT NULL
     )`); err != nil {
-		return nil, err
+		return err
 	}
 	names, err := migrationNames()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, name := range names {
 		if err := db.applyMigration(ctx, name); err != nil {
-			return nil, err
+			return err
 		}
 		if name == last {
-			break
+			return nil
 		}
 	}
-	return db, nil
+	return fmt.Errorf("migration %s not found", last)
 }

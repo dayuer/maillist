@@ -325,7 +325,7 @@ func (db *DB) Message(ctx context.Context, id string) (model.Message, error) {
 	return m, err
 }
 
-// MarkMessageSent writes back a message SES accepted.
+// MarkMessageSent writes back a message the channel accepted.
 func (db *DB) MarkMessageSent(ctx context.Context, id, providerMessageID string, sentAt time.Time) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx,
@@ -604,7 +604,7 @@ func (db *DB) MessageByProviderID(ctx context.Context, providerMessageID string)
 	message, err := scanMessage(db.sql.QueryRowContext(ctx,
 		"SELECT "+messageColumns+" FROM messages WHERE provider_message_id = ?", providerMessageID))
 	if errors.Is(err, sql.ErrNoRows) {
-		return model.Message{}, fmt.Errorf("message with ses id %s: %w", providerMessageID, ErrNotFound)
+		return model.Message{}, fmt.Errorf("message with provider id %s: %w", providerMessageID, ErrNotFound)
 	}
 	return message, err
 }

@@ -189,9 +189,9 @@ type Message struct {
 	NewsletterID      string
 	ContactID         string
 	Email             string
-	Provider          string
+	Provider          string // the recipient's mailbox provider (gmail, outlook, …), from core/providers
 	Status            MessageStatus
-	ProviderMessageID string
+	ProviderMessageID string // the id the sending channel returned; "" until sent
 	Error             string
 	ClaimedAt         *time.Time
 	SentAt            *time.Time

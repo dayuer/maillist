@@ -123,7 +123,7 @@ func (h *Handler) ApplyTracking(ctx context.Context, messageID string, eventType
 	return true, nil
 }
 
-// findMessage resolves the message an event names: by SES's own id first, then by the message_id
+// findMessage resolves the message an event names: by the channel's own id first, then by the message_id
 // tag, which covers an event that arrives before the send was written back.
 func (h *Handler) findMessage(ctx context.Context, plan sesmap.Plan) (model.Message, bool, error) {
 	if plan.ProviderMessageID != "" {
@@ -145,7 +145,7 @@ func (h *Handler) findMessage(ctx context.Context, plan sesmap.Plan) (model.Mess
 	if err != nil {
 		return model.Message{}, false, err
 	}
-	// A message id and an SES id that disagree mean the event belongs to another message.
+	// A message id and a provider id that disagree mean the event belongs to another message.
 	if message.ProviderMessageID != "" && plan.ProviderMessageID != "" && message.ProviderMessageID != plan.ProviderMessageID {
 		return model.Message{}, false, nil
 	}
