@@ -22,6 +22,12 @@ linters:
               desc: "core does no I/O"
             - pkg: "os"
               desc: "core does no I/O; pass values in"
+        checks-is-plain:
+          files:
+            - "**/internal/core/checks/**"
+          deny:
+            - pkg: "nibwire/internal/core/render"
+              desc: "the checklist reads plain rendered values; internal/presend renders (phase 9 #44)"
 formatters:
   enable:
     - gofmt
