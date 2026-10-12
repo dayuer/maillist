@@ -21,7 +21,7 @@ func TestReadToolsAnswer(t *testing.T) {
 		out.Items[0].Slug != newsletter.Slug {
 		t.Fatalf("list_newsletters = %+v", out)
 	}
-	if out := call[model.Newsletter](t, session, "get_newsletter", map[string]any{
+	if out := call[newsletterView](t, session, "get_newsletter", map[string]any{
 		"newsletter": newsletter.Slug,
 	}); out.ID != newsletter.ID {
 		t.Fatalf("get_newsletter = %+v", out)
@@ -31,7 +31,7 @@ func TestReadToolsAnswer(t *testing.T) {
 		t.Fatalf("list_campaigns = %+v", out)
 	}
 	// By subject: the name an operator uses, not the id they would have to copy.
-	if out := call[model.Campaign](t, session, "get_campaign", map[string]any{
+	if out := call[campaignView](t, session, "get_campaign", map[string]any{
 		"campaign": "Issue 12",
 	}); out.ID != draft.ID {
 		t.Fatalf("get_campaign = %+v", out)

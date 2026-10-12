@@ -53,13 +53,17 @@ func apiError(w http.ResponseWriter, status int, message string) {
 //
 // Every request looks the hash up in the database (D8): the token carries no claims, so revoking the
 // row is what stops it working, and no clock or key rotation can leave a stale token alive.
+//
+// The kind has to be `api` (design §11, layer 1). An MCP token is refused here for the same reason
+// the v1 key is refused on /mcp: the kind is what the operator issued it for, and honoring it is
+// what makes `credentials list` say something.
 func (s *Server) authenticate(r *http.Request) (store.Credential, bool) {
 	token, ok := creds.ReadBearer(r.Header.Get("Authorization"))
 	if !ok {
 		return store.Credential{}, false
 	}
 	credential, err := s.Store.CredentialByHash(r.Context(), creds.Hash(token))
-	if err != nil {
+	if err != nil || credential.Kind != creds.KindAPI {
 		return store.Credential{}, false
 	}
 	now := s.clock()

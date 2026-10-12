@@ -27,7 +27,7 @@ type listNewslettersIn struct {
 }
 
 type listNewslettersOut struct {
-	page[model.Newsletter]
+	page[newsletterView]
 }
 
 func listNewsletters(ctx context.Context, sess *session, _ store.Credential, in listNewslettersIn) (listNewslettersOut, error) {
@@ -41,15 +41,19 @@ func listNewsletters(ctx context.Context, sess *session, _ store.Credential, in 
 	}
 	// Newsletters are a handful by nature, and the store has no page query for them; slicing the
 	// list keeps one implementation of the page shape rather than adding a query nothing else wants.
-	return listNewslettersOut{paginate(slice(all, offset), limit, offset)}, nil
+	return listNewslettersOut{paginate(slice(views(all), offset), limit, offset)}, nil
 }
 
 type getNewsletterIn struct {
 	Newsletter string `json:"newsletter" jsonschema:"newsletter id or slug"`
 }
 
-func getNewsletter(ctx context.Context, sess *session, _ store.Credential, in getNewsletterIn) (model.Newsletter, error) {
-	return newsletterByRef(ctx, sess.deps.Store, in.Newsletter)
+func getNewsletter(ctx context.Context, sess *session, _ store.Credential, in getNewsletterIn) (newsletterView, error) {
+	newsletter, err := newsletterByRef(ctx, sess.deps.Store, in.Newsletter)
+	if err != nil {
+		return newsletterView{}, err
+	}
+	return viewNewsletter(newsletter), nil
 }
 
 type listCampaignsIn struct {
@@ -58,7 +62,7 @@ type listCampaignsIn struct {
 }
 
 type listCampaignsOut struct {
-	page[model.Campaign]
+	page[campaignView]
 }
 
 func listCampaigns(ctx context.Context, sess *session, _ store.Credential, in listCampaignsIn) (listCampaignsOut, error) {
@@ -79,25 +83,29 @@ func listCampaigns(ctx context.Context, sess *session, _ store.Credential, in li
 	if err != nil {
 		return listCampaignsOut{}, err
 	}
-	return listCampaignsOut{paginate(campaigns, limit, offset)}, nil
+	return listCampaignsOut{paginate(campaignViews(campaigns), limit, offset)}, nil
 }
 
 type campaignRefIn struct {
 	Campaign string `json:"campaign" jsonschema:"campaign id, or the subject of a draft"`
 }
 
-func getCampaign(ctx context.Context, sess *session, _ store.Credential, in campaignRefIn) (model.Campaign, error) {
-	return campaignByRef(ctx, sess.deps.Store, in.Campaign)
+func getCampaign(ctx context.Context, sess *session, _ store.Credential, in campaignRefIn) (campaignView, error) {
+	campaign, err := campaignByRef(ctx, sess.deps.Store, in.Campaign)
+	if err != nil {
+		return campaignView{}, err
+	}
+	return viewCampaign(campaign), nil
 }
 
 // CampaignReport is get_campaign_report: the issue's own counters, the same figures by mailbox
 // provider, and how many of the most engaged have not had it yet.
 type CampaignReport struct {
-	Campaign   model.Campaign           `json:"campaign"`
-	Stats      store.CampaignCounters   `json:"stats"`
-	LastChance store.LastChanceCounters `json:"lastChance"`
-	Providers  []store.ProviderRow      `json:"providers"`
-	Remaining  int                      `json:"remaining"`
+	Campaign   campaignView   `json:"campaign"`
+	Stats      countersView   `json:"stats"`
+	LastChance lastChanceView `json:"last_chance"`
+	Providers  []providerView `json:"providers"`
+	Remaining  int            `json:"remaining"`
 }
 
 func getCampaignReport(ctx context.Context, sess *session, _ store.Credential, in campaignRefIn) (CampaignReport, error) {
@@ -124,9 +132,13 @@ func getCampaignReport(ctx context.Context, sess *session, _ store.Credential, i
 			remaining = active - reached
 		}
 	}
+	rows := make([]providerView, 0, len(providers))
+	for _, provider := range providers {
+		rows = append(rows, viewProvider(provider))
+	}
 	return CampaignReport{
-		Campaign: campaign, Stats: counters, LastChance: lastChance,
-		Providers: providers, Remaining: remaining,
+		Campaign: viewCampaign(campaign), Stats: viewCounters(counters),
+		LastChance: viewLastChance(lastChance), Providers: rows, Remaining: remaining,
 	}, nil
 }
 
@@ -164,7 +176,7 @@ type listContactsIn struct {
 }
 
 type listContactsOut struct {
-	page[model.Contact]
+	page[contactView]
 }
 
 func listContacts(ctx context.Context, sess *session, _ store.Credential, in listContactsIn) (listContactsOut, error) {
@@ -190,7 +202,7 @@ func listContacts(ctx context.Context, sess *session, _ store.Credential, in lis
 	if err != nil {
 		return listContactsOut{}, err
 	}
-	return listContactsOut{paginate(contacts, limit, offset)}, nil
+	return listContactsOut{paginate(contactViews(contacts), limit, offset)}, nil
 }
 
 // CountAudience is count_audience: the number an agent has to have before it decides to send.
@@ -355,7 +367,7 @@ func listSuppressions(ctx context.Context, sess *session, _ store.Credential, in
 			Email: suppression.Email, Reason: string(suppression.Reason), Detail: suppression.Detail,
 		})
 	}
-	return listSuppressionsOut{paginate(rows[sliceFrom(len(rows), offset):], limit, offset)}, nil
+	return listSuppressionsOut{paginate(slice(rows, offset), limit, offset)}, nil
 }
 
 type getJobIn struct {
@@ -435,6 +447,30 @@ func listAudit(ctx context.Context, sess *session, _ store.Credential, in listAu
 // slice is the tail of rows from offset, for the two lists whose store method returns everything.
 func slice[T any](rows []T, offset int) []T {
 	return rows[sliceFrom(len(rows), offset):]
+}
+
+func views(newsletters []model.Newsletter) []newsletterView {
+	out := make([]newsletterView, 0, len(newsletters))
+	for _, newsletter := range newsletters {
+		out = append(out, viewNewsletter(newsletter))
+	}
+	return out
+}
+
+func campaignViews(campaigns []model.Campaign) []campaignView {
+	out := make([]campaignView, 0, len(campaigns))
+	for _, campaign := range campaigns {
+		out = append(out, viewCampaign(campaign))
+	}
+	return out
+}
+
+func contactViews(contacts []model.Contact) []contactView {
+	out := make([]contactView, 0, len(contacts))
+	for _, contact := range contacts {
+		out = append(out, viewContact(contact))
+	}
+	return out
 }
 
 func sliceFrom(length, offset int) int {

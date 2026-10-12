@@ -123,8 +123,8 @@ func runCredentialsCreate(cmd *cobra.Command, _ []string) error {
 	budget, _ := flags.GetInt("daily-budget")
 
 	kind = strings.ToLower(strings.TrimSpace(kind))
-	if kind != "api" && kind != "mcp" {
-		return fmt.Errorf("--kind must be api or mcp, not %q", kind)
+	if kind != creds.KindAPI && kind != creds.KindMCP {
+		return fmt.Errorf("--kind must be %s or %s, not %q", creds.KindAPI, creds.KindMCP, kind)
 	}
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("--name is required")

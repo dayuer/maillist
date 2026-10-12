@@ -81,10 +81,13 @@ func newFixtureFull(t *testing.T, scopes []creds.Scope, budget int) *fixture {
 	}, slog.Default())
 	t.Cleanup(engine.Close)
 
-	token := "mc_" + ids.New()
+	// A real token: the shape is part of what the endpoint checks, so a made-up string would test
+	// the rejection path instead of the acceptance one.
+	generated := creds.Generate()
+	token := generated.Token
 	credential := store.Credential{
-		ID: ids.New(), Kind: "mcp", Name: "newsletter-bot", Prefix: "mc_test…",
-		TokenHash: creds.Hash(token), Scopes: scopes, DailyBudget: budget,
+		ID: ids.New(), Kind: creds.KindMCP, Name: "newsletter-bot", Prefix: generated.Prefix,
+		TokenHash: generated.Hash, Scopes: scopes, DailyBudget: budget,
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := db.CreateCredential(ctx, credential); err != nil {

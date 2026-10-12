@@ -277,8 +277,8 @@ func TestScheduleCampaignQueuesForTheChosenTime(t *testing.T) {
 	if out.JobID == "" || out.ScheduledAt != at.Format(time.RFC3339) {
 		t.Fatalf("schedule_campaign = %+v", out)
 	}
-	campaign := call[model.Campaign](t, session, "get_campaign", map[string]any{"campaign": "Issue 12"})
-	if campaign.Status != "scheduled" || campaign.ScheduledAt == nil {
+	campaign := call[campaignView](t, session, "get_campaign", map[string]any{"campaign": "Issue 12"})
+	if campaign.Status != "scheduled" || campaign.ScheduledAt == "" {
 		t.Fatalf("campaign = %+v", campaign)
 	}
 	if message := callError(t, session, "schedule_campaign", map[string]any{

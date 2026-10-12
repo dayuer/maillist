@@ -191,7 +191,7 @@ step "unsubscribing in one click (RFC 8058)"
 # POST to the header's URL, exactly as a mail client would, with the empty body the RFC asks for.
 status=$(curl -s -A "$UA" -o /dev/null -w '%{http_code}' -X POST "$oneclick")
 case "$status" in
-	200 | 204) pass "POST $unsub → $status" ;;
+	200 | 204) pass "POST $oneclick → $status" ;;
 	*) fail "the one-click unsubscribe answered $status" ;;
 esac
 after=$(run contact show "$CONTACT" --newsletter "$SLUG" --json)
