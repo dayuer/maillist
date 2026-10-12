@@ -399,7 +399,7 @@ BSL 1.1 是参数化模板，许可正文不可改，只填以下字段（MariaD
 | 字段 | 草案 |
 |---|---|
 | Licensor | 项目所有者个人（dayuer；2026-10-12 定） |
-| Licensed Work | 本仓库软件，暂定名 "Mail Turbo AI"（见 8.8），及其各版本 |
+| Licensed Work | 本仓库软件，产品名 "Nibwire"（见 8.8），及其各版本 |
 | Additional Use Grant | 见下 |
 | Change Date | 每个版本首次公开发布满 4 年（BSL 上限） |
 | Change License | AGPL-3.0-or-later（AGPLv3 可与 GPLv3 合并使用，应满足"与 GPLv2 或更高版本兼容"的要求，需律师确认；保守备选为 GPL-2.0-or-later） |
@@ -431,18 +431,31 @@ Additional Use Grant 草案（意译，正式文本需律师定稿）：
 
 - Ghost 的做法：代码 MIT，名字与 logo 由商标政策保护——别人可以说"托管原版 Ghost"，但不能把改版叫 Ghost，也不能用相似的名字。官方托管靠"官方"二字取胜。
 - maillist 当前二进制名 `mailcheap` 沿用上游。上游作者若主张该名字，或其他 fork 也用这个名字，托管版无法建立可区分的品牌；BSL 的 Licensed Work 字段也需要一个确定的名字。**建议在写 LICENSE 之前定下自有产品名**，二进制与模块名随之更改（`NOTICE` 中继续注明移植自 mailcheap），并参照 Ghost 写一份简短商标政策。BSL 本身不授予商标权利，可与商标政策并存。
-- **暂定名 "Mail Turbo AI"（2026-10-12）的初步检索**：已有同品类产品 MailerTurbo（mailerturbo.com，邮件营销自动化 + CRM），另有 turboSMTP（交易邮件与 newsletter 投递）。暂定名与 MailerTurbo 在同一类别且字面接近，**正式定名前应换一个区分度更高的名字**并做商标检索。LICENSE 的 Licensed Work 字段以仓库为准、名字仅作暂定，改名不需要改许可。
+- **暂定名 "Mail Turbo AI"（2026-10-12）的初步检索**：已有同品类产品 MailerTurbo（mailerturbo.com，邮件营销自动化 + CRM），另有 turboSMTP。字面接近且同类别，弃用。
+- **改选 "Nibwire"（2026-10-12 定）**：nib（笔尖，写作）+ wire（通讯社电讯 / 发送）。候选与淘汰（域名查注册局 RDAP，产品查 GitHub 与网页搜索；**未查商标库**）：
+
+| 候选 | .com | .dev | 同名产品 | 结论 |
+|---|---|---|---|---|
+| **Nibwire** | 未注册 | 未注册 | 未发现 | **选定** |
+| Letterwren | 未注册 | 未注册 | 未发现 | 备选 |
+| Quillwren / Sendquill / Postwren | 已注册 | 未注册 | 未发现 | 备选 |
+| Letterwire | 已注册 | 未注册 | **letterwire.app 是 newsletter 阅读 app**，同品类 | 淘汰 |
+| Larkwire | 已注册 | 未注册 | 鸟鸣学习 app（2011 起）；GitHub 上同名 AI agent 工具 | 淘汰 |
+| Epistly | 已注册 | 未注册 | 与 Epistle（向订阅者推送更新的 app）过近 | 淘汰 |
+| Owlery | 全部已注册 | — | "Owl Post" 涉华纳商标 | 淘汰 |
+
+- 下一步：在 USPTO / EUIPO / CNIPA 的第 9、42 类检索 "Nibwire"，并尽早注册 nibwire.com / nibwire.dev。
 - 商标注册的地域、类别、时机不在本文范围，需法务意见。
 
 ### 8.9 行动清单
 
 | 优先级 | 动作 | 时机 |
 |---|---|---|
-| 1 | 定自有产品名（BSL 的 Licensed Work 字段需要） | 已定暂定名 "Mail Turbo AI"；正式名待商标检索 |
+| 1 | 定自有产品名（BSL 的 Licensed Work 字段需要） | 已定 Nibwire；商标检索与域名注册待办 |
 | 2 | 按 8.6 草案起草 `LICENSE`（BSL 1.1），律师审 Additional Use Grant 与 Change License；`NOTICE` 保留上游 MIT 声明，并注明上游部分仍按 MIT | 已提交 dayuer/maillist#15，律师审阅待办 |
 | 3 | 写 `CONTRIBUTING.md`：外部贡献入站 MIT（或 CLA） | 已随 dayuer/maillist#15 提交 |
 | 4 | README 与对外文案改用"source available"，附一段 FAQ：能做什么、不能做什么 | README 已随 dayuer/maillist#15 提交；对外文案待写 |
-| 5 | 改二进制与模块名；写商标政策 | E1 价格页上线前 |
+| 5 | 改二进制与模块名；写商标政策 | 改名已提交 dayuer/maillist#17；商标政策待写 |
 | 6 | 托管控制面建为独立仓库、独立程序（闭源），只经 API 与二进制交互 | 决定建托管版时（第七节决策规则通过后） |
 
 ## 主要来源
