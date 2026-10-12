@@ -2255,6 +2255,9 @@ func Suggestions(history, taken []time.Time, now time.Time) []Suggestion
 
 ## 阶段 8：吞吐与 AWS 速率合规（方案 A：单机并发 + 配额自适应限速）
 
+> **许可（2026-10-12）**：本仓库改为 **AGPL-3.0-only + 商业授权**（设计文档的研究记录见 main 上的
+> `docs/research/` 相关提交）。上游 `marclou/mailcheap` 的 MIT 许可不受影响，`NOTICE` 照旧。
+
 依据设计 D16–D19 与第 19 节。开工前写 `docs/superpowers/plans/2026-10-12-mailcheap-phase-8.md`（步骤级）。**全程不接真实 AWS**：所有 SES 行为经 `fakeses` 与 `Fake` 验证，真实错误码与 `GetAccount` 字段映射标"未验证"。
 
 完成标志：Task 8.8 的压测全部通过——假 SES 设 80 ms 延迟、上报 `MaxSendRate=500`，2 万封在 `20000 / 450 × 1.2` 秒内发完、零重复、零失败；假 SES 实际只放行 300/s（上报值仍为 500）时，限速在 60 秒内收敛、所有消息最终恰好发送一次；日配额不足时整次拒绝。`make test lint`、`scripts/compose-smoke.sh` 全绿；C1/C2/F1 等既有不变量测试在 `SEND_CONCURRENCY=16` 下 `-race -count=10` 稳定。
@@ -2277,7 +2280,7 @@ func Suggestions(history, taken []time.Time, now time.Time) []Suggestion
 
 | 何时 | 需要什么 | 用途 |
 |---|---|---|
-| 阶段 0 | GitHub 仓库 `dayuer/maillist` 的 Actions 权限 | 跑 CI |
+| 阶段 0 | GitHub 仓库 `dayuer/nibwire` 的 Actions 权限 | 跑 CI（仓库已由 dayuer/maillist 改名而来）|
 | 阶段 0 | 能访问 `github.com/marclou/mailcheap` | 拉上游参考（已核实可访问） |
 | 阶段 5 | AWS IAM 凭据，权限 `ses:SendEmail`、`ses:GetEmailIdentity`（阶段 8 起另需 `ses:GetAccount`） | 真实冒烟发信与 `domains` 命令 |
 | 阶段 5 | SES 已验证的发信域名，DKIM 与 MAIL FROM 已配置 | 发信身份 |
