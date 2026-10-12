@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/content"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/slowinput"
 )
@@ -17,8 +16,8 @@ import (
 // 约 16×，8× 把两者分开，且不关心机器快不快、跑不跑 -race（阶段 4 在 htmlToText 上定下的做法——
 // 绝对墙钟预算在共享 runner 上会偶发失败）。
 //
-// Markdown 那几种形状另有一条预算断言：解析器的预算是 1 秒，超了就退回纯文本，所以它们的耗时是
-// 常数而不是线性——那条断言测的是「有没有真的退回」。
+// 解析器的预算是 MarkdownToHTML 自己的事，由 content 包直接量；这里量的是整条归档渲染路径与输入的
+// 比例关系。
 const (
 	smallInputSize = slowinput.Small
 	largeInputSize = slowinput.Spec
@@ -74,12 +73,9 @@ func TestRenderingMarkdownIsLinearOnSlowInputs(t *testing.T) {
 					label, largeInputSize, ratio, smallInputSize, ratioLimit)
 			}
 		}
-		// 解析器的预算：超过它就该退回纯文本，而不是把这一次渲染拖下去。给它一点余量，因为
-		// 解析器放弃之后还要清洗与渲染剩下的部分。
-		if largeTime > content.MarkdownBudget+2*time.Second {
-			t.Errorf("%s: %s for %d bytes, want the parser's %.1fs budget and change",
-				label, largeTime, largeInputSize, content.MarkdownBudget.Seconds())
-		}
+		// 这里不断言解析器的预算：那是 MarkdownToHTML 自己的事，在 content 包里直接量（那条测的是
+		// 「有没有在预算内退回纯文本」）。归档这一步在预算之后还有清洗与渲染，而清洗 500 KB 的
+		// 转义文本本身就要时间——把它算进预算，量到的就不是预算了。
 		if rendered.Kind != KindArticle {
 			t.Errorf("%s: a Markdown issue should be an article", label)
 			continue
