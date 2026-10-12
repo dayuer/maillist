@@ -3,7 +3,7 @@
 - 调研日期：2026-10-12
 - 调研对象：Mailchimp、Klaviyo、Substack、beehiiv、Kit（原 ConvertKit）、MailerLite、Buttondown；第五节补充 Ghost、Sendy、listmonk、SparkLoop、上游 mailcheap
 - 方法：一手来源优先（S-1 招股书、官方产品页/博客、官方定价页、代理商案例、收购公告），关键数字均注明出处；付费墙来源的转引数字单独标注置信度
-- 关联：为 maillist（本仓库）的产品/GTM 决策提供参照，启示见第四节，商业模式选择见第五节
+- 关联：为 maillist（本仓库）的产品/GTM 决策提供参照，启示见第四节，商业模式选择见第五节，托管版发信隔离见第六节
 
 ## 一页结论
 
@@ -166,10 +166,70 @@ maillist 现有设计已覆盖其中一部分：抑制名单、at-most-once 发�
 
 ### 5.6 待决问题
 
-1. **发信账户模型**（决定 C 是否可行）：共享一个 SES 账户时，一个客户的投诉会封掉所有客户；按客户拆 AWS 子账户（AWS Organizations）隔离好但开通重。需单独调研 SES 的多租户隔离能力后再定。
+1. **发信账户模型**（决定 C 是否可行）：共享一个 SES 账户时，一个客户的投诉会封掉所有客户；按客户拆 AWS 子账户（AWS Organizations）隔离好但开通重。**已调研，结论见第六节**：SES Tenants 使 C 可行。
 2. **支付意愿验证**：上游 GitHub 约 677 star（发布数日内），说明存在"受不了平台价格"的人群，但 star ≠ 付费。建议先做托管版候补名单，测转化。
 3. **许可策略**：上游 MIT，本仓库继承 MIT（见 NOTICE）。若走 C，是否需要像 Ghost 一样保持完全开源（信任资产），还是对托管专属组件（开通、计费）闭源——倾向后者，本体保持 MIT。
 4. **待复核数字**：beehiiv "$20M ARR"仅见于二手转述，未找到一手来源，本文未采用。
+
+## 六、托管版的 SES 发信账户隔离方案
+
+问题：托管版（5.5 方案 C）由我们持有 SES 账户替客户发信。SES 的退信/投诉阈值按**整个账户**执法（5.4），一个客户导入一份脏名单，就可能让所有客户停发。本节比较可行的隔离方案。
+
+### 6.1 方案对比
+
+| 方案 | 隔离强度 | 开通摩擦 | 平台风险 | 成本 |
+|---|---|---|---|---|
+| ① 共享账户，不隔离 | 无 | 零 | 一个客户可停掉全部客户 | SES 发送费 |
+| ② 共享账户 + 每客户一个 configuration set | 仅指标隔离，执法仍在账户级 | 低 | 同 ① | 同 ① |
+| ③ 共享账户 + **SES Tenants** | 声誉与执法按租户隔离；租户指标仍计入账户总指标 | 低：API 实时开通 | 低至中（见 6.3） | +$0.005/租户/月 +$0.005/千封 |
+| ④ 每客户一个 AWS 子账户（Organizations） | 最强：配额、账单、声誉全分离 | **高**：每个账户、每个区域都要单独申请出沙箱，AWS 人工审核，常无理由拒绝，管理账户无法代办 | 最低 | 账户管理开销 |
+| ⑤ 客户自带 SES（BYO，填自己的 key） | 完全分离，风险在客户侧 | 高：客户自己出沙箱、配 DKIM | 零 | 零（客户直付 AWS） |
+| ⑥ 委托发送（sending authorization：客户持有身份，平台代发） | **无**：退信/投诉计入代发方（平台）账户 | 中 | 同 ① | 同 ① |
+
+④ 的开通摩擦让它不适合自助式小客户；⑥ 看似把身份留在客户名下，但声誉仍算在平台账户上，没有解决问题。
+
+### 6.2 SES Tenants 要点（2025-08-01 上线）
+
+- **是什么**：账户内的逻辑容器。身份（发信域名）、configuration set、模板、IP 池可关联到租户；发信时带 `TenantName`（API）或 `X-SES-TENANT` 头（SMTP），SES 按租户统计发送量、退信率、投诉率，并校验本次请求用到的资源是否属于该租户。
+- **自动暂停**：每个租户挂一个声誉策略——Standard（推荐，仅高影响发现时暂停）、Strict（任何发现都暂停）、None（人工监控；但 AWS 保留对严重问题强制暂停的权利）。暂停只影响该租户，其他租户照常发送；状态变化与声誉发现推送到 EventBridge。自动策略暂停的租户可用 `UpdateReputationEntityCustomerManagedStatus` 自行恢复；被 AWS Trust & Safety 暂停的需走支持工单。
+- **租户级抑制名单**：可选开启。不开时，账户级抑制名单是共享的——A 客户的退信地址也会在 B 客户那里被抑制。
+- **规模与开通**：默认每账户 10,000 个租户，可申请至 300,000；无需开通申请，SES v2 API 直接可用。按区域生效，不跨区复制。
+- **价格**：$0.005/租户/月 + $0.005/千封（Enterprise 套餐含 1,000 个租户）。按 5.5 的样例客户（月 4 万封）计，每客户每月约 **$0.21**，对单位经济可忽略。
+
+### 6.3 Tenants 解决不了的部分
+
+AWS 实施指南原文明确："Tenant metrics contribute to the overall account-level reputation"。其示例：三个租户各发 1,000 封，其中一个退信 150 封（15%）——该租户被暂停，但**账户级退信率已是 5%，恰好踩到账户审查线**。即：
+
+1. Tenants 把"一个客户停掉全部客户"的概率大幅降低，但**没有降到零**——爆炸半径仍是整个账户。
+2. 小平台风险最高：租户少时，单个坏租户占账户总量的比例大，很容易把账户总指标拉过线。
+3. 被 Trust & Safety（而非自动策略）处置时，恢复靠工单，不受我们控制。
+
+### 6.4 推荐方案：Tenants 为主，分层兜底
+
+| 客户层 | 方案 | 说明 |
+|---|---|---|
+| 新客户 / 试用 | ③ Tenants + **Strict** 策略 + 低日预算 | 观察期内任何声誉发现即暂停 |
+| 正常付费客户 | ③ Tenants + **Standard** 策略 | 观察期结束后切换 |
+| 大名单 / 高价值客户 | ③ + 独立账户分片，或 ④ | 单个客户发送量占比高时，移出共享账户 |
+| 对价格极敏感 / 已有 SES 的客户 | ⑤ BYO SES | 托管运行、客户自带 SES，平台零发信风险，可作低价档 |
+
+配套措施（缓解 6.3）：
+
+1. **账户分片**：不把所有租户放进同一个 SES 账户。按每账户若干租户（或按客户层）分片，把账户级爆炸半径限制在一个分片内。分片数受 ④ 的出沙箱摩擦约束，所以是"少量账户 × 大量租户"，而不是一客户一账户。
+2. **准入在产品层做**：上游的 confirmed opt-in 默认关（spec §443 沿用）。托管版应对导入名单强制确认流程或导入时做地址校验——退信率的第一道闸门在我们自己的代码里，而不是 SES。
+3. **用现有日预算做爬坡**：spec 的凭据级日预算（D15、`send_ledger`）可直接充当新租户的发送量爬坡——前几周限额低，按租户指标逐步放开。这是已实现能力，无需新建。
+4. **自己的告警线低于 AWS**：订阅 EventBridge 的租户状态与声誉发现事件，在租户退信率 2%、投诉率 0.05% 时先行暂停并通知客户（第三方指南建议值），不等 AWS 动手。
+5. **出沙箱申请要明说是 ESP**：AWS re:Post 的客户审核建议文章表明，平台代客户发信是被支持的用途；申请时写清客户审核、强制 opt-in、租户隔离、退信/投诉自动处理与暂停机制，比模糊申请更易获批。
+
+### 6.5 对代码的影响
+
+- **二进制侧很小**：项目当前依赖的 `aws-sdk-go-v2/service/sesv2` v1.79.1 已包含 `SendEmailInput.TenantName` 与全部租户 API。只需新增一个配置项（如 `SES_TENANT_NAME`），在 `internal/mailer/ses.go` 组装 `SendEmailInput` 时带上，与现有 `SES_CONFIGURATION_SET` 同样处理。
+- **凭据收窄**：每个托管实例的 IAM 凭据用 `ses:TenantName` 与 `ses:FromAddress` 条件键限定为只能以自己的租户、自己的域名发信——即使实例被攻破，也冒用不了其他租户。这与 D9（凭据只能由 CLI 签发）同一思路：**实例不持有开通租户的权限**，`CreateTenant`、资源关联、IAM 签发都放在托管控制面，不进二进制。
+- **待验证**：租户被暂停时 SES 返回的错误类型。若是 `SendingPausedException`，现有 `PAUSE_ERRORS` 分类（spec §239）会把 campaign 置为暂停，行为正确；若是新错误名，需加入分类。应在接入时用一个 Strict 策略的测试租户实测。
+
+### 6.6 结论
+
+托管版的发信账户问题**有可行解**：共享账户 + SES Tenants + 少量账户分片，每客户每月新增成本约 $0.21，二进制只需加一个配置项。剩余风险（租户指标仍计入账户级）靠产品层准入、日预算爬坡和低于 AWS 的自有告警线来压。5.5 推荐的方案 C 不因发信隔离而受阻。
 
 ## 主要来源
 
@@ -198,3 +258,11 @@ maillist 现有设计已覆盖其中一部分：抑制名单、at-most-once 发�
 - [上游 marclou/mailcheap](https://github.com/marclou/mailcheap)
 - [SaaS 流失基准 2026（按品类）](https://focus-digital.co/average-churn-rate-by-industry-saas/)
 - [B2B SaaS 流失基准（939 家公司）](https://optif.ai/learn/questions/b2b-saas-churn-rate-benchmark/)
+- [AWS What's New：SES 租户隔离与自动声誉策略（2025-08-01）](https://aws.amazon.com/about-aws/whats-new/2025/08/amazon-ses-tenant-isolation-automated-reputation-policies/)
+- [SES 开发者指南：Tenants](https://docs.aws.amazon.com/ses/latest/dg/tenants.html)
+- [AWS 博客：Implement Tenants, Part 2（评估与规划）](https://aws.amazon.com/blogs/messaging-and-targeting/implement-tenants-in-your-amazon-ses-environment-part-2-assessment-and-planning/)
+- [AWS 博客：Implement Tenants, Part 3（实施指南，含账户级指标示例）](https://aws.amazon.com/blogs/messaging-and-targeting/implement-tenants-in-your-amazon-ses-environment-part-3-implementation-guide/)
+- [AWS 博客：按租户隔离抑制名单](https://aws.amazon.com/blogs/messaging-and-targeting/isolate-email-suppression-per-tenant-with-amazon-ses/)
+- [SES 开发者指南：出沙箱申请（按账户、按区域）](https://docs.aws.amazon.com/ses/latest/dg/request-production-access.html)
+- [SES 开发者指南：Sending authorization 概述](https://docs.aws.amazon.com/ses/latest/dg/sending-authorization-overview.html)
+- [AWS re:Post：多客户 SES 平台的客户审核最佳实践](https://repost.aws/articles/ARiPfzfFD3RbGzRPjn-2YdEg/client-vetting-best-practices-for-amazon-ses-customers-managing-multiple-client-accounts)
