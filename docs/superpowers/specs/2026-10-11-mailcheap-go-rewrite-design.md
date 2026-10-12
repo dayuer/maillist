@@ -131,7 +131,7 @@ ENTRYPOINT ["mailcheap"]
 CMD ["serve"]
 ```
 
-产物约 15–20 MB。nonroot、无 shell。二进制在 PATH 上，CLI 用法：`docker compose exec mailcheap mailcheap contacts list`。
+产物约 15–20 MB（实测：静态二进制约 24.5 MB，导出后的镜像约 25.5 MB，CI 的体积预算是 30 MB——差额是 MCP SDK 的，见阶段 6 的计划 §5.6）。nonroot、无 shell。二进制在 PATH 上，CLI 用法：`docker compose exec mailcheap mailcheap contacts list`。
 
 `CGO_ENABLED=0` 是选 `modernc.org/sqlite` 而非 `mattn/go-sqlite3` 的核心理由——后者要 CGO，编不出这个镜像。
 
