@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nibwire — Your newsletter, without the per-subscriber tax</title>
-<meta name="description" content="Nibwire sends your newsletter through Amazon SES for a $29/mo including 50,000 emails. Open source under the AGPL, export anytime.">
+<meta name="description" content="Nibwire sends your newsletter from your own domain for $29/mo including 50,000 emails. Open source under the AGPL, export anytime.">
 <link rel="canonical" href="https://nibwire.com/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta property="og:title" content="Your newsletter, without the per-subscriber tax">
@@ -39,7 +39,7 @@
   <div>
     <p class="kicker rise">Renewal coming up? Run the numbers first.</p>
     <h1 class="rise rise-2">Your newsletter, without the <em>per&#8209;subscriber tax.</em></h1>
-    <p class="lede rise rise-3">Nibwire sends your newsletter through Amazon SES from your own domain. $29 a month includes 50,000 emails — a weekly issue to 10,000 readers — and your whole list leaves with you whenever you want.</p>
+    <p class="lede rise rise-3">Nibwire sends your newsletter from your own domain. $29 a month includes 50,000 emails — a weekly issue to 10,000 readers — and your whole list leaves with you whenever you want.</p>
     <div class="rise rise-4">
       <form class="signup" method="post" action="/subscribe/waitlist">
         <label class="sr-only" for="email-top">Email address</label>
@@ -109,7 +109,7 @@
       <p>Nibwire is a small, well-tested program that does one job: get your issue into inboxes and tell you what happened.</p>
     </div>
     <dl class="spec">
-      <div><dt>Sent by Amazon SES, from your domain</dt><dd>The same delivery network behind a large share of the world's transactional email. DKIM, SPF and DMARC on your own domain, so the reputation you build is yours.</dd></div>
+      <div><dt>Sent from your own domain</dt><dd>Delivered through proven, large-scale email infrastructure. DKIM, SPF and DMARC on your own domain, so the reputation you build is yours.</dd></div>
       <div><dt>Your list is a file you can take</dt><dd>Everything lives in one SQLite database: subscribers, issues, opens, clicks, unsubscribes. Download it any day. No export request, no waiting.</dd></div>
       <div><dt>Open source (AGPL-3.0)</dt><dd>Read every line that touches your subscribers. If you ever want to run it yourself, it's a single binary.</dd></div>
       <div><dt>Works with Claude and other AI agents</dt><dd>A built-in MCP server lets your assistant draft, schedule and report on issues — with a human approval step before anything goes out.</dd></div>
@@ -166,10 +166,10 @@
     <div class="plans plans-4">
       <div class="plan">
         <p class="tag">&nbsp;</p>
-        <h3>Bring your own SES</h3>
+        <h3>Bring your own sending account</h3>
         <p class="price num">$9<small>/mo</small></p>
-        <p class="for">You have an AWS account. We run Nibwire; Amazon bills you for sending.</p>
-        <ul><li>Any volume</li><li>About $0.10 per 1,000 emails, paid to AWS</li><li>Full database export</li></ul>
+        <p class="for">You already have an email sending account. We run Nibwire; your provider bills you directly for sending.</p>
+        <ul><li>Any volume</li><li>Sending at cost, paid to your provider</li><li>Full database export</li></ul>
       </div>
       <div class="plan feature">
         <p class="tag">Most creators</p>
@@ -202,7 +202,7 @@
     <div class="section-head"><h2 id="faq-title">Questions</h2></div>
     <div class="faq">
       <details><summary>Is Nibwire available today?</summary><p>The software runs today and the source is public. The hosted service opens to the early-access list first, in small batches, so every migration gets attention. Join and we'll email you when your spot opens.</p></details>
-      <details><summary>Will my emails land in the inbox?</summary><p>Deliverability comes from your domain's authentication and your list's health more than from the platform. Nibwire sends through Amazon SES, signs mail with your domain, and suppresses bounces and complaints automatically. When you move, we warm your domain up by sending to your most engaged readers first.</p></details>
+      <details><summary>Will my emails land in the inbox?</summary><p>Deliverability comes from your domain's authentication and your list's health more than from the platform. Nibwire signs mail with your domain, and suppresses bounces and complaints automatically. When you move, we warm your domain up by sending to your most engaged readers first.</p></details>
       <details><summary>What license is Nibwire under?</summary><p>Nibwire is free software under the <a href="https://github.com/dayuer/nibwire/blob/main/LICENSE">GNU AGPL-3.0-only</a>. Running it for your own newsletters, including commercially, is free. A <a href="https://github.com/dayuer/nibwire/blob/main/COMMERCIAL-LICENSE.md">commercial license</a> is available if you want to offer a modified version as a service without publishing your changes, or embed Nibwire in closed-source software.</p></details>
       <details><summary>Can I leave?</summary><p>Yes, and it's easy. Your data is one SQLite file you can download any time, and you can run that same file on your own server with the open binary.</p></details>
       <details><summary>What happens to the email I give you here?</summary><p>We use it to tell you about early access and nothing else. It's stored on Nibwire itself — this waitlist runs on the product. Every email has a one-click unsubscribe.</p></details>
