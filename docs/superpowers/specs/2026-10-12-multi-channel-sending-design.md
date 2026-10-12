@@ -246,7 +246,17 @@ Resend 与 SendGrid 的具体错误码、字段名和签名算法，在实现时
 
 ## 7. 数据库
 
-迁移 `0005_channels.sql`：
+迁移分三个文件，随交付步骤落地（第 1 步执行时由一个文件拆分而来，见计划"与设计的偏离"）：
+
+| 文件 | 步骤 | 内容 |
+|---|---|---|
+| `0005_message_channel.sql` | 1（已实现） | `messages.channel`；`messages`、`events` 的 `ses_message_id` 改名 `provider_message_id`；唯一部分索引 `messages_channel_provider_message_id ON messages(channel, provider_message_id) WHERE provider_message_id <> ''` |
+| `0006_channels_routes.sql` | 2 | `channels`、`routes`、`channel_fallbacks`；`send_ledger` 重建 |
+| `0007_webhook_events.sql` | 3 | `webhook_events` |
+
+0005 是第一个改列名（非纯增量）的迁移：新版二进制打开数据库即迁移，迁移后旧版 `serve` 与回滚到旧版都会因找不到 `ses_message_id` 而失败。升级顺序必须是：停 `serve` → `nibwire db backup` → 换二进制 → 启动。
+
+下面是三个文件合在一起的目标结构（0005 已按上表实现，以代码为准）：
 
 ```sql
 CREATE TABLE channels (
@@ -286,7 +296,10 @@ CREATE TABLE webhook_events (
 
 ALTER TABLE messages ADD COLUMN channel TEXT NOT NULL DEFAULT 'default';
 ALTER TABLE messages RENAME COLUMN ses_message_id TO provider_message_id;
-CREATE INDEX messages_channel_provider_id ON messages(channel, provider_message_id);
+ALTER TABLE events RENAME COLUMN ses_message_id TO provider_message_id;
+DROP INDEX messages_ses_message_id;
+CREATE UNIQUE INDEX messages_channel_provider_message_id
+    ON messages(channel, provider_message_id) WHERE provider_message_id <> '';
 ```
 
 当日额度记在 `send_ledger(day, credential_id)` 里。主键加上渠道，SQLite 不能改主键，所以重建该表并拷贝旧数据，旧行记到 `default`：

@@ -159,9 +159,9 @@ func TestProviderMessageIDIsUniquePerChannel(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	insert := func(id, channel string) error {
 		_, err := db.sql.ExecContext(ctx, `INSERT INTO messages
-            (id, kind, newsletter_id, email, status, provider_message_id, channel, created_at)
-            VALUES (?, 'campaign', 'n1', 'a@example.com', 'sent', 'same-id', ?, '2026-10-01T00:00:00Z')`,
-			id, channel)
+            (id, kind, newsletter_id, contact_id, email, status, provider_message_id, channel, created_at)
+            VALUES (?, 'campaign', 'n1', ?, 'a@example.com', 'sent', 'same-id', ?, '2026-10-01T00:00:00Z')`,
+			id, id, channel) // own contact_id: messages_campaign_contact would refuse the second row first
 		return err
 	}
 	if err := insert("m1", "default"); err != nil {
@@ -306,13 +306,12 @@ perl -pi -e 's/ses_message_id/provider_message_id/g' internal/store/messages.go 
 grep -rn "ses_message_id" --include='*.go' internal cmd
 ```
 
-Expected: 第二条命令没有输出（迁移文件 `0001`、`0005` 是 `.sql`，不在范围内，也不应修改）。
+Expected: 只剩 `internal/store/migrate_channel_test.go`（它向 0005 之前的库写数据，必须用旧列名）。迁移文件 `0001`、`0005` 是 `.sql`，不在范围内，也不应修改。
 
 - [ ] **Step 2：Go 标识符**
 
 ```bash
-files=$(grep -rlE 'SESMessageID|MessageBySESID|AdoptSESMessageID|sesMessageID' --include='*.go' internal cmd)
-perl -pi -e 's/\bSESMessageID\b/ProviderMessageID/g; s/\bMessageBySESID\b/MessageByProviderID/g; s/\bAdoptSESMessageID\b/AdoptProviderMessageID/g; s/\bsesMessageID\b/providerMessageID/g' $files
+grep -rlE 'SESMessageID|MessageBySESID|AdoptSESMessageID|sesMessageID' --include='*.go' internal cmd | xargs perl -pi -e 's/\bSESMessageID\b/ProviderMessageID/g; s/\bMessageBySESID\b/MessageByProviderID/g; s/\bAdoptSESMessageID\b/AdoptProviderMessageID/g; s/\bsesMessageID\b/providerMessageID/g'
 gofmt -l internal cmd
 ```
 
@@ -894,3 +893,37 @@ EOF
 ## 第 2–5 步
 
 第 1 步合并后，在本节下按同样格式补写第 2 步的任务（文件表、TDD 步骤、完整代码、提交），依此类推。各步的范围与验收以本文件开头"范围与分步"表和设计文档对应章节为准。
+
+
+---
+
+## 第 1 步执行记录与后续步骤须知
+
+## 计划文本错误（第 1 步）
+- Task 1 的 TestProviderMessageIDIsUniquePerChannel：行要有各自的 contact_id，否则先撞 messages_campaign_contact 唯一索引
+- Task 2 Step 2：`files=$(...); perl ... $files` 在 zsh 下不分词，改用 `grep -rlE ... | xargs perl -pi -e ...`
+- Task 2 Step 1 的 grep 预期：migrate_channel_test.go 必须保留旧列名，预期输出不是"空"
+- Task 3 补充（按渠道查找）已并入第 1 步
+
+## 第 2 步（路由）须写入
+- 邮件的 channel 在入队时定下；一旦 provider_message_id 非空，channel 不得再改（唯一索引与事件匹配都依赖它）。故障改派只作用于未发送（provider_message_id = ''）的邮件
+- messages.go 已 661 行：涉及 MessageByProviderID/AdoptProviderMessageID/MarkMessageSent 时拆到 messages_channel.go
+
+## 第 3 步（按渠道 webhook）须写入
+- events.findMessage 接收渠道参数；按 message_id 标签找到的邮件，若 message.Channel != 事件渠道则拒绝
+- AdoptProviderMessageID 的 WHERE 加 `AND channel = ?`，由 store 保证
+
+## 已知不稳定测试（与本工作无关）
+- TestRenderingMarkdownIsLinearOnSlowInputs（core/archive）、TestHTMLToTextIsLinearOnSlowInputs（core/render）：耗时比例断言偶发失败
+
+## Task 4 审查留给后续
+- Resend/SendGrid 必须传入自己的 classify；NewChannel 的 nil classify 只适合 SES
+- ratectl.Quota 的 "-1 = 不限" 是 SES 约定；第二个实现出现前在 QuotaReader 文档写明
+- Identity 的 DKIMStatus/MailFromStatus 与 VerifiedDomain 注释是 SES 词汇；接 Resend/SendGrid 时泛化或做映射
+- webhook 解析放单独接口（类型断言发现），不加宽 Channel
+- 可选：ChannelType 命名类型
+
+## Task 5 审查留给后续（第 2 步必须处理）
+- 只把 Send 返回的错误交给渠道分类：deliver 里渲染、模板、限速桶等引擎自身错误应直接 ErrorFail（例如把 Send 错误包成 sendError 类型）；否则某渠道把未知错误判为 Retry 会让坏模板的 campaign 无限重试。或在 Classifier 契约写明"未知错误必须 ErrorFail"。
+- Engine.classify 是整个引擎一个；多渠道时改为按 message.Channel 取渠道的 Classify，并移除该字段。不要让其他代码依赖 e.classify。
+- NewEngine 目前靠类型断言发现 Classifier；被装饰器包一层就会静默退回 SES 规则。多渠道构造函数应显式接收 Channel。
