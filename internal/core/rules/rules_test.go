@@ -148,20 +148,48 @@ func TestIssuesLinkToTheirArchivePage(t *testing.T) {
 		t.Errorf("a draft must link to the slug its subject gives: %s", got.HTML)
 	}
 
-	if got := IssueWebURL(testAppURL, issue, testNewsletter); got != "" {
+	if got := IssueWebURL(testAppURL, "", issue, testNewsletter); got != "" {
 		t.Errorf("archive off: %q", got)
 	}
 	unlisted := issue
 	unlisted.ArchiveListed = false
-	if got := IssueWebURL(testAppURL, unlisted, archived); got != "" {
+	if got := IssueWebURL(testAppURL, "", unlisted, archived); got != "" {
 		t.Errorf("unlisted: %q", got)
 	}
 	welcome, ok := WelcomeContent(model.Newsletter{WelcomeEnabled: true, Welcome: model.Content{Subject: "Welcome", Markdown: "Hi"}})
 	if !ok {
 		t.Fatal("welcome content expected")
 	}
-	if got := IssueWebURL(testAppURL, model.Campaign{ID: issue.ID, Subject: welcome.Subject}, archived); got != "" {
+	if got := IssueWebURL(testAppURL, "", model.Campaign{ID: issue.ID, Subject: welcome.Subject}, archived); got != "" {
 		t.Errorf("welcome email has no page: %q", got)
+	}
+}
+
+// 审计 F2：启用 ARCHIVE_HOSTS 时，Read-online 链接必须是归档域名上的 /p/{slug}。
+//
+// 修复前这里一律拼 APP_URL + "/archive/<slug>/p/<post>"，于是 newsletter 有自己的域名时，邮件上的
+// 链接指向一个在生产里不存在的地址（那条路径只属于应用域名）。
+func TestIssueWebURLUsesTheArchiveHost(t *testing.T) {
+	hosts := "news.example.com=weekly"
+	weekly := testNewsletter
+	weekly.Slug = "weekly"
+	weekly.ArchiveEnabled = true
+	issue := testCampaign
+	issue.ID = "84f1a2b3c4d5e6f7a8b9c0d3"
+	issue.ArchiveSlug = "issue-12-is-out"
+	issue.ArchiveListed = true
+
+	if got := IssueWebURL(testAppURL, hosts, issue, weekly); got != "https://news.example.com/p/issue-12-is-out" {
+		t.Errorf("with an archive host: %q", got)
+	}
+	// 没有归档域名的一期（这个 newsletter 没开归档）没有页面。
+	if got := IssueWebURL(testAppURL, hosts, issue, testNewsletter); got != "" {
+		t.Errorf("archive off: %q", got)
+	}
+	monthly := weekly
+	monthly.Slug = "monthly"
+	if got := IssueWebURL(testAppURL, hosts, issue, monthly); got != testAppURL+"/archive/monthly/p/issue-12-is-out" {
+		t.Errorf("without an archive host: %q", got)
 	}
 }
 
@@ -367,14 +395,3 @@ func TestFeedbackIDIdentifiesTheSender(t *testing.T) {
 	}
 }
 
-func TestSlugifyFoldsAccents(t *testing.T) {
-	if got := Slugify("Issue 12: L'équipe", 80); got != "issue-12-l-equipe" {
-		t.Errorf("got %q", got)
-	}
-	if got := Slugify(strings.Repeat("a", 100), 80); got != strings.Repeat("a", 80) {
-		t.Errorf("got %q", got)
-	}
-	if got := Slugify("Hello --- ", 80); got != "hello" {
-		t.Errorf("got %q", got)
-	}
-}

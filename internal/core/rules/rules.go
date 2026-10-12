@@ -9,9 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"mailcheap/internal/core/archive"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/render"
 	"mailcheap/internal/core/sign"
+	"mailcheap/internal/core/slug"
 )
 
 const (
@@ -108,20 +110,24 @@ func WelcomeContent(n model.Newsletter) (model.Content, bool) {
 	}, true
 }
 
-// IssueWebURL is the archive page of an issue, or "" when it has none. A draft has no slug yet, so
-// its test email links to the one the subject gives when it goes out. Welcome emails aren't issues.
-func IssueWebURL(appURL string, c model.Campaign, n model.Newsletter) string {
+// IssueWebURL is the archive page of an issue, or "" when it has none: upstream getIssueWebUrl.
+//
+// A draft has no slug yet, so its test email links to the one the subject gives when it goes out.
+// Welcome emails aren't issues and have no page. The address itself comes from core/archive, the one
+// place that knows whether a newsletter has an archive domain of its own (audit F2: this function
+// used to build "/archive/<slug>/p/<post>" whatever ARCHIVE_HOSTS said).
+func IssueWebURL(appURL, archiveHosts string, c model.Campaign, n model.Newsletter) string {
 	if !n.ArchiveEnabled || n.Slug == "" || c.ID == "" || !c.ArchiveListed {
 		return ""
 	}
-	slug := c.ArchiveSlug
-	if slug == "" {
-		slug = Slugify(c.Subject, 80)
+	issueSlug := c.ArchiveSlug
+	if issueSlug == "" {
+		issueSlug = slug.Slug(c.Subject, 80)
 	}
-	if slug == "" {
+	if issueSlug == "" {
 		return ""
 	}
-	return appURL + "/archive/" + n.Slug + "/p/" + slug
+	return archive.ForNewsletter(n.Slug, archiveHosts, appURL).AbsolutePost(issueSlug)
 }
 
 // SendProblem is the first blocking reason in upstream's wording ("Add content", …), or "".

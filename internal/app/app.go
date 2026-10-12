@@ -60,6 +60,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	}
 	engine := mailer.NewEngine(db, sender, signer, mailer.Config{
 		AppURL:         cfg.AppURL,
+		ArchiveHosts:   cfg.ArchiveHosts,
 		SendingOn:      cfg.SendingOn,
 		SendRatePerSec: cfg.Limits.SendRatePerSecond,
 		Limits:         cfg.Limits,
