@@ -30,17 +30,53 @@ func TestSessionSecretNeeds32Characters(t *testing.T) {
 	}
 }
 
-// Intentional tightening, not a straight port of tests/config.test.mjs: upstream readSendRate uses
-// Number.parseInt, so "5.5" → 5 and " 7 " → 7; Go's strconv.Atoi rejects both and falls back to 10.
-// Being stricter here (never a silent half-read value) is deliberate.
-func TestSendRateOutsideOneToFourteenFallsBackToTen(t *testing.T) {
-	for v, want := range map[string]int{"": 10, "1": 1, "14": 14, "0": 10, "15": 10, "abc": 10, "5.5": 10, " 7 ": 10} {
+// SEND_RATE_PER_SECOND 是运营方自己的上限，不设就是没有上限：速率跟随账号（D17）。
+//
+// It used to default to 10 and cap at 14, which was a guess about an account the deployment can read
+// for itself. The parse is still stricter than upstream's Number.parseInt on purpose — "5.5" and " 7 "
+// are refused rather than half-read — and a refused value falls back to no ceiling rather than to a
+// number nobody asked for.
+func TestTheSendRateCapIsOptional(t *testing.T) {
+	for v, want := range map[string]int{
+		"": 0, "0": 0, "-1": 0, "abc": 0, "5.5": 0, " 7 ": 0, "1": 1, "5000": 5000, "5001": 0,
+	} {
 		c, err := Load(with("SEND_RATE_PER_SECOND", v))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if c.Limits.SendRatePerSecond != want {
 			t.Errorf("SEND_RATE_PER_SECOND=%q → %d, want %d", v, c.Limits.SendRatePerSecond, want)
+		}
+	}
+}
+
+// 并发与 headroom：越界的值回退到默认并记日志，而不是让进程起不来。
+func TestTheConcurrencyAndHeadroomSettings(t *testing.T) {
+	c, err := Load(strong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SendConcurrency != 16 || c.Limits.SendRateHeadroom != 0.9 {
+		t.Fatalf("defaults = %d workers, headroom %v", c.SendConcurrency, c.Limits.SendRateHeadroom)
+	}
+	for v, want := range map[string]int{"0": 16, "257": 16, "abc": 16, "": 16, "1": 1, "256": 256} {
+		c, err := Load(with("SEND_CONCURRENCY", v))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.SendConcurrency != want {
+			t.Errorf("SEND_CONCURRENCY=%q → %d, want %d", v, c.SendConcurrency, want)
+		}
+	}
+	for v, want := range map[string]float64{
+		"": 0.9, "0.05": 0.9, "1.5": 0.9, "abc": 0.9, "0.5": 0.5, "1": 1,
+	} {
+		c, err := Load(with("SEND_RATE_HEADROOM", v))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Limits.SendRateHeadroom != want {
+			t.Errorf("SEND_RATE_HEADROOM=%q → %v, want %v", v, c.Limits.SendRateHeadroom, want)
 		}
 	}
 }
