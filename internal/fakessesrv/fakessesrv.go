@@ -59,6 +59,9 @@ type Server struct {
 	// dailyQuota is how many sends the fake accepts before answering the way SES does when the
 	// 24-hour allowance is gone. 0 is no limit.
 	dailyQuota int
+	// accounting makes SentLast24Hours count what the fake has accepted, the way a real account's
+	// does.
+	accounting bool
 	// accepted and throttled are what the fake did, as opposed to what it said.
 	accepted  int
 	throttled int
@@ -113,6 +116,15 @@ func WithEnforcedRate(perSecond float64) Option {
 // the two apart (rules.SendErrorAction).
 func WithDailyQuota(max int) Option {
 	return func(s *Server) { s.dailyQuota = max }
+}
+
+// WithQuotaAccounting makes GetAccount's SentLast24Hours count what the fake has actually accepted.
+//
+// A managed deployment runs several instances against one account, and the day's number each of them
+// reads is the account's whole day — including what the others sent. A fake whose quota never moved
+// could not tell that apart from a per-instance count, which is the difference D18 is about.
+func WithQuotaAccounting() Option {
+	return func(s *Server) { s.accounting = true }
 }
 
 // WithVerifiedDomains makes ListEmailIdentities and GetEmailIdentity report these domains as
@@ -263,6 +275,9 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		HTML: email.HTML, Text: email.Text, Tags: tags, Headers: headers, At: time.Now().UTC(),
 	})
 	s.accepted++
+	if s.accounting && s.hasQuota {
+		s.quota.SentLast24Hours++
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"MessageId": messageID})
 }
 
