@@ -23,7 +23,9 @@ func newStatsCmd() *cobra.Command {
 		RunE: runStats,
 	}
 	cmd.Flags().String("newsletter", "", "newsletter slug or id (default: all of them)")
-	cmd.Flags().String("tz", stats.DefaultTimeZoneName, "IANA time zone for the days and hours")
+	// --tz is the root's persistent flag (design §8 lists it as global): it is read here, and defined
+	// there, so it means the same thing to every command that ever reports a day.
+
 	return cmd
 }
 

@@ -1,5 +1,10 @@
-# One site: everything a reader sees, plus the SES webhook. A newsletter with an archive of its own
-# gets a second site block for that hostname, pointing at the same upstream (design §4.2).
+# One site: everything a reader sees, plus the SES webhook.
+#
+# A newsletter whose archive lives on its own hostname gets a second block — there is a commented one
+# below — pointing at the same upstream. Its hostname has to be in ARCHIVE_HOSTS as well, because that
+# is what the app builds an issue's links from, and the two have to agree: caddy serving a hostname the
+# app does not know about answers links that point at the main site's /archive/<slug> path instead
+# (design §4.2, §13).
 #
 # The address comes from SITE_ADDRESS: `http://localhost` locally, a bare hostname in production —
 # with a real hostname caddy obtains and renews a certificate for it without further configuration.
@@ -19,3 +24,17 @@
 		format console
 	}
 }
+
+# 归档域名：一个 newsletter 一个站点块，反向代理到同一个上游。把 ARCHIVE_HOSTS 里写的那个主机名原样
+# 放到这里，caddy 会为它单独签一张证书。
+#
+# archive.example.com {
+# 	encode zstd gzip
+# 	reverse_proxy nibwire:8080 {
+# 		header_up X-Forwarded-For {remote_host}
+# 	}
+# 	log {
+# 		output stderr
+# 		format console
+# 	}
+# }

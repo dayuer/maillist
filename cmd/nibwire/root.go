@@ -13,6 +13,7 @@ import (
 
 	"nibwire/internal/app"
 	"nibwire/internal/config"
+	"nibwire/internal/core/stats"
 )
 
 // version is set at build time with -ldflags "-X main.version=…".
@@ -26,6 +27,8 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().Bool("json", false, "print structured JSON output")
+	root.PersistentFlags().String("tz", stats.DefaultTimeZoneName,
+		"IANA time zone for anything that reads as a day or an hour")
 	root.PersistentFlags().Bool("yes", false, "skip confirmation prompts")
 	root.PersistentFlags().String("db", "", "path to the SQLite database (overrides NIBWIRE_DB)")
 	root.PersistentFlags().String("data-dir", "", "directory holding the database (overrides NIBWIRE_DATA_DIR)")
