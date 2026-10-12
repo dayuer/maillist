@@ -33,13 +33,25 @@ type fixture struct {
 	token  string
 }
 
-// newFixture builds a deployment with a credential holding every scope.
+// newFixture builds a deployment with a credential holding every scope and no budget of its own.
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	return newFixtureWithScopes(t, []creds.Scope{creds.ScopeRead, creds.ScopeWrite, creds.ScopeSend})
+	return newFixtureFull(t, []creds.Scope{creds.ScopeRead, creds.ScopeWrite, creds.ScopeSend}, 0)
 }
 
+// newFixtureWithScopes is the same deployment with a narrower credential: the scope tests need one.
 func newFixtureWithScopes(t *testing.T, scopes []creds.Scope) *fixture {
+	t.Helper()
+	return newFixtureFull(t, scopes, 0)
+}
+
+// newFixtureWithBudget is the same deployment with a credential that carries a daily_budget.
+func newFixtureWithBudget(t *testing.T, budget int) *fixture {
+	t.Helper()
+	return newFixtureFull(t, []creds.Scope{creds.ScopeRead, creds.ScopeWrite, creds.ScopeSend}, budget)
+}
+
+func newFixtureFull(t *testing.T, scopes []creds.Scope, budget int) *fixture {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -72,7 +84,7 @@ func newFixtureWithScopes(t *testing.T, scopes []creds.Scope) *fixture {
 	token := "mc_" + ids.New()
 	credential := store.Credential{
 		ID: ids.New(), Kind: "mcp", Name: "newsletter-bot", Prefix: "mc_test…",
-		TokenHash: creds.Hash(token), Scopes: scopes, DailyBudget: 0,
+		TokenHash: creds.Hash(token), Scopes: scopes, DailyBudget: budget,
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := db.CreateCredential(ctx, credential); err != nil {
@@ -141,6 +153,45 @@ func textOf(result *mcp.CallToolResult) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// drain sends everything that is queued, the way the serve process's sender does.
+func (f *fixture) drain(t *testing.T) {
+	t.Helper()
+	for {
+		result, err := f.engine.SendBatch(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Done() == 0 || result.Retry {
+			return
+		}
+	}
+}
+
+// runServeOnce does what the serve process's scheduler does with one job: lease it, run it, and
+// record how it ended. It is the other half of "MCP queues, the server sends".
+func runServeOnce(t *testing.T, f *fixture, jobID string) jobs.Job {
+	t.Helper()
+	ctx := context.Background()
+	job, ok, err := f.deps.Jobs.Lease(ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || job.ID != jobID {
+		t.Fatalf("leased %v %v, want the job that was just queued", job.ID, ok)
+	}
+	if err := f.engine.RunJob(ctx, job); err != nil {
+		t.Fatalf("the job failed: %v", err)
+	}
+	if err := f.deps.Jobs.Complete(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	done, err := f.deps.Jobs.Get(ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return done
 }
 
 // seedNewsletter creates a newsletter with contacts and a draft the way an operator would, so the
