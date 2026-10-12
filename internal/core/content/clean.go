@@ -92,3 +92,45 @@ func KeepSafeURLs(html string) string {
 		return m[1] + m[2] + `"#"`
 	})
 }
+
+// issuePolicy is upstream lib/safe-html.js: the same allow list as the cleaner, plus the three
+// attributes the archive's own rendering adds to pictures (prioritizeImages), and relative URLs.
+var issuePolicy = newIssuePolicy()
+
+func newIssuePolicy() *bluemonday.Policy {
+	p := bluemonday.NewPolicy()
+	p.AllowElements(contentTags...)
+	p.AllowNoAttrs().OnElements(contentTags...)
+	p.AllowAttrs("href", "target", "rel").OnElements("a")
+	p.AllowAttrs("src", "alt", "width", "height", "loading", "fetchpriority", "decoding").OnElements("img")
+	p.AllowAttrs("start").OnElements("ol")
+	p.AllowAttrs("colspan", "rowspan").OnElements("td", "th")
+	p.AllowAttrs("id").OnElements("h2", "h3", "h4")
+	p.AllowAttrs("data-callout").OnElements("div")
+	p.AllowURLSchemes("http", "https", "mailto")
+	// The archive's pages link to each other with paths like /p/next, which upstream keeps. The email
+	// cleaner does not allow them: a relative link in an inbox resolves against the reader's mail
+	// client, which is nowhere.
+	p.AllowRelativeURLs(true)
+	p.RequireParseableURLs(true)
+	return p
+}
+
+// SanitizeIssueHTML is upstream sanitizeIssueHtml: the cleaner for HTML that goes into the archive
+// page itself, rather than into an email.
+//
+// It is the parse-based pass that runs *after* the archive has added its own picture attributes, so
+// it allows what the email cleaner drops — and it still drops an image whose source is not on the
+// web, which is how an upload that never finished stops being a broken picture.
+func SanitizeIssueHTML(html string) string {
+	return dropProtocolRelative(dropOffWebImages(issuePolicy.Sanitize(html)))
+}
+
+// protocolRelativePattern is a URL attribute pointing at another host without a scheme: "//x.test/a".
+// Upstream's sanitizer has allowProtocolRelative: false; bluemonday treats a relative URL as relative
+// whatever it starts with, so the attribute is taken off here instead.
+var protocolRelativePattern = regexp.MustCompile(`(?i)\s+(href|src)\s*=\s*"(//[^"]*)"`)
+
+func dropProtocolRelative(html string) string {
+	return protocolRelativePattern.ReplaceAllString(html, "")
+}
