@@ -539,6 +539,12 @@ func (e *Engine) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		// With sending off there is nothing to do, and that is a setting, not a failure: returning
+		// the error would take the HTTP server down with the sender, and a fresh deployment starts
+		// with sending off on purpose.
+		if !e.cfg.SendingOn {
+			continue
+		}
 		for {
 			result, err := e.SendBatch(ctx, nil)
 			if err != nil {

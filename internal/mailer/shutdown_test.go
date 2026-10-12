@@ -204,3 +204,32 @@ func TestClaimedCountReadsTheMessagesTable(t *testing.T) {
 		t.Fatalf("claimed = %d, unknown = %d, pending = %d", claimed, unknown, pending)
 	}
 }
+
+// 发信关闭时 Run 只是等待，不能把 "Sending is off" 当成故障返回——否则 serve 会连同 HTTP 一起退出，
+// 一个 SENDING_ENABLED=false 的新部署就起不来。
+func TestRunIdlesWhileSendingIsOff(t *testing.T) {
+	f := newFixture(t, 1)
+	f.engine.cfg.SendingOn = false
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.engine.Run(ctx) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned %v while sending was off; it should keep waiting", err)
+	case <-time.After(20 * f.engine.cfg.PollInterval):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after cancel = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine did not stop within ten seconds of cancellation")
+	}
+	if f.fake.SentCount() != 0 {
+		t.Fatalf("sent %d with sending off", f.fake.SentCount())
+	}
+}
