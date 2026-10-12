@@ -6,7 +6,6 @@ import (
 	"unicode/utf16"
 
 	"nibwire/internal/core/model"
-	"nibwire/internal/core/render"
 )
 
 // Check is one row of the pre-send checklist.
@@ -19,12 +18,27 @@ type Check struct {
 	Message  string
 }
 
+// Rendered is the campaign as an email, reduced to the plain facts the checklist reads off it: how
+// big it is, whether the body has anything in it, and whether the unsubscribe link is in the HTML.
+// Rendering itself stays with the caller — internal/presend does it, both surfaces go through that
+// one assembly — so this package never looks at how the email was produced (phase 9 #44).
+type Rendered struct {
+	HTML  string
+	Bytes int
+	// Placeholder is the exact text HTML carries where a recipient's unsubscribe link goes. An empty
+	// one is a caller that forgot to pass it, and it cannot pass the check: every string contains "".
+	Placeholder string
+	// HasContent is whether the body has words or a picture once parsed, which is what upstream's
+	// hasContent asks: the editor saves "<p></p>" for an empty document.
+	HasContent bool
+}
+
 // Input is everything the checklist looks at. DomainVerified is whether SES has verified the
 // sending domain; Audience is how many contacts the campaign would reach.
 type Input struct {
 	Campaign       model.Campaign
 	Newsletter     model.Newsletter
-	Rendered       render.Rendered
+	Rendered       Rendered
 	SendingOn      bool
 	DomainVerified bool
 	Audience       int
@@ -42,10 +56,11 @@ func Run(in Input) []Check {
 		{ID: "subject", OK: subject != "", Blocking: true, Message: "Add a subject"},
 		{ID: "subject-length", OK: subjectLength <= 70},
 		{ID: "preview", OK: strings.TrimSpace(in.Campaign.PreviewText) != ""},
-		{ID: "content", OK: render.HasContent(in.Campaign.Body), Blocking: true, Message: "Add content"},
+		{ID: "content", OK: in.Rendered.HasContent, Blocking: true, Message: "Add content"},
 		{
-			ID: "unsubscribe", OK: strings.Contains(in.Rendered.HTML, render.UnsubscribePlaceholder),
-			Blocking: true, Message: "Add " + render.UnsubscribePlaceholder + " to the HTML",
+			ID:       "unsubscribe",
+			OK:       in.Rendered.Placeholder != "" && strings.Contains(in.Rendered.HTML, in.Rendered.Placeholder),
+			Blocking: true, Message: "Add " + in.Rendered.Placeholder + " to the HTML",
 		},
 		{
 			ID: "size", OK: in.Rendered.Bytes <= in.Limits.MaxEmailBytes,

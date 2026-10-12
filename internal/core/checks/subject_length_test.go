@@ -45,7 +45,7 @@ func checkOK(t *testing.T, subject, id string) bool {
 	report := Run(Input{
 		Campaign:   model.Campaign{Subject: subject, PreviewText: "Hi", Body: "Text"},
 		Newsletter: model.Newsletter{PostalAddress: "1 Main St"},
-		Rendered:   renderBody("Text", model.Newsletter{}),
+		Rendered:   renderedFor("Text"),
 		SendingOn:  true, DomainVerified: true,
 		Limits: model.Limits{MaxEmailBytes: 100_000},
 	})

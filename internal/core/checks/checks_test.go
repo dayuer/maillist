@@ -6,15 +6,26 @@ import (
 	"time"
 
 	"nibwire/internal/core/model"
-	"nibwire/internal/core/render"
 )
 
 var readyNewsletter = model.Newsletter{
 	Name: "Jane Doe", PostalAddress: "1 Main St, Paris",
 }
 
-func renderBody(body string, n model.Newsletter) render.Rendered {
-	return render.Email(render.EmailInput{Format: model.FormatMarkdown, Body: body, Newsletter: n})
+// unsubscribePlaceholder is the text a rendered email carries where the unsubscribe link goes. The
+// checklist is told it rather than importing the renderer, so these tests state the literal too; the
+// one place it is tied back to an actual render is internal/presend's test.
+const unsubscribePlaceholder = "{{unsubscribe_url}}"
+
+// renderedFor is the plain form of a body, the way internal/presend hands it over: the renderer
+// stays outside this package (phase 9 #44).
+func renderedFor(body string) Rendered {
+	return Rendered{
+		HTML:        "<p>" + body + "</p>\n" + unsubscribePlaceholder,
+		Bytes:       len(body),
+		Placeholder: unsubscribePlaceholder,
+		HasContent:  strings.TrimSpace(body) != "",
+	}
 }
 
 // tests/render-email.test.mjs "presend checks block on missing essentials and sending off".
@@ -22,7 +33,7 @@ func TestPresendChecksBlockOnMissingEssentialsAndSendingOff(t *testing.T) {
 	cs := Run(Input{
 		Campaign:       model.Campaign{Subject: "", PreviewText: "", Body: ""},
 		Newsletter:     model.Newsletter{},
-		Rendered:       renderBody("", model.Newsletter{}),
+		Rendered:       renderedFor(""),
 		SendingOn:      false,
 		DomainVerified: false,
 		Limits:         model.Limits{MaxEmailBytes: 100_000},
@@ -48,7 +59,7 @@ func TestPresendChecksPassWhenEverythingIsReady(t *testing.T) {
 	cs := Run(Input{
 		Campaign:       campaign,
 		Newsletter:     readyNewsletter,
-		Rendered:       renderBody(campaign.Body, readyNewsletter),
+		Rendered:       renderedFor(campaign.Body),
 		SendingOn:      true,
 		DomainVerified: true,
 		Limits:         model.Limits{MaxEmailBytes: 100_000},
@@ -88,7 +99,7 @@ func TestBlockedReturnsTheFirstBlockingFailure(t *testing.T) {
 	cs := Run(Input{
 		Campaign:       model.Campaign{Subject: "Hello", Body: "Text", PreviewText: "Hi"},
 		Newsletter:     readyNewsletter,
-		Rendered:       renderBody("Text", readyNewsletter),
+		Rendered:       renderedFor("Text"),
 		SendingOn:      false,
 		DomainVerified: true,
 		Limits:         model.Limits{MaxEmailBytes: 100_000},
