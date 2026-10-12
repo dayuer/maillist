@@ -121,6 +121,60 @@ func TestAStepWritesEveryChunkAndIsChargedExactlyOnce(t *testing.T) {
 	}
 }
 
+// 一步的插入不能把单写入方占死：一边在写 20 万封，另一边记一条单行写入要在 200 ms 内完成（#61，设计 §5.2
+// 第 2 条）。
+//
+// The shape this replaces was one transaction for the whole step, sized by the audience: at about
+// sixty-one thousand rows a second a million messages held the writer for sixteen seconds, and
+// everything a reader does — an unsubscribe, an open, a click, an SNS callback — queued behind it.
+// The CLI's own busy_timeout is ten seconds, so its writes failed outright.
+func TestAStepBeingWrittenDoesNotBlockASingleRow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes two hundred thousand messages")
+	}
+	db := openTemp(t)
+	ctx := context.Background()
+	campaign := sendingCampaign(t, db)
+	step := campaignMessages(t, db, campaign, 200_000)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// The error is not the subject: the rows either go in or the count below says they did not,
+		// and a t.Fatal from this goroutine would be from the wrong one.
+		_, _, _ = db.ReserveAndInsert(ctx, Day(time.Now().UTC()), "", len(step), 1_000_000, 0, step)
+	}()
+
+	// Wait until the step is being written. Its first chunk is committed with the reservation, so
+	// rows appearing is the signal — and a read, which WAL does not block on.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var written int
+		if err := db.Row(ctx, "SELECT count(*) FROM messages WHERE campaign_id = ?",
+			campaign.ID).Scan(&written); err != nil {
+			t.Fatal(err)
+		}
+		if written > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the step never started writing")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Now, while it is still writing the rest, the single row an unsubscribe writes.
+	start := time.Now()
+	if err := db.AddSuppression(ctx, "left@example.com", model.SuppressManual, "unsubscribed"); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	<-done
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("a single write took %s while a step was being inserted", elapsed)
+	}
+}
+
 // 退还要把当天的额度还回去，且不会退成负数。
 func TestRefund(t *testing.T) {
 	db := openTemp(t)
