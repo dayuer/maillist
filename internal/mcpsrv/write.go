@@ -741,21 +741,14 @@ func (s *session) checkCampaignIsSendable(ctx context.Context, campaign model.Ca
 }
 
 // checkBudget answers "would this fit" before the job is queued, so an agent learns immediately
-// rather than through a job's last_error.
+// rather than through a job's last_error. Both ceilings are checked, the day's global one and the
+// credential's own.
 //
 // Its count is an upper bound: the whole active audience, capped by the campaign's own limit and by
 // this call's. The authoritative reservation is the engine's, made when the job runs — this one can
 // refuse a step the engine would have accepted when the two numbers are close, and can never let
 // through one the engine would refuse, which is the direction a pre-flight has to be wrong in.
 func (s *session) checkBudget(ctx context.Context, credential store.Credential, campaign model.Campaign, limit int) error {
-	if credential.DailyBudget <= 0 {
-		return nil
-	}
-	day := store.Day(time.Now())
-	spent, err := s.deps.Store.Reserved(ctx, day, credential.ID)
-	if err != nil {
-		return err
-	}
 	wanted, err := s.audienceSize(ctx, campaign)
 	if err != nil {
 		return err
@@ -763,10 +756,31 @@ func (s *session) checkBudget(ctx context.Context, credential store.Credential, 
 	if limit > 0 && limit < wanted {
 		wanted = limit
 	}
-	if spent+wanted > credential.DailyBudget {
-		return fmt.Errorf(
-			"this credential's daily_budget is %d and %d of it is already reserved today; %d more would go over",
-			credential.DailyBudget, spent, wanted)
+	if wanted == 0 {
+		return nil
+	}
+	day := store.Day(time.Now())
+	if global := s.deps.Config.Limits.MaxSendsPerDay; global > 0 {
+		reserved, err := s.deps.Store.Reserved(ctx, day, "")
+		if err != nil {
+			return err
+		}
+		if reserved+wanted > global {
+			return fmt.Errorf(
+				"the day's send budget is spent: %d of MAX_SENDS_PER_DAY are already reserved, and this would take %d more",
+				reserved, wanted)
+		}
+	}
+	if credential.DailyBudget > 0 {
+		spent, err := s.deps.Store.Reserved(ctx, day, credential.ID)
+		if err != nil {
+			return err
+		}
+		if spent+wanted > credential.DailyBudget {
+			return fmt.Errorf(
+				"this credential's daily_budget is %d and %d of it is already reserved today; %d more would go over",
+				credential.DailyBudget, spent, wanted)
+		}
 	}
 	return nil
 }
