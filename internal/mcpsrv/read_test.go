@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/mailer"
 )
@@ -130,6 +131,36 @@ func TestCheckCampaignBlocksOnAnUnverifiedDomain(t *testing.T) {
 	out := call[CampaignCheck](t, session, "check_campaign", map[string]any{"campaign": "Issue 12"})
 	if out.Blocked == nil || out.Blocked.ID != "domain" || !out.Blocked.Blocking {
 		t.Fatalf("check_campaign = %+v", out)
+	}
+}
+
+// newsletter 的分页走的是同一个 page：库里的查询返回全部（newsletter 本来就不多），切片与
+// has_more 仍由那一处实现。这条测的是 offset 真的被用上了——写成 page(views(all)) 就会悄悄
+// 永远返回第一页。
+func TestPagingThroughNewsletters(t *testing.T) {
+	f := newFixture(t)
+	for _, slug := range []string{"one", "two", "three"} {
+		if err := f.store.CreateNewsletter(context.Background(), model.Newsletter{
+			ID: ids.New(), Slug: slug, Name: slug, FromEmail: "jane@example.net",
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := f.connect(t)
+
+	first := call[listNewslettersOut](t, session, "list_newsletters", map[string]any{"limit": 2})
+	if first.Count != 2 || !first.HasMore || first.NextOffset != 2 {
+		t.Fatalf("first page = %+v", first)
+	}
+	second := call[listNewslettersOut](t, session, "list_newsletters", map[string]any{
+		"limit": 2, "offset": 2,
+	})
+	if second.Count != 1 || second.HasMore {
+		t.Fatalf("second page = %+v", second)
+	}
+	if first.Items[0].ID == second.Items[0].ID {
+		t.Fatal("the second page repeated the first one's rows")
 	}
 }
 
