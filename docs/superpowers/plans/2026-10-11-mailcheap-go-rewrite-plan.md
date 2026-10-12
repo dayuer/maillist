@@ -2253,13 +2253,33 @@ func Suggestions(history, taken []time.Time, now time.Time) []Suggestion
 
 ---
 
+## 阶段 8：吞吐与 AWS 速率合规（方案 A：单机并发 + 配额自适应限速）
+
+依据设计 D16–D19 与第 19 节。开工前写 `docs/superpowers/plans/2026-10-12-mailcheap-phase-8.md`（步骤级）。**全程不接真实 AWS**：所有 SES 行为经 `fakeses` 与 `Fake` 验证，真实错误码与 `GetAccount` 字段映射标"未验证"。
+
+完成标志：Task 8.8 的压测全部通过——假 SES 设 80 ms 延迟、上报 `MaxSendRate=500`，2 万封在 `20000 / 450 × 1.2` 秒内发完、零重复、零失败；假 SES 实际只放行 300/s（上报值仍为 500）时，限速在 60 秒内收敛、所有消息最终恰好发送一次；日配额不足时整次拒绝。`make test lint`、`scripts/compose-smoke.sh` 全绿；C1/C2/F1 等既有不变量测试在 `SEND_CONCURRENCY=16` 下 `-race -count=10` 稳定。
+
+| Task | 文件 | 内容 | 必测用例 |
+|---|---|---|---|
+| 8.1 | `internal/core/ratectl/ratectl.go` | 纯逻辑限速控制器（零 I/O，时间显式传入）：`New(Config)`；`SetQuota(Quota, now)`；`OnThrottle(now)`；`OnSuccess(now)`；`Rate(now) float64`；`Remaining24h() int`。`Quota{MaxSendRate, Max24HourSend, SentLast24Hours float64; ReadAt time.Time}`；`Config{Headroom float64; Cap int; Floor int; IncreaseEvery time.Duration; IncreaseFactor float64}`。target = `min(MaxSendRate×Headroom, Cap)`（Cap=0 表示不设）；从未 SetQuota 时 Rate=Floor(1) | 未读配额时为 1/s；500×0.9=450；设 Cap=100 时为 100；一次 OnThrottle 减半、连续多次不低于 1；30 s 无限流回升 10% 且不超 target；SetQuota 降低 MaxSendRate 时立即生效；Remaining24h = Max24HourSend − SentLast24Hours 且不为负 |
+| 8.2 | `internal/mailer/bucket.go` | 令牌桶支持运行中调速：`SetRate(perSecond float64)`（并发安全），保持容量 1（不攒突发）；支持小数速率（<1/s） | 调速后一个周期内生效；32 goroutine 并发 Take + 反复 SetRate 在 `-race` 下无竞争；1 秒内取到的令牌数不超过速率 +1 |
+| 8.3 | `internal/mailer/quota.go`、`internal/fakessesrv/` | `QuotaReader` 接口；`SESQuota`（SESv2 `GetAccount`，5 s 超时）；`StaticQuota`（测试）；`QuotaPoller` 启动即读、之后每 60 s 读一次，失败沿用上次值并记日志，从未成功时告警一次。`fakessesrv` 实现 `GET /v2/email/account`，配额可经环境变量配置 | 轮询失败保留上次值；从未成功时速率为 1/s 且告警只发一次；用真实 `SESQuota` 客户端对 fakessesrv 钉住方法与路径（同阶段 5 对 list-identities 的做法） |
+| 8.4 | `internal/mailer/engine.go` | `SendBatch` 改为 `SEND_CONCURRENCY` 路 worker：派发者按顺序把已领取消息交给 worker，每个 worker 先 `bucket.Take` 再 `deliver` 再交结果；暂停/连续失败/ctx 取消时**停止派发**、等待在途完成、释放所有未派发者；连续失败计数改为原子并按完成顺序计；结果汇总加锁 | 既有 C1/C2/F1/暂停/释放测试全部在并发 16 下通过（`-race -count=10`）；在途请求完成后才返回；暂停后未派发的全部回 pending、已在途的不回 pending；并发 1 时行为与旧版逐条一致 |
+| 8.5 | `internal/core/rules/rules.go`、`internal/mailer/engine.go` | 错误分类细化：速率限流（`TooManyRequestsException`/`ThrottlingException`/`Throttling` 且 message 不含日配额字样）→ 新 `ErrorThrottle`：消息释放回 pending（SES 未接受）、调用 `ratectl.OnThrottle`；日配额用尽（`Throttling`/`LimitExceededException` 且 message 匹配 `/daily message quota|sending quota/i`）→ 新 `ErrorQuota`：暂停 campaign（原因"已达 SES 24 小时配额"）、告警、不计失败；其余沿用上游三分类 | 每种错误码 × message 的分类表驱动测试；限流的那封最终被重发且只被 SES 接受一次；日配额错误使 campaign 暂停且 failed 计数不变；真实 SES message 文本标"未验证"并注明出处 |
+| 8.6 | `internal/mailer/engine.go`（Queue）、`cmd/mailcheap/campaign.go`、`internal/mcpsrv` | 日配额预检（D18）：Queue 时可发上限 = `min(ratectl.Remaining24h, send_ledger 当日余量, 凭据余量)`，人数超出则整次拒绝，报文给出可发上限并建议 `--limit`；`check_campaign` / `campaign check` 输出当前速率、24 小时剩余配额与预计耗时（人数 ÷ 速率） | 剩余配额不足时 CLI、MCP、v1 API 三入口都拒绝且不建任何 message；`--limit` 不超剩余时放行；预计耗时计算正确 |
+| 8.7 | `internal/store/writer.go`、`internal/store/messages.go` | 发送结果批量回写：`MarkSent`/`MarkFailed`/计数更新经单写者合并成批（≤200 条或 ≤50 ms 一批，一个事务）；调用方仍等自己那条落库再返回（不改变 D14 语义） | 1000 次/秒持续回写 30 秒，写者积压 p99 < 1 s；进程在批中途被 kill，已返回成功的回写都在库里；批内一条失败不连累其他条 |
+| 8.8 | `internal/fakessesrv/`、`internal/mailer/throughput_test.go`、`scripts/compose-smoke.sh` | 假 SES 增加：可配置延迟（均值 + 抖动）、真实限流（超过 `FAKESES_ENFORCED_RATE` 返回 Throttling）、日配额（超过即返回日配额错误）、`GetAccount` 上报值可与实际放行值不同。压测三条见本阶段完成标志；compose 冒烟加一步：在带延迟的假 SES 下发 2000 封，断言全部 sent 且无重复 | 见完成标志；另测 `SEND_CONCURRENCY=1` 时吞吐 ≈ 1/延迟（证明并发确实是增益来源） |
+| 8.9 | `internal/config/config.go`、`cmd/mailcheap/quota.go`、`deploy/.env.example`、文档 | 新环境变量 `SEND_CONCURRENCY`（默认 16，1–256）、`SEND_RATE_HEADROOM`（默认 0.9，0.1–1.0）；`SEND_RATE_PER_SECOND` 改为可选上限（1–5000，不设 = 跟随 SES）；新命令 `mailcheap quota`（显示 SES 配额、当前速率、今日剩余）；`.env.example` 与 `docs/ses-smoke.md` 补"申请提额"说明与 `GetAccount` 所需 IAM 权限 `ses:GetAccount` | 配置边界值与回退；`quota --json` 输出字段；越界值回退默认并记日志 |
+
+**不做**：多机协调/工作节点（D19，仅保证接口可扩展）；真实 AWS 调用。
+
 ## 外部依赖清单
 
 | 何时 | 需要什么 | 用途 |
 |---|---|---|
 | 阶段 0 | GitHub 仓库 `dayuer/maillist` 的 Actions 权限 | 跑 CI |
 | 阶段 0 | 能访问 `github.com/marclou/mailcheap` | 拉上游参考（已核实可访问） |
-| 阶段 5 | AWS IAM 凭据，权限 `ses:SendEmail`、`ses:GetEmailIdentity` | 真实冒烟发信与 `domains` 命令 |
+| 阶段 5 | AWS IAM 凭据，权限 `ses:SendEmail`、`ses:GetEmailIdentity`（阶段 8 起另需 `ses:GetAccount`） | 真实冒烟发信与 `domains` 命令 |
 | 阶段 5 | SES 已验证的发信域名，DKIM 与 MAIL FROM 已配置 | 发信身份 |
 | 阶段 5 | SNS topic + SES configuration set，订阅到 `https://<域名>/api/webhooks/ses` | 事件回写 |
 | 阶段 5 | 一个指向部署机的域名 | caddy 签发 TLS |
