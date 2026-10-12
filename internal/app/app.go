@@ -8,16 +8,16 @@ import (
 	"log/slog"
 	"time"
 
-	"mailcheap/internal/alerts"
-	"mailcheap/internal/config"
-	"mailcheap/internal/core/ratectl"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/core/sns"
-	"mailcheap/internal/events"
-	"mailcheap/internal/httpsrv"
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/store"
+	"nibwire/internal/alerts"
+	"nibwire/internal/config"
+	"nibwire/internal/core/ratectl"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/core/sns"
+	"nibwire/internal/events"
+	"nibwire/internal/httpsrv"
+	"nibwire/internal/jobs"
+	"nibwire/internal/mailer"
+	"nibwire/internal/store"
 )
 
 // App is everything a command needs.
@@ -31,7 +31,7 @@ type App struct {
 	Mailer *mailer.Engine
 	HTTP   *httpsrv.Server
 	// Identities answers "which sending domains does SES consider verified?" — the pre-send check
-	// and `mailcheap domains` both read it.
+	// and `nibwire domains` both read it.
 	Identities mailer.IdentityReader
 	// Quota reads the account's sending limits, and Poller keeps the send rate in step with them
 	// (D17). The server runs the poller; a command reads once instead, see ReadQuota.
@@ -187,7 +187,7 @@ func newQuota(ctx context.Context, cfg config.Config) (mailer.QuotaReader, error
 }
 
 // newIdentities mirrors newSender: asking for the fake sender means there are no AWS credentials, so
-// the identity list comes from MAILCHEAP_FAKE_SES_DOMAINS and the end-to-end script can drive both
+// the identity list comes from NIBWIRE_FAKE_SES_DOMAINS and the end-to-end script can drive both
 // the verified and the unverified branch.
 func newIdentities(ctx context.Context, cfg config.Config) (mailer.IdentityReader, error) {
 	if cfg.FakeSESLog != "" {

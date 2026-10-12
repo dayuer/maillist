@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // Upstream SKIPPED_URL_PATTERN: tracking pixels and chrome, not the picture of the issue.

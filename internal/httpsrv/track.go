@@ -5,7 +5,7 @@ import (
 	"html"
 	"net/http"
 
-	"mailcheap/internal/core/sesmap"
+	"nibwire/internal/core/sesmap"
 )
 
 // pixelGIF is upstream's PIXEL: a 1×1 transparent GIF, byte for byte.

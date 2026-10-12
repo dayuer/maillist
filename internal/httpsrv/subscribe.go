@@ -5,9 +5,9 @@ import (
 	"net/url"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/validate"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/validate"
 )
 
 // subscribeLimits are upstream's PER_IP and PER_NEWSLETTER. The newsletter one only alerts: refusing

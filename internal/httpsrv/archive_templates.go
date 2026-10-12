@@ -5,7 +5,7 @@ import (
 	"html/template"
 	"net/http"
 
-	"mailcheap/internal/core/archive"
+	"nibwire/internal/core/archive"
 )
 
 // The archive's pages are Go templates with the stylesheet inline: there is no front-end build in this

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ratectl"
+	"nibwire/internal/core/ratectl"
 )
 
 // 账号的 24 小时额度用尽时，send_campaign 当场拒绝：不给 job_id，也不在审计里留一行「已发送」。

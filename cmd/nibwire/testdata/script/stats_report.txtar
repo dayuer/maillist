@@ -1,0 +1,68 @@
+# suppression 列表、stats（含 --tz）与 campaign report。
+#
+# The numbers are small and hand-checkable: two contacts, one issue, one test copy.
+
+nibwire init
+exists nibwire.db
+nibwire newsletter create --name 'Field notes' --slug field-notes --from-name 'Jane Doe' --from-email jane@example.net --postal-address '1 Main St, Paris' --archive-enabled
+stdout '^[0-9a-f]{24}\n$'
+
+nibwire contact add reader@gmail.com --newsletter field-notes
+nibwire contact add second@example.com --newsletter field-notes
+
+# suppression: an empty list, then one address added by hand and taken back off.
+nibwire suppression list
+stdout '0 suppressed'
+nibwire suppression add noisy@example.com --reason complaint --detail 'reported spam'
+stdout 'suppressed noisy@example.com \(complaint\)'
+nibwire suppression list
+stdout 'noisy@example.com	complaint	reported spam'
+nibwire suppression remove noisy@example.com
+stdout 'unsuppressed noisy@example.com'
+! nibwire suppression remove noisy@example.com
+stderr 'not on the suppression list'
+! nibwire suppression add not-an-address
+stderr 'is not an address'
+
+# --json 的失败也是 JSON：一个把 stdout 当 JSON 读的脚本，不该在错误时读到一段裸文本。
+# 退出码照旧是 1，只是 stderr 的形状跟上了输出形状。
+! nibwire suppression add not-an-address --json
+stderr '^\{"error":.*is not an address.*\}\n$'
+
+nibwire campaign create --newsletter field-notes --subject 'Issue 12' --file issue.md --preview-text 'This week'
+nibwire campaign send --subject 'Issue 12' --yes
+stdout 'queued 2 recipients'
+nibwire campaign test --subject 'Issue 12' --to checker@gmail.com
+stdout 'test sent'
+
+# report: two contacts, one issue, and the test copy is not in it.
+nibwire campaign report --subject 'Issue 12'
+stdout 'sent '
+stdout 'Gmail'
+stdout 'Other'
+! stdout 'checker@gmail.com'
+nibwire campaign report --subject 'Issue 12' --json
+stdout '"Provider": "gmail"'
+stdout '"Sent": 1'
+
+# stats: the same data as the table.
+nibwire stats --newsletter field-notes
+stdout 'Field notes \(field-notes\)'
+stdout 'UTC'
+stdout 'subscribers  2'
+stdout 'sent '
+nibwire stats --newsletter field-notes --json
+stdout '"Total": 2'
+stdout '"Sent": 2'
+
+# --tz moves the calendar, and an unknown zone falls back to UTC rather than failing.
+nibwire stats --newsletter field-notes --tz Asia/Nicosia --json
+stdout '"label": "GMT\+3"'
+nibwire stats --newsletter field-notes --tz Not/A_Zone --json
+stdout '"label": "UTC"'
+stdout '"name": "UTC"'
+
+-- issue.md --
+# Hello
+
+Read [this](https://example.com).

@@ -7,7 +7,7 @@
 	encode zstd gzip
 
 	# The archive's own hostnames go here, each as its own site, when the operator has them.
-	reverse_proxy mailcheap:8080 {
+	reverse_proxy nibwire:8080 {
 		# The tracking pixel and the uploads carry their own caching instructions from the app; the
 		# unsubscribe and click endpoints must never be cached by anything in between, because a
 		# cached /o/ is an open that never reaches the database.

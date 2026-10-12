@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 const (
@@ -18,7 +18,7 @@ const (
 	// DefaultSendConcurrency is how many sends are in flight at once. It is a starting point, not a
 	// number that is right for every account: what a deployment needs is the account's rate times how
 	// long one send takes, so an account allowed 450 a second against 80 ms of latency needs at least
-	// 36. `mailcheap quota` prints what the current pair comes to (docs/ses-smoke.md).
+	// 36. `nibwire quota` prints what the current pair comes to (docs/ses-smoke.md).
 	DefaultSendConcurrency = 16
 	// MaxSendConcurrency is where a typo stops being a typo: below this, more workers than there is
 	// memory for one send each is the only cost.
@@ -63,13 +63,13 @@ type Config struct {
 	// endpoint instead.
 	FakeSESLog string
 	// FakeSESDomains is the stand-in identity list used alongside FakeSESLog: the domains the
-	// pre-send check and `mailcheap domains` see. Production reads SES.
+	// pre-send check and `nibwire domains` see. Production reads SES.
 	FakeSESDomains []string
 	Limits         model.Limits
 }
 
 // LoadFile reads a KEY=VALUE file, which is how `--config` works: the file is the deployment's
-// settings and the environment still wins, so a one-off `MAX_SENDS_PER_DAY=10 mailcheap campaign
+// settings and the environment still wins, so a one-off `MAX_SENDS_PER_DAY=10 nibwire campaign
 // send` overrides it without editing it. Within the file, the last mention of a key wins.
 //
 // The format is the one every container stack already uses: one KEY=VALUE per line, blank lines and
@@ -139,20 +139,20 @@ func Load(env map[string]string) (Config, error) {
 	// deployment that was never finished. SENDING_ENABLED is false by default, so a fresh deployment
 	// still starts; it is only the half-configured one that is refused, and it is refused at startup.
 	if env["SENDING_ENABLED"] == "true" &&
-		env["SES_REGION"] == "" && env["SES_ENDPOINT"] == "" && env["MAILCHEAP_FAKE_SES_LOG"] == "" {
+		env["SES_REGION"] == "" && env["SES_ENDPOINT"] == "" && env["NIBWIRE_FAKE_SES_LOG"] == "" {
 		problems = append(problems, "SENDING_ENABLED=true, but there is no SES to send through: set "+
 			"SES_REGION (and SES_ACCESS_KEY_ID/SES_SECRET_ACCESS_KEY, or an instance role), or point "+
-			"SES_ENDPOINT at a local fake SES, or set MAILCHEAP_FAKE_SES_LOG to write sends to a file.")
+			"SES_ENDPOINT at a local fake SES, or set NIBWIRE_FAKE_SES_LOG to write sends to a file.")
 	}
 	if len(problems) > 0 {
-		return Config{}, errors.New("mailcheap can't start. " + strings.Join(problems, " "))
+		return Config{}, errors.New("nibwire can't start. " + strings.Join(problems, " "))
 	}
-	dataDir := or(env["MAILCHEAP_DATA_DIR"], "/data")
+	dataDir := or(env["NIBWIRE_DATA_DIR"], "/data")
 	return Config{
 		SessionSecret: env["SESSION_SECRET"],
 		AppURL:        strings.TrimSuffix(or(env["APP_URL"], "http://localhost:8080"), "/"),
 		DataDir:       dataDir,
-		DBPath:        or(env["MAILCHEAP_DB"], dataDir+"/mailcheap.db"),
+		DBPath:        or(env["NIBWIRE_DB"], dataDir+"/nibwire.db"),
 		SendingOn:     env["SENDING_ENABLED"] == "true",
 		SendApproval:  approval,
 		MCPHTTPAddr:   or(env["MCP_HTTP_ADDR"], "127.0.0.1:8081"),
@@ -168,8 +168,8 @@ func Load(env map[string]string) (Config, error) {
 		TrustedProxies:     splitList(env["TRUSTED_PROXIES"]),
 		AlertFrom:          env["ALERT_FROM"],
 		AdminEmail:         env["ADMIN_EMAIL"],
-		FakeSESLog:         env["MAILCHEAP_FAKE_SES_LOG"],
-		FakeSESDomains:     splitList(env["MAILCHEAP_FAKE_SES_DOMAINS"]),
+		FakeSESLog:         env["NIBWIRE_FAKE_SES_LOG"],
+		FakeSESDomains:     splitList(env["NIBWIRE_FAKE_SES_DOMAINS"]),
 		Limits: model.Limits{
 			BounceRate:    0.02,
 			ComplaintRate: 0.0008,

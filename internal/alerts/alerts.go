@@ -18,9 +18,9 @@ import (
 	"log/slog"
 	"time"
 
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/store"
 )
 
 // Sender is the mailer, seen from here: one message to one address. It is declared rather than
@@ -95,7 +95,7 @@ func (n *Notifier) Send(ctx context.Context, alert Alert) {
 		text += "\n" + n.AppURL + alert.Path
 	}
 	_, err = n.Sender.Send(ctx, rules.RecipientEmail{
-		From: n.From, To: n.To, Subject: "[Mailcheap] " + alert.Title,
+		From: n.From, To: n.To, Subject: "[Nibwire] " + alert.Title,
 		Text: text,
 		HTML: `<pre style="font:14px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap">` +
 			render.EscapeHTML(text) + `</pre>`,

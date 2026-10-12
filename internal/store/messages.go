@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // InsertChunkSize keeps a bulk insert short: one transaction per 1000 rows, never one big one

@@ -4,8 +4,8 @@ import (
 	"regexp"
 	"time"
 
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/core/validate"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/core/validate"
 )
 
 const pixelStyle = "display:block;width:1px;height:1px;border:0;"

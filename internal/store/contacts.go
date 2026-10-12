@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/cleanup"
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/importer"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/sesmap"
+	"nibwire/internal/core/cleanup"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/importer"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/sesmap"
 )
 
 // contactColumns is the SELECT list every contact query shares, in scanContact order.

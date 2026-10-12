@@ -9,8 +9,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 
-	"mailcheap/internal/alerts"
-	"mailcheap/internal/core/ratectl"
+	"nibwire/internal/alerts"
+	"nibwire/internal/core/ratectl"
 )
 
 // The sending quota follows the account (design §19, D17). It is read rather than configured, because
@@ -38,7 +38,7 @@ type QuotaReader interface {
 // SESQuota reads the sending quota from SES v2 GetAccount.
 type SESQuota struct {
 	client *sesv2.Client
-	// endpoint is recorded only so `mailcheap quota` can say where it asked.
+	// endpoint is recorded only so `nibwire quota` can say where it asked.
 	region string
 }
 

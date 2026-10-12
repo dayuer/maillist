@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
 )
 
 // 预留与建消息同事务：预算花不出去时一条消息也不写。

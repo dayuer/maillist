@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/slowinput"
+	"nibwire/internal/core/slowinput"
 )
 
 // Translated from tests/slow-inputs.test.mjs. That file sits under phase 3 in the plan as an HTTP

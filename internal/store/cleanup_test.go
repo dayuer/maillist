@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/cleanup"
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/cleanup"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
 )
 
 // cleanupFixture is one newsletter with the four contacts the cleanup distinguishes: one who is still

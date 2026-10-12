@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
 )
 
 // 恢复一个 paused campaign 用它已有的受众，不重新选人。

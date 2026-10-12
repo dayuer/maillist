@@ -32,7 +32,7 @@ func (s *Signer) OpenURL(baseURL, messageID string) string {
 	return baseURL + "/o/" + id + "." + s.trackingSig("open:"+id)
 }
 
-// ClickURL is the redirect through Mailcheap to target for one message.
+// ClickURL is the redirect through Nibwire to target for one message.
 func (s *Signer) ClickURL(baseURL, messageID, target string) string {
 	id := strings.ToLower(messageID)
 	return baseURL + "/c/" + id + "." + s.trackingSig("click:"+id+":"+target) + "." +

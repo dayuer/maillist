@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/store"
+	"nibwire/internal/store"
 )
 
 // claimedCount is how many messages are claimed right now; the graceful-shutdown invariant is that
@@ -218,7 +218,7 @@ func TestRecoverClaimedOnStartupNeverResends(t *testing.T) {
 
 // claimedCount 也要能在别的库里用：这里确认它读的就是 messages 表。
 func TestClaimedCountReadsTheMessagesTable(t *testing.T) {
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

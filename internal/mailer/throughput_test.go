@@ -20,13 +20,13 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/ratectl"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/fakessesrv"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/ratectl"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/fakessesrv"
+	"nibwire/internal/mailer"
+	"nibwire/internal/store"
 )
 
 // latency is what the phase's criteria are written against: a send that takes 80 ms.
@@ -41,10 +41,10 @@ const workers = 64
 // messagesFor picks the size of a test: the small one runs everywhere, the large one is what the phase
 // is actually for, and it is opt-in because twenty thousand sends take a minute.
 //
-//	MAILCHEAP_LONG_TESTS=1 go test -run Throughput ./internal/mailer/
+//	NIBWIRE_LONG_TESTS=1 go test -run Throughput ./internal/mailer/
 func messagesFor(t *testing.T, small, large int) int {
 	t.Helper()
-	if os.Getenv("MAILCHEAP_LONG_TESTS") != "" {
+	if os.Getenv("NIBWIRE_LONG_TESTS") != "" {
 		return large
 	}
 	return small

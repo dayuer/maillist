@@ -1,8 +1,8 @@
 package archive
 
 import (
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/slug"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/slug"
 )
 
 // Author is upstream getArchiveAuthor: one person writes each newsletter, so the author is the From

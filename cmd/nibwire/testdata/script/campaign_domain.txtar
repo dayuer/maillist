@@ -1,0 +1,38 @@
+# Task 4.0 done-criterion: the SES domain check blocks a send again.
+#
+# Phase 2 shipped a `blockingExceptDomain` special case because there was no way to ask SES whether
+# the sending domain was verified. Phase 4 wired ListEmailIdentities/GetEmailIdentity, so the check
+# blocks again — this script proves the refusal and that nothing went out.
+
+# The stand-in SES identity list: verified.example only.
+env NIBWIRE_FAKE_SES_DOMAINS=verified.example
+nibwire init
+exists nibwire.db
+
+# A newsletter whose From address is on the verified domain.
+nibwire newsletter create --name Verified --slug verified --from-name 'Jane Doe' --from-email jane@verified.example --postal-address '1 Main St, Paris'
+stdout '^[0-9a-f]{24}\n$'
+nibwire contact add reader@example.com --newsletter verified
+nibwire campaign create --newsletter verified --subject 'Issue 1' --file issue.md
+
+nibwire campaign send --subject 'Issue 1' --yes
+stdout 'queued 1 recipients'
+grep '"to":"reader@example.com"' sent.jsonl
+
+# A second newsletter whose From address is NOT verified: the send is refused and no mail leaves.
+nibwire newsletter create --name Unverified --slug unverified --from-name 'Jane Doe' --from-email jane@unverified.example --postal-address '1 Main St, Paris'
+nibwire contact add other@example.com --newsletter unverified
+nibwire campaign create --newsletter unverified --subject 'Issue 2' --file issue.md
+
+! nibwire campaign send --subject 'Issue 2' --yes
+stderr 'domain: Verify the sending domain in SES'
+! grep '"to":"other@example.com"' sent.jsonl
+
+# The campaign is still a draft: a refused send must not move it.
+nibwire campaign list --newsletter unverified
+stdout 'draft\tIssue 2'
+
+-- issue.md --
+# Hello
+
+Read [this](https://example.com).

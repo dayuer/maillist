@@ -4,9 +4,9 @@ import (
 	"regexp"
 	"strings"
 
-	"mailcheap/internal/core/content"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
+	"nibwire/internal/core/content"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
 )
 
 // Body is what an issue page shows, and how it has to be shown.

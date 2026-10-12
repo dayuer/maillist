@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/creds"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/creds"
+	"nibwire/internal/store"
 )
 
 // seedKey mints an api credential and returns its token.

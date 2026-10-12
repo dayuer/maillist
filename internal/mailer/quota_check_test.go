@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/ratectl"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/ratectl"
+	"nibwire/internal/store"
 )
 
 // 配额不够就整次拒绝：不建 message、不动 status，也不花掉这一天——否则一次被拒绝的发送会挡住下一次。

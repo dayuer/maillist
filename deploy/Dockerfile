@@ -10,25 +10,25 @@ COPY . .
 # reproducible output is worth having.
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -buildid= -X main.version=${VERSION}" \
-        -o /out/mailcheap ./cmd/mailcheap \
+        -o /out/nibwire ./cmd/nibwire \
  && mkdir -p /out/data
 
 # distroless: no shell, no package manager, one nonroot user. The binary is on PATH, so
-# `docker compose exec mailcheap mailcheap contact list` works.
+# `docker compose exec nibwire nibwire contact list` works.
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/mailcheap /usr/local/bin/mailcheap
+COPY --from=build /out/nibwire /usr/local/bin/nibwire
 # The licence travels with every copy of the binary: AGPL-3.0-only for this work (a commercial
 # licence is offered separately), and the MIT notice that the upstream port requires to be kept.
-COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/mailcheap/
+COPY --from=build /src/LICENSE /src/NOTICE /usr/share/doc/nibwire/
 # /data has to exist and belong to the user the process runs as. Docker creates a mount point that
 # does not exist in the image as root, and a fresh named volume copies the ownership of the
 # directory it mounts over — so without this the app cannot open its database: it runs as nonroot
 # and /data is root's.
 COPY --from=build --chown=nonroot:nonroot /out/data /data
-ENV MAILCHEAP_DATA_DIR=/data
+ENV NIBWIRE_DATA_DIR=/data
 VOLUME /data
 EXPOSE 8080
 # The CLI is the healthcheck: it is the same binary, and `health` is one query against the database.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["mailcheap", "health"]
-ENTRYPOINT ["mailcheap"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD ["nibwire", "health"]
+ENTRYPOINT ["nibwire"]
 CMD ["serve"]

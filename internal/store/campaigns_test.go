@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
 )
 
 // 新建草稿的 ArchiveListed 必须是 true：上游 schema 的默认值，Go 零值不是。

@@ -15,7 +15,7 @@ import (
 
 const (
 	certURL  = "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-9c6465fa7f48f5cacd23014631ec1136.pem"
-	topicARN = "arn:aws:sns:us-east-1:123456789012:mailcheap-ses-events"
+	topicARN = "arn:aws:sns:us-east-1:123456789012:nibwire-ses-events"
 )
 
 // Upstream's test generates an RSA pair and hands the verifier the exported public key, not a

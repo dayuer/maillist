@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // newsletterColumns is the SELECT list every newsletter query shares, in scanNewsletter order.

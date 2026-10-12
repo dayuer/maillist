@@ -12,10 +12,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/creds"
-	"mailcheap/internal/store"
-	"mailcheap/internal/uploads"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/creds"
+	"nibwire/internal/store"
+	"nibwire/internal/uploads"
 )
 
 // postMCP sends one initialize request, which is the smallest thing that gets past the transport's

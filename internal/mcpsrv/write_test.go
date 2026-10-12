@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/creds"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/creds"
+	"nibwire/internal/store"
 )
 
 // 一个 agent 用写 tool 建出来的东西，和 CLI 建出来的是同一批行——所以这里每一项都从库里读回来核对。

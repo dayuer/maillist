@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // Upstream has no test for this: lib/contact-import.js leans on Mongo's per-row upsert to apply a

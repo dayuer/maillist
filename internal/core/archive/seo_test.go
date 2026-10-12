@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // 夹具与上游 tests/archive-seo.test.mjs 的相同，好让断言能逐条对照。
@@ -24,7 +24,7 @@ var seoIssue = model.Campaign{
 	UpdatedAt:    time.Date(2026, 10, 5, 17, 0, 0, 0, time.UTC),
 }
 
-const seoApp = "https://mailcheap.test"
+const seoApp = "https://nibwire.test"
 
 func ptrTime(at time.Time) *time.Time { return &at }
 

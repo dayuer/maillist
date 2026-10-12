@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/validate"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/validate"
 )
 
 // EventType is an SES event kind, as eventType or notificationType gives it.
@@ -66,7 +66,7 @@ type Plan struct {
 	MessageID    string // from the "message_id" tag; "" when not ours
 	Email        string // normalized mail.destination[0]; "" when absent
 	OccurredAt   time.Time
-	// Kind comes from the Mailcheap-written "kind" tag; "" when the tag is absent or unknown.
+	// Kind comes from the Nibwire-written "kind" tag; "" when the tag is absent or unknown.
 	// Upstream instead loads it from the stored message.
 	Kind   model.MessageKind
 	Firsts []FirstWrite
@@ -115,7 +115,7 @@ func eventTypeOf(top map[string]json.RawMessage) EventType {
 	return ""
 }
 
-// TrackingPlan is the plan for an open or click on Mailcheap's own pixel and links.
+// TrackingPlan is the plan for an open or click on Nibwire's own pixel and links.
 func TrackingPlan(t EventType, at time.Time) Plan {
 	p := Plan{Type: t, OccurredAt: at}
 	applyEngagement(&p, t, at)

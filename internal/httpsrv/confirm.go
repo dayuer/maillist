@@ -3,8 +3,8 @@ package httpsrv
 import (
 	"net/http"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/sign"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/sign"
 )
 
 // handleConfirmPage shows the confirmation page. The URL carries the token, so the page is noindex

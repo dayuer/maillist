@@ -1,4 +1,4 @@
-// Package mcpsrv is Mailcheap's MCP surface: the tools an agent drives the newsletter with, over
+// Package mcpsrv is Nibwire's MCP surface: the tools an agent drives the newsletter with, over
 // stdio or Streamable HTTP.
 //
 // The third way in, after the CLI and the v1 API, and the one built for a caller that is not a
@@ -21,12 +21,12 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"mailcheap/internal/audit"
-	"mailcheap/internal/config"
-	"mailcheap/internal/creds"
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/mailer"
-	"mailcheap/internal/store"
+	"nibwire/internal/audit"
+	"nibwire/internal/config"
+	"nibwire/internal/creds"
+	"nibwire/internal/jobs"
+	"nibwire/internal/mailer"
+	"nibwire/internal/store"
 )
 
 // Deps is everything the tools need. It is not an app.App: a tool must not be able to reach the
@@ -65,8 +65,8 @@ func New(deps Deps) *Server {
 // nothing stale to trust.
 func (s *Server) For(hash string) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{
-		Name: "mailcheap", Version: orDev(s.deps.Version),
-		Title: "Mailcheap",
+		Name: "nibwire", Version: orDev(s.deps.Version),
+		Title: "Nibwire",
 	}, &mcp.ServerOptions{
 		Instructions: "Send newsletters through this deployment. Reads are paginated (at most " +
 			"100 rows per call); a send is queued and answers with a job id you can poll with " +

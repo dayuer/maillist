@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // 翻译 tests/last-chance.test.mjs 的内容部分：一封信只问一个问题，只有一个按钮。

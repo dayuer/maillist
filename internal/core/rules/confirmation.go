@@ -3,8 +3,8 @@ package rules
 import (
 	"strings"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
 )
 
 // confirmLink is the exact attribute upstream looks for to decide a confirmation email has its

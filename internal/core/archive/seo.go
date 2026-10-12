@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/slug"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/slug"
 )
 
 // The archive's metadata and structured data (upstream lib/archive-seo.js). Two differences from

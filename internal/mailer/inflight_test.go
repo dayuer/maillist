@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // 关停落在 SES 请求在途时，那一封不能回到 pending。

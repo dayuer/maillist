@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/mailer"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/mailer"
 )
 
 // 读 tool 的每一个都返回它该返回的形状，而不是一个空壳。

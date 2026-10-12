@@ -1,4 +1,4 @@
-// Package store is the SQLite implementation of Mailcheap's data layer. Writes go through a single
+// Package store is the SQLite implementation of Nibwire's data layer. Writes go through a single
 // goroutine (writer.go); reads use the connection pool.
 package store
 

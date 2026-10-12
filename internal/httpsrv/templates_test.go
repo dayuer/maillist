@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // 四个读者页面都渲染得出，都带上游的 CSP，且都不含 JavaScript。
