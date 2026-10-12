@@ -20,7 +20,7 @@ func TestAnInFlightSendIsNeverReleasedToPending(t *testing.T) {
 	f := newFixtureWith(t, 4, WithContextCancellation())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -75,7 +75,7 @@ func TestAnInFlightSendIsNeverReleasedToPending(t *testing.T) {
 func TestAnInterruptedSendBecomesUnknownNotPending(t *testing.T) {
 	f := newFixture(t, 2)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	// A crash after the claim and before the write-back is exactly a claimed row with no result.

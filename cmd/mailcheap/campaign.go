@@ -237,9 +237,9 @@ func runCampaignSend(cmd *cobra.Command, args []string) error {
 
 func queueCampaign(ctx context.Context, a *app.App, campaign model.Campaign, limit int) (mailer.QueueResult, error) {
 	if limit > 0 {
-		return a.Mailer.QueueStep(ctx, campaign.ID, limit)
+		return a.Mailer.QueueStep(ctx, campaign.ID, limit, mailer.Charge{})
 	}
-	return a.Mailer.Queue(ctx, campaign.ID)
+	return a.Mailer.Queue(ctx, campaign.ID, mailer.Charge{})
 }
 
 // The "domain" check asks SES whether the sending domain is verified. Phase 2 skipped it because

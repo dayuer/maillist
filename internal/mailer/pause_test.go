@@ -15,7 +15,7 @@ import (
 func TestPausingMidBatchReleasesTheRest(t *testing.T) {
 	f := newFixture(t, 6)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 

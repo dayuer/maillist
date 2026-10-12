@@ -17,7 +17,7 @@ import (
 func TestSettleWaitsForInFlightMessages(t *testing.T) {
 	f := newFixture(t, 3)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -73,7 +73,7 @@ func TestTestSendDoesNotTouchTheReport(t *testing.T) {
 func TestCampaignMessagesRecordTheirProvider(t *testing.T) {
 	f := newFixture(t, 2)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := f.db.Rows(ctx, "SELECT provider FROM messages WHERE campaign_id = ?", f.campaign.ID)
