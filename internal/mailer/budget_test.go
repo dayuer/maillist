@@ -20,7 +20,7 @@ func TestARepeatedQueueDoesNotChargeTheDayTwice(t *testing.T) {
 	ctx := context.Background()
 	day := store.Day(time.Now().UTC())
 
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	first, err := f.db.Reserved(ctx, day, "")
@@ -36,7 +36,7 @@ func TestARepeatedQueueDoesNotChargeTheDayTwice(t *testing.T) {
 		[]model.CampaignStatus{model.CampaignSending}, model.CampaignDraft); err != nil {
 		t.Fatal(err)
 	}
-	result, err := f.engine.Queue(ctx, f.campaign.ID)
+	result, err := f.engine.Queue(ctx, f.campaign.ID, Charge{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestQueueRefusesWhenTheDayHasNoRoom(t *testing.T) {
 		t.Fatalf("spending the day = %v %v", fits, err)
 	}
 
-	result, err := f.engine.Queue(ctx, f.campaign.ID)
+	result, err := f.engine.Queue(ctx, f.campaign.ID, Charge{})
 	if err != nil {
 		t.Fatal(err)
 	}

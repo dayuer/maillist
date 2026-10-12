@@ -124,7 +124,7 @@ func TestQueueThenSendDeliversToEveryone(t *testing.T) {
 	f := newFixture(t, 3)
 	ctx := context.Background()
 
-	queued, err := f.engine.Queue(ctx, f.campaign.ID)
+	queued, err := f.engine.Queue(ctx, f.campaign.ID, Charge{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestBucketStopsOnCancellation(t *testing.T) {
 func TestSendBatchPausesAboveTheBounceLimit(t *testing.T) {
 	f := newFixture(t, 10)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	// 100 sent and 3 bounced is over the 2% line; the counters come from the SES events in phase 3.
@@ -259,7 +259,7 @@ func TestSendBatchPausesAboveTheBounceLimit(t *testing.T) {
 func TestRecoverClaimedNeverResends(t *testing.T) {
 	f := newFixture(t, 4)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	// Send one batch that delivers a single message, then claim the rest without writing back —
@@ -271,7 +271,7 @@ func TestRecoverClaimedNeverResends(t *testing.T) {
 	if result.Sent != 4 {
 		t.Fatalf("first batch = %+v", result)
 	}
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err == nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err == nil {
 		t.Fatal("a sent campaign must not queue again")
 	}
 
@@ -344,7 +344,7 @@ func TestQueueStepUsesNextStepLimit(t *testing.T) {
 	if err := f.db.UpdateCampaign(ctx, staged); err != nil {
 		t.Fatal(err)
 	}
-	queued, err := f.engine.Queue(ctx, f.campaign.ID)
+	queued, err := f.engine.Queue(ctx, f.campaign.ID, Charge{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +356,7 @@ func TestQueueStepUsesNextStepLimit(t *testing.T) {
 	}
 
 	// The next step reaches five more: sentSoFar(4) + additional(5).
-	step, err := f.engine.QueueStep(ctx, f.campaign.ID, 5)
+	step, err := f.engine.QueueStep(ctx, f.campaign.ID, 5, Charge{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestQueueStepUsesNextStepLimit(t *testing.T) {
 	}
 
 	// A step wide enough to reach the last contact adds exactly that one.
-	step, err = f.engine.QueueStep(ctx, f.campaign.ID, 50)
+	step, err = f.engine.QueueStep(ctx, f.campaign.ID, 50, Charge{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestQueueStepUsesNextStepLimit(t *testing.T) {
 	}
 
 	// Now nothing is left to add.
-	step, err = f.engine.QueueStep(ctx, f.campaign.ID, 50)
+	step, err = f.engine.QueueStep(ctx, f.campaign.ID, 50, Charge{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestQueueStepUsesNextStepLimit(t *testing.T) {
 func TestSuppressedContactsAreSkipped(t *testing.T) {
 	f := newFixture(t, 3)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.db.AddSuppression(ctx, f.contacts[0].Email, model.SuppressBounce, "ses"); err != nil {
@@ -412,7 +412,7 @@ func TestSuppressedContactsAreSkipped(t *testing.T) {
 func TestPausedCampaignIsNotSent(t *testing.T) {
 	f := newFixture(t, 3)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.db.SetCampaignStatus(ctx, f.campaign.ID,
@@ -446,7 +446,7 @@ func TestPausedCampaignIsNotSent(t *testing.T) {
 func TestSESErrorsAreClassified(t *testing.T) {
 	f := newFixture(t, 2)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -483,7 +483,7 @@ func TestSESErrorsAreClassified(t *testing.T) {
 func TestConsecutiveFailuresPauseTheCampaign(t *testing.T) {
 	f := newFixture(t, 6)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, contact := range f.contacts {
@@ -547,7 +547,7 @@ func TestQueueRefusesAnIncompleteCampaign(t *testing.T) {
 	if err := f.db.UpdateCampaign(ctx, blank); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err == nil ||
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err == nil ||
 		!strings.Contains(err.Error(), "Add a subject") {
 		t.Fatalf("err = %v", err)
 	}
@@ -558,7 +558,7 @@ func TestQueueAndSendRefuseWhenSendingIsOff(t *testing.T) {
 	f := newFixture(t, 1)
 	ctx := context.Background()
 	f.engine.cfg.SendingOn = false
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err == nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err == nil {
 		t.Fatal("queue while off")
 	}
 	if _, err := f.engine.SendBatch(ctx, nil); err == nil {

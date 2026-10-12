@@ -19,6 +19,7 @@ import (
 	"mailcheap/internal/core/schedule"
 	"mailcheap/internal/core/stats"
 	"mailcheap/internal/jobs"
+	"mailcheap/internal/mailer"
 	"mailcheap/internal/store"
 )
 
@@ -433,7 +434,7 @@ func runCampaignResume(cmd *cobra.Command, args []string) error {
 		if campaign.Status != model.CampaignPaused {
 			return fmt.Errorf("campaign is %s, only a paused one can resume", campaign.Status)
 		}
-		result, err := a.Mailer.Queue(ctx, campaign.ID)
+		result, err := a.Mailer.Queue(ctx, campaign.ID, mailer.Charge{})
 		if err != nil {
 			return err
 		}

@@ -63,6 +63,20 @@ type TestResult struct {
 	SentAt       time.Time
 }
 
+// Charge says whose daily budget a step spends (design §11, layer 2). The zero value is the system
+// pool — the CLI's own sends, with only MAX_SENDS_PER_DAY above them — and a set CredentialID is an
+// `api` key or an `mcp` token, which carries a daily_budget of its own underneath the global one.
+//
+// The credential is read again when the step runs, not captured when it was queued: a job for a
+// scheduled send can sit for hours, and a budget that was lowered or a credential that was revoked
+// in the meantime has to apply to it.
+type Charge struct {
+	CredentialID string
+}
+
+// system is the charge with no credential behind it.
+func (c Charge) system() bool { return c.CredentialID == "" }
+
 // Engine sends queued messages through a Sender.
 type Engine struct {
 	store  *store.DB
@@ -539,7 +553,7 @@ func (e *Engine) Run(ctx context.Context) error {
 
 // Queue is upstream queueCampaign: check the campaign, choose the audience, reserve the day's
 // budget, create the messages, and move the campaign to sending.
-func (e *Engine) Queue(ctx context.Context, campaignID string) (QueueResult, error) {
+func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (QueueResult, error) {
 	if !e.cfg.SendingOn {
 		return QueueResult{}, errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
 	}
@@ -584,21 +598,24 @@ func (e *Engine) Queue(ctx context.Context, campaignID string) (QueueResult, err
 		// together — and in the same transaction as the first chunk of messages, so a crash cannot
 		// spend the day on mail that was never written.
 		day := store.Day(time.Now())
+		pool, credentialMax, err := e.resolveCharge(ctx, charge)
+		if err != nil {
+			return QueueResult{}, err
+		}
 		messages := toMessages(campaign, audience)
-		fits, inserted, err := e.store.ReserveAndInsert(ctx, day, "", len(messages),
-			e.cfg.Limits.MaxSendsPerDay, 0, messages)
+		fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
+			e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
 		if err != nil {
 			return QueueResult{}, err
 		}
 		if !fits {
-			return QueueResult{Reason: fmt.Sprintf(
-				"the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", len(messages))}, nil
+			return QueueResult{Reason: e.budgetReason(ctx, day, len(messages), e.cfg.Limits.MaxSendsPerDay, credentialMax)}, nil
 		}
 		if inserted < len(messages) {
 			written, err := e.store.InsertMessages(ctx, messages[inserted:])
 			if err != nil {
 				// The rest never got written, so the day must not stay charged for it.
-				e.refund(ctx, day, len(messages)-inserted-written)
+				e.refund(ctx, day, pool, len(messages)-inserted-written)
 				return QueueResult{}, err
 			}
 		}
@@ -632,7 +649,7 @@ func (e *Engine) Queue(ctx context.Context, campaignID string) (QueueResult, err
 // QueueStep is upstream sendToMoreContacts: a sent campaign goes to the next most engaged slice. It
 // takes the top of the audience again and the one-message-per-contact index skips whoever already
 // received it.
-func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional int) (QueueResult, error) {
+func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional int, charge Charge) (QueueResult, error) {
 	if !e.cfg.SendingOn {
 		return QueueResult{}, errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
 	}
@@ -675,19 +692,23 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 		return QueueResult{Reason: "Everyone has received it already"}, nil
 	}
 	day := store.Day(time.Now())
+	pool, credentialMax, err := e.resolveCharge(ctx, charge)
+	if err != nil {
+		return QueueResult{}, err
+	}
 	messages := toMessages(campaign, fresh)
-	fits, inserted, err := e.store.ReserveAndInsert(ctx, day, "", len(messages),
-		e.cfg.Limits.MaxSendsPerDay, 0, messages)
+	fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
+		e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
 	if err != nil {
 		return QueueResult{}, err
 	}
 	if !fits {
-		return QueueResult{Reason: "the daily send budget is spent"}, nil
+		return QueueResult{Reason: e.budgetReason(ctx, day, len(messages), e.cfg.Limits.MaxSendsPerDay, credentialMax)}, nil
 	}
 	if inserted < len(messages) {
 		written, err := e.store.InsertMessages(ctx, messages[inserted:])
 		if err != nil {
-			e.refund(ctx, day, len(messages)-inserted-written)
+			e.refund(ctx, day, pool, len(messages)-inserted-written)
 			return QueueResult{}, err
 		}
 	}
@@ -789,13 +810,55 @@ const sendTimeout = 30 * time.Second
 // refund gives a day's budget back for messages that were charged for and never written. It is
 // best-effort by design: the campaign is not queued either way, and the operator's next attempt
 // reports the budget it actually finds.
-func (e *Engine) refund(ctx context.Context, day string, n int) {
+func (e *Engine) refund(ctx context.Context, day, pool string, n int) {
 	if n <= 0 {
 		return
 	}
-	if err := e.store.Refund(ctx, day, "", n); err != nil {
+	if err := e.store.Refund(ctx, day, pool, n); err != nil {
 		e.log.Error("refund the day's budget", "day", day, "messages", n, "error", err)
 	}
+}
+
+// resolveCharge turns a charge into the pool a step reserves against and the ceiling that sits under
+// the global one: the credential's own daily_budget, or 0 when the charge is the system pool.
+//
+// A credential that is gone or revoked is an error rather than a silent fallback to the global pool.
+// This is the path a scheduled send takes hours after an agent queued it, and "the token that asked
+// for this was revoked" is exactly the case the operator revoked it for.
+func (e *Engine) resolveCharge(ctx context.Context, charge Charge) (pool string, credentialMax int, err error) {
+	if charge.system() {
+		return "", 0, nil
+	}
+	credential, err := e.store.Credential(ctx, charge.CredentialID)
+	if err != nil {
+		return "", 0, fmt.Errorf("this send was queued by a credential that no longer exists: %w", err)
+	}
+	if credential.Revoked() {
+		return "", 0, fmt.Errorf("this send was queued by credential %q, which has since been revoked",
+			credential.Name)
+	}
+	return credential.ID, credential.DailyBudget, nil
+}
+
+// budgetReason says which ceiling a step ran into.
+//
+// Both are checked before anything is written, and the global one first, so on the refusal path the
+// engine asks which of them the day has actually reached. "MAX_SENDS_PER_DAY" and "this credential's
+// daily_budget" are different answers to whoever reads the job's last_error, and guessing wrong
+// sends them looking at the wrong number.
+func (e *Engine) budgetReason(ctx context.Context, day string, messages, globalMax, credentialMax int) string {
+	if globalMax > 0 {
+		if reserved, err := e.store.Reserved(ctx, day, ""); err == nil && reserved+messages > globalMax {
+			return fmt.Sprintf(
+				"the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", messages)
+		}
+	}
+	if credentialMax > 0 {
+		return fmt.Sprintf(
+			"the daily send budget is spent: %d messages would go over this credential's daily_budget of %d",
+			messages, credentialMax)
+	}
+	return fmt.Sprintf("the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", messages)
 }
 
 // startEarly is lib/scheduling.js START_EARLY_MS: within a minute of the picked time, the scheduled
@@ -815,6 +878,10 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 			// does nothing when the campaign is no longer scheduled for it (lib/scheduling.js
 			// runScheduledSend), which is how unscheduling, rescheduling or an earlier step wins.
 			ScheduledAt string `json:"scheduledAt"`
+			// CredentialID is set by the MCP surface (design §11, layer 2): the step spends that
+			// credential's daily_budget as well as the day's global one. Empty is the CLI's own send,
+			// which has only MAX_SENDS_PER_DAY above it.
+			CredentialID string `json:"credentialId"`
 		}
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return fmt.Errorf("send_campaign payload: %w", err)
@@ -822,15 +889,16 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 		if payload.CampaignID == "" {
 			return errors.New("send_campaign job has no campaignId")
 		}
+		charge := Charge{CredentialID: payload.CredentialID}
 		if payload.Additional > 0 {
-			_, err := e.QueueStep(ctx, payload.CampaignID, payload.Additional)
-			return err
+			result, err := e.QueueStep(ctx, payload.CampaignID, payload.Additional, charge)
+			return nothingToSend(result, err)
 		}
 		if skip, err := e.scheduledSendIsStale(ctx, payload.CampaignID, payload.ScheduledAt); err != nil || skip {
 			return err
 		}
-		_, err := e.Queue(ctx, payload.CampaignID)
-		return err
+		result, err := e.Queue(ctx, payload.CampaignID, charge)
+		return nothingToSend(result, err)
 	case jobs.KindSendWelcome:
 		var payload struct {
 			NewsletterID string `json:"newsletterId"`
@@ -852,6 +920,20 @@ func (e *Engine) RunJob(ctx context.Context, job jobs.Job) error {
 	default:
 		return fmt.Errorf("unknown job kind %q", job.Kind)
 	}
+}
+
+// nothingToSend turns a refusal that is not an error into one, so the job fails with the reason
+// rather than completing having sent nothing.
+//
+// A job that finishes without sending looks exactly like a send that worked — the campaign's own
+// status is the only other evidence — and "the daily send budget is spent" is the answer whoever
+// queued it needs. The job retries on its backoff and then goes dead with the reason in its
+// last_error, which is where `jobs list` and the MCP get_job tool read it.
+func nothingToSend(result QueueResult, err error) error {
+	if err != nil || result.Queued || result.Reason == "" {
+		return err
+	}
+	return errors.New(result.Reason)
 }
 
 // scheduledSendIsStale reports whether a scheduled send's wake-up has been overtaken by events: the

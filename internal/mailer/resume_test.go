@@ -18,7 +18,7 @@ import (
 func TestResumingAPausedCampaignKeepsTheAudienceItHad(t *testing.T) {
 	f := newFixture(t, 4)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	recipients, _, err := f.db.CountCampaignMessages(ctx, f.campaign.ID)
@@ -51,7 +51,7 @@ func TestResumingAPausedCampaignKeepsTheAudienceItHad(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := f.engine.Queue(ctx, f.campaign.ID)
+	result, err := f.engine.Queue(ctx, f.campaign.ID, Charge{})
 	if err != nil {
 		t.Fatal(err)
 	}

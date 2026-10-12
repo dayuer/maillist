@@ -31,7 +31,7 @@ func claimedCount(t *testing.T, db *store.DB) (claimed, unknown, pending int) {
 // ticker case. Returning an error there means a graceful stop is reported as a broken send.
 func TestSendBatchOnACancelledContextStopsCleanly(t *testing.T) {
 	f := newFixture(t, 4)
-	if _, err := f.engine.Queue(context.Background(), f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(context.Background(), f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -59,7 +59,7 @@ func TestGracefulShutdownRepeatedly(t *testing.T) {
 	for round := 0; round < 15; round++ {
 		f := newFixture(t, 10)
 		ctx, cancel := context.WithCancel(context.Background())
-		if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+		if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 			t.Fatal(err)
 		}
 		done := make(chan error, 1)
@@ -89,7 +89,7 @@ func TestGracefulShutdownRepeatedly(t *testing.T) {
 func TestCancelledBatchReleasesClaimedMessages(t *testing.T) {
 	f := newFixture(t, 20)
 	ctx, cancel := context.WithCancel(context.Background())
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -121,7 +121,7 @@ func TestCancelledBatchReleasesClaimedMessages(t *testing.T) {
 func TestGracefulShutdownLeavesNothingClaimed(t *testing.T) {
 	f := newFixture(t, 10)
 	ctx, cancel := context.WithCancel(context.Background())
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	// The engine runs in the background and is cancelled mid-flight.
@@ -167,7 +167,7 @@ func TestGracefulShutdownLeavesNothingClaimed(t *testing.T) {
 func TestRecoverClaimedOnStartupNeverResends(t *testing.T) {
 	f := newFixture(t, 6)
 	ctx := context.Background()
-	if _, err := f.engine.Queue(ctx, f.campaign.ID); err != nil {
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
 		t.Fatal(err)
 	}
 	// Claim three without writing anything back, as a crash would leave them.
