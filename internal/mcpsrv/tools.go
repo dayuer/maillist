@@ -89,6 +89,10 @@ var tools = []*tool{
 		about: "Import contacts the caller already has, up to 1000 rows per call. A status only ever " +
 			"moves stricter: an import cannot resurrect somebody who unsubscribed.",
 		add: func(sf *surface, t *tool) { addTool(sf, t, importContacts) }},
+	{name: "run_cleanup", scope: creds.ScopeWrite,
+		about: "Report what the list cleanup would do, and with dry_run false move the contacts who " +
+			"were warned 14 days ago or more to dormant. Nobody is ever unsubscribed or deleted.",
+		add: func(sf *surface, t *tool) { addTool(sf, t, runCleanup) }},
 	{name: "add_suppression", scope: creds.ScopeWrite,
 		about: "Stop every newsletter from sending to one address.",
 		add:   func(sf *surface, t *tool) { addTool(sf, t, addSuppression) }},

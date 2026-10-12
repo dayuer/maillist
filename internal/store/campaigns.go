@@ -378,3 +378,9 @@ func (db *DB) AddWebViews(ctx context.Context, campaignID string, n int) error {
 		return err
 	})
 }
+
+// CampaignMessageKinds is what kind of message this campaign wrote for each contact, by contact id.
+// It is ReachedContacts under a name that says what the list cleanup asks it.
+func (db *DB) CampaignMessageKinds(ctx context.Context, campaignID string) (map[string]model.MessageKind, error) {
+	return db.ReachedContacts(ctx, campaignID)
+}

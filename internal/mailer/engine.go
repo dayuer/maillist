@@ -10,6 +10,7 @@ import (
 
 	"github.com/aws/smithy-go"
 
+	"mailcheap/internal/core/cleanup"
 	"mailcheap/internal/core/ids"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/providers"
@@ -423,8 +424,13 @@ func (e *Engine) contentFor(message model.Message, loaded store.MessageContext,
 			PreviewText: confirmation.PreviewText, Body: confirmation.Markdown,
 		}, nil
 	case model.KindLastChance:
-		// The last-chance email belongs to the list cleanup, which arrives in phase 7.
-		return model.Campaign{}, errors.New("last-chance emails are not implemented yet")
+		// The last-chance email is the list cleanup's: one question and one button, for a contact who
+		// has ignored the last few issues (core/cleanup).
+		content := cleanup.LastChanceContent(loaded.Newsletter)
+		return model.Campaign{
+			Format: model.FormatMarkdown, Subject: content.Subject,
+			PreviewText: content.PreviewText, Body: content.Markdown,
+		}, nil
 	default:
 		if loaded.Campaign == nil {
 			return model.Campaign{}, fmt.Errorf("message %s has no campaign", message.ID)
@@ -590,23 +596,41 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 			return QueueResult{Reason: "No active contacts to send to"}, nil
 		}
 	} else {
-		audience, err := e.store.SelectAudience(ctx, campaign.NewsletterID, campaign.AudienceLimit)
+		// With the list cleanup on, the audience limit counts issue recipients only and is applied
+		// while the audience is walked (core/cleanup.SplitAudience), so the query must return the
+		// whole list and let the walk stop where the limit is.
+		selectLimit := campaign.AudienceLimit
+		if cleanup.SettingsOf(newsletter).Enabled {
+			selectLimit = 0
+		}
+		audience, err := e.store.SelectAudience(ctx, campaign.NewsletterID, selectLimit)
 		if err != nil {
 			return QueueResult{}, err
 		}
 		if len(audience) == 0 {
 			return QueueResult{Reason: "No active contacts to send to"}, nil
 		}
+		previous, err := e.store.ReachedContacts(ctx, campaign.ID)
+		if err != nil {
+			return QueueResult{}, err
+		}
+		messages, err := e.stepMessages(ctx, campaign, newsletter, audience, previous)
+		if err != nil {
+			return QueueResult{}, err
+		}
 
 		// D15: the whole step is reserved up front, so two campaigns cannot overshoot the day
 		// together — and in the same transaction as the first chunk of messages, so a crash cannot
-		// spend the day on mail that was never written.
+		// spend the day on mail that was never written. A last-chance email is one of those sends: it
+		// costs the same quota, so it is reserved the same way.
 		day := store.Day(time.Now())
 		pool, credentialMax, err := e.resolveCharge(ctx, charge)
 		if err != nil {
 			return QueueResult{}, err
 		}
-		messages := toMessages(campaign, audience)
+		if len(messages) == 0 {
+			return QueueResult{Reason: "No active contacts to send to"}, nil
+		}
 		fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
 			e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
 		if err != nil {
@@ -648,6 +672,53 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		return QueueResult{}, err
 	}
 	return QueueResult{Recipients: recipients, LastChance: lastChance, Queued: true}, nil
+}
+
+// stepMessages is one step's messages: the issue for most of the audience, the last-chance email for
+// the contacts the list cleanup calls cold, and nothing for the ones who are waiting on that email or
+// have already gone dormant.
+//
+// previous is what this campaign already sent each contact, which is what stops a resume or a later
+// step from writing the same message twice. The contacts the split puts to sleep are marked dormant
+// here, and counted so the campaign's report says how many left the list quietly.
+func (e *Engine) stepMessages(ctx context.Context, campaign model.Campaign, newsletter model.Newsletter,
+	audience []model.Contact, previous map[string]model.MessageKind) ([]model.Message, error) {
+	settings := cleanup.SettingsOf(newsletter)
+	if !settings.Enabled {
+		return toMessages(campaign, audience), nil
+	}
+	split := cleanup.SplitAudience(audience, cleanup.SplitInput{
+		Settings: settings, Limit: campaign.AudienceLimit, Previous: previous, Now: time.Now().UTC(),
+	})
+	if len(split.Dormant) > 0 {
+		dormant := make([]string, 0, len(split.Dormant))
+		for _, contact := range split.Dormant {
+			dormant = append(dormant, contact.ID)
+		}
+		// A sign of life since the list was read leaves the contact alone, so the number that moved is
+		// the one that counts — upstream reads modifiedCount for the same reason.
+		moved, err := e.store.MakeDormant(ctx, dormant)
+		if err != nil {
+			return nil, err
+		}
+		if moved > 0 {
+			if err := e.store.AddLastChanceStats(ctx, campaign.ID,
+				store.LastChanceCounters{Dormant: moved}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	messages := toMessages(campaign, split.Issue)
+	for _, contact := range split.LastChance {
+		messages = append(messages, model.Message{
+			ID: ids.New(), Kind: model.KindLastChance,
+			CampaignID: campaign.ID, NewsletterID: campaign.NewsletterID,
+			ContactID: contact.ID, Email: contact.Email,
+			Provider: providers.Mailbox(contact.Email),
+			Status:   model.MessagePending, CreatedAt: time.Now().UTC(),
+		})
+	}
+	return messages, nil
 }
 
 // QueueStep is upstream sendToMoreContacts: a sent campaign goes to the next most engaged slice. It
@@ -700,7 +771,12 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 	if err != nil {
 		return QueueResult{}, err
 	}
-	messages := toMessages(campaign, fresh)
+	// The fresh ones are the ones this step has not reached, so there is no "already got it" to
+	// consult: the split judges each of them on their own.
+	messages, err := e.stepMessages(ctx, campaign, newsletter, fresh, nil)
+	if err != nil {
+		return QueueResult{}, err
+	}
 	fits, inserted, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
 		e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
 	if err != nil {
