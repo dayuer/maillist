@@ -2,16 +2,137 @@ package fakessesrv
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/smithy-go"
 
 	"mailcheap/internal/core/rules"
 	"mailcheap/internal/mailer"
 )
+
+// postSend makes one send request the way the real client does, and answers with the status and the
+// decoded body. Straight HTTP on purpose: these three tests are about what the fake does with a
+// request, not about what the SDK sends.
+func postSend(t *testing.T, url, to string) (int, map[string]string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"FromEmailAddress":"jane@example.net","Destination":{"ToAddresses":[%q]},`+
+		`"Content":{"Simple":{"Subject":{"Data":"x"},"Body":{"Html":{"Data":"<p>x</p>"},`+
+		`"Text":{"Data":"x"}}}}}`, to)
+	response, err := http.Post(url+"/v2/email/outbound-emails", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	decoded := map[string]string{}
+	_ = json.NewDecoder(response.Body).Decode(&decoded)
+	return response.StatusCode, decoded
+}
+
+// 假 SES 的放行速率与它上报的数字是两件事——真实账号也是如此，而这个差值正是退避要找到的东西。
+//
+// The three refusals are classified the way the engine classifies them: the code says "too fast" and
+// the message says it is not the day's allowance, which is the pair the app reads.
+func TestTheFakeEnforcesARateItDoesNotReport(t *testing.T) {
+	fake := New(nil, WithQuota(Quota{MaxSendRate: 500, Max24HourSend: -1}), WithEnforcedRate(2))
+	server := httptest.NewServer(fake.Handler())
+	defer server.Close()
+
+	accepted, refused := 0, 0
+	for i := 0; i < 5; i++ {
+		status, body := postSend(t, server.URL, fmt.Sprintf("reader%d@example.com", i))
+		switch status {
+		case http.StatusOK:
+			accepted++
+		case http.StatusTooManyRequests:
+			refused++
+			if action := rules.SendErrorAction(body["__type"], body["message"]); action != rules.ErrorThrottle {
+				t.Errorf("a refusal classified as %q: %v", action, body)
+			}
+		default:
+			t.Fatalf("status = %d: %v", status, body)
+		}
+	}
+	// The bucket holds one second's worth, so the first two go through and the rest wait for it.
+	if accepted != 2 || refused != 3 {
+		t.Fatalf("accepted = %d, refused = %d, want 2 and 3", accepted, refused)
+	}
+	if limits := fake.Limits(); limits.Accepted != 2 || limits.Throttled != 3 {
+		t.Fatalf("limits = %+v", limits)
+	}
+	// What the account says is still what it said: the reporting is not the enforcing.
+	reader, err := mailer.NewSESQuota(context.Background(), mailer.SESOptions{
+		Region: "eu-west-1", Endpoint: server.URL, AccessKeyID: "test", SecretKey: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quota, err := reader.Quota(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quota.MaxSendRate != 500 {
+		t.Fatalf("the account reports %v while enforcing 2", quota.MaxSendRate)
+	}
+}
+
+// 24 小时额度用尽与限流用同一个错误码，靠 message 区分——分类器必须把这条认成 ErrorQuota。
+func TestTheFakeRunsOutOfTheDaysAllowance(t *testing.T) {
+	fake := New(nil, WithQuota(Quota{MaxSendRate: 500, Max24HourSend: 2}), WithDailyQuota(2))
+	server := httptest.NewServer(fake.Handler())
+	defer server.Close()
+
+	for i := 0; i < 2; i++ {
+		if status, body := postSend(t, server.URL, fmt.Sprintf("reader%d@example.com", i)); status != http.StatusOK {
+			t.Fatalf("send %d: %d %v", i, status, body)
+		}
+	}
+	status, body := postSend(t, server.URL, "reader2@example.com")
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("the third send answered %d, want a refusal", status)
+	}
+	if action := rules.SendErrorAction(body["__type"], body["message"]); action != rules.ErrorQuota {
+		t.Fatalf("a spent allowance classified as %q: %v", action, body)
+	}
+}
+
+// 延迟在锁外：假 SES 要是抱着互斥量睡觉，它就把并发发送串行化了，压测量的会是假 SES 而不是引擎。
+func TestTheFakeAnswersSlowlyWithoutSerializingSends(t *testing.T) {
+	fake := New(nil, WithLatency(50*time.Millisecond, 0))
+	server := httptest.NewServer(fake.Handler())
+	defer server.Close()
+
+	start := time.Now()
+	if status, body := postSend(t, server.URL, "reader@example.com"); status != http.StatusOK {
+		t.Fatalf("send = %d %v", status, body)
+	}
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Fatalf("a send of 50 ms latency answered in %s", elapsed)
+	}
+
+	// Eight at once: serialized this would be 400 ms, so anything under 200 ms says they overlapped.
+	var wg sync.WaitGroup
+	start = time.Now()
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			postSend(t, server.URL, fmt.Sprintf("reader%d@example.com", i))
+		}(i)
+	}
+	wg.Wait()
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("eight concurrent sends of 50 ms took %s: the fake is holding its lock while it sleeps",
+			elapsed)
+	}
+}
 
 // 真 SES 客户端打到假 SES 上：请求体是这里验证的，不是 Sender 接口后面的假记录。
 //

@@ -8,8 +8,10 @@
 package fakessesrv
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -46,6 +48,30 @@ type Server struct {
 	// the app has to discover, not a promise.
 	quota    Quota
 	hasQuota bool
+
+	// latency is how long a send takes, and jitter is how much it varies either side. A fake that
+	// answered instantly would make concurrency look free.
+	latency time.Duration
+	jitter  time.Duration
+	// enforcedRate is what the fake actually lets through, in sends per second, whatever GetAccount
+	// says. 0 is no limit: the fake takes everything.
+	enforcedRate float64
+	// dailyQuota is how many sends the fake accepts before answering the way SES does when the
+	// 24-hour allowance is gone. 0 is no limit.
+	dailyQuota int
+	// accepted and throttled are what the fake did, as opposed to what it said.
+	accepted  int
+	throttled int
+	// tokens is the enforced rate's bucket, and tokenAt is when it was last filled.
+	tokens  float64
+	tokenAt time.Time
+}
+
+// Limits is what the fake actually did, which is what a test asserting on an account that reports one
+// number and enforces another needs.
+type Limits struct {
+	Accepted  int `json:"accepted"`
+	Throttled int `json:"throttled"`
 }
 
 // Quota is the sending quota GetAccount reports.
@@ -62,6 +88,32 @@ func WithQuota(quota Quota) Option {
 
 // Option configures the fake.
 type Option func(*Server)
+
+// WithLatency makes every send wait this long, give or take the jitter, before it is answered.
+//
+// It is what makes concurrency a question rather than a decoration: a send that takes 80 ms and a
+// worker pool of sixteen can do two hundred a second, so a deployment told it may send four hundred
+// and fifty has to be able to have more than that in flight.
+func WithLatency(mean, jitter time.Duration) Option {
+	return func(s *Server) { s.latency, s.jitter = mean, jitter }
+}
+
+// WithEnforcedRate makes the fake refuse more than this many sends a second, whatever GetAccount
+// reports.
+//
+// This is the case the backoff exists for: a real account reports a ceiling and enforces whatever it
+// actually enforces, and the only way to find the second number is to be refused. The bucket holds one
+// second's worth, so a burst is allowed and the rate is not.
+func WithEnforcedRate(perSecond float64) Option {
+	return func(s *Server) { s.enforcedRate = perSecond }
+}
+
+// WithDailyQuota makes the fake accept this many sends and then answer the way SES does when the
+// account's 24-hour allowance is gone — the same code as a rate problem, with the message that tells
+// the two apart (rules.SendErrorAction).
+func WithDailyQuota(max int) Option {
+	return func(s *Server) { s.dailyQuota = max }
+}
 
 // WithVerifiedDomains makes ListEmailIdentities and GetEmailIdentity report these domains as
 // verified. Without it the identity routes answer with an empty list, and a send refuses for the
@@ -98,6 +150,7 @@ func (s *Server) Handler() http.Handler {
 	// for the same reason as the identity routes.
 	mux.HandleFunc("/v2/email/account", s.account)
 	mux.HandleFunc("POST /_quota", s.setQuota)
+	mux.HandleFunc("GET /_limits", s.limitsRoute)
 	mux.HandleFunc("POST /_fail", s.fail)
 	mux.HandleFunc("POST /_reset", s.reset)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -182,8 +235,17 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		Headers: headers,
 	}
 
+	s.wait(r.Context())
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// What the account says and what it does are two different numbers, and only the second one is
+	// worth anything to the caller: these are checked here, and GetAccount goes on reporting whatever
+	// the fake was configured to report.
+	if code, message, refused := s.refuseLocked(time.Now().UTC()); refused {
+		writeError(w, http.StatusTooManyRequests, code, message)
+		return
+	}
 	// The request is recorded as arriving even when it is told to fail: an injected failure is about
 	// what SES answers, not about whether the request was made.
 	messageID, err := s.fake.Send(r.Context(), email, tags)
@@ -200,7 +262,65 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		MessageID: messageID, From: email.From, To: email.To, Subject: email.Subject,
 		HTML: email.HTML, Text: email.Text, Tags: tags, Headers: headers, At: time.Now().UTC(),
 	})
+	s.accepted++
 	writeJSON(w, http.StatusOK, map[string]any{"MessageId": messageID})
+}
+
+// wait is the latency, outside every lock. A fake that slept holding its mutex would serialize the
+// sends it is supposed to be receiving at once, and a throughput test would end up measuring the fake.
+func (s *Server) wait(ctx context.Context) {
+	s.mu.Lock()
+	latency, jitter := s.latency, s.jitter
+	s.mu.Unlock()
+	if jitter > 0 {
+		latency += time.Duration(rand.Int63n(int64(2*jitter+1))) - jitter //nolint:gosec // G404: a test's jitter
+	}
+	if latency <= 0 {
+		return
+	}
+	timer := time.NewTimer(latency)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+}
+
+// refuseLocked is the account's real limits. The caller holds the lock.
+func (s *Server) refuseLocked(now time.Time) (code, message string, refused bool) {
+	if s.dailyQuota > 0 && s.accepted >= s.dailyQuota {
+		s.throttled++
+		return "Throttling", "Daily message quota exceeded", true
+	}
+	if s.enforcedRate <= 0 {
+		return "", "", false
+	}
+	if s.tokenAt.IsZero() {
+		s.tokens, s.tokenAt = s.enforcedRate, now
+	}
+	s.tokens += now.Sub(s.tokenAt).Seconds() * s.enforcedRate
+	if s.tokens > s.enforcedRate {
+		s.tokens = s.enforcedRate
+	}
+	s.tokenAt = now
+	if s.tokens < 1 {
+		s.throttled++
+		return "Throttling", "Maximum sending rate exceeded", true
+	}
+	s.tokens--
+	return "", "", false
+}
+
+// Limits is what the fake actually did: accepted sends, and the ones it refused for being too fast or
+// for the day's allowance being gone.
+func (s *Server) Limits() Limits {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Limits{Accepted: s.accepted, Throttled: s.throttled}
+}
+
+func (s *Server) limitsRoute(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.Limits())
 }
 
 // listIdentities is ListEmailIdentities. It is the first thing the pre-send domain check asks.
@@ -276,6 +396,8 @@ func (s *Server) reset(w http.ResponseWriter, _ *http.Request) {
 	defer s.mu.Unlock()
 	s.fake.ClearFailures()
 	s.items = nil
+	s.accepted, s.throttled = 0, 0
+	s.tokens, s.tokenAt = 0, time.Time{}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
 }
 
