@@ -7,9 +7,16 @@
 //
 // It is pure logic: time is passed in, nothing here reads a clock or a socket. What enforces the
 // rate is mailer.Bucket; what reads the quota is mailer.QuotaPoller.
+//
+// Pure is not the same as single-threaded: the quota poller writes the reading from its own
+// goroutine while the send workers report throttles and successes and read the rate, so the state
+// below is guarded. The values are a handful of floats; the lock is not where the time goes.
 package ratectl
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // Quota is what SES says this account may do, as of ReadAt.
 type Quota struct {
@@ -40,8 +47,9 @@ type Config struct {
 	IncreaseFactor float64
 }
 
-// controller is the state: the current rate, the target it is aiming at, and when it last moved.
+// Controller is the state: the current rate, the target it is aiming at, and when it last moved.
 type Controller struct {
+	mu  sync.Mutex
 	cfg Config
 
 	target float64
@@ -82,6 +90,8 @@ func New(cfg Config) *Controller {
 // backed off, it creeps back up on its own, which is what keeps a burst from slamming into the limit
 // again.
 func (c *Controller) SetQuota(q Quota, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.quota, c.known = q, true
 	c.target = q.MaxSendRate * c.cfg.Headroom
 	if c.cfg.Cap > 0 && float64(c.cfg.Cap) < c.target {
@@ -101,6 +111,8 @@ func (c *Controller) SetQuota(q Quota, now time.Time) {
 
 // OnThrottle is SES saying "too fast": the rate halves, down to the floor.
 func (c *Controller) OnThrottle(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.backedOff = true
 	c.rate = c.rate / 2
 	if c.rate < float64(c.cfg.Floor) {
@@ -117,6 +129,8 @@ func (c *Controller) OnThrottle(now time.Time) {
 // The clock is what drives the creep, not the count of successes — a deployment that has stopped
 // sending has learned nothing about the account's limit.
 func (c *Controller) OnSuccess(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.backedOff {
 		return
 	}
@@ -141,7 +155,11 @@ func (c *Controller) OnSuccess(now time.Time) {
 }
 
 // Rate is the current ceiling, in sends per second.
-func (c *Controller) Rate(time.Time) float64 { return c.rate }
+func (c *Controller) Rate(time.Time) float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rate
+}
 
 // Unlimited is what Remaining24h answers for an account SES says has no 24-hour limit: the SDK's
 // documentation gives -1 that meaning, and an account like that has no ceiling to respect. Big enough
@@ -151,6 +169,8 @@ const Unlimited = 1 << 40
 // Remaining24h is how many sends the account has left in its 24-hour window. It is 0 before any quota
 // is known: an unknown allowance is not an invitation to spend it.
 func (c *Controller) Remaining24h() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.known {
 		return 0
 	}
@@ -167,4 +187,8 @@ func (c *Controller) Remaining24h() int {
 }
 
 // Quota is the last reading, and whether there has been one.
-func (c *Controller) Quota() (Quota, bool) { return c.quota, c.known }
+func (c *Controller) Quota() (Quota, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.quota, c.known
+}
