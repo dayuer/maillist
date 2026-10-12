@@ -81,6 +81,44 @@ func TestTheConcurrencyAndHeadroomSettings(t *testing.T) {
 	}
 }
 
+// SES_TENANT_NAME 按 SES 的 CreateTenant 规则校验，不合法就在启动时拒绝。
+//
+// It is worth refusing rather than warning because the name travels in every request: a typo is not a
+// request that fails, it is a deployment that can never send anything, and the first place anyone
+// looks is the message.
+func TestTheTenantNameMustBeOneSESWouldAccept(t *testing.T) {
+	c, err := Load(with("SES_TENANT_NAME", "t-123"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SESTenantName != "t-123" {
+		t.Fatalf("tenant = %q", c.SESTenantName)
+	}
+	// Unset is the ordinary case, and so is a value that is only whitespace: no tenant.
+	for _, value := range []string{"", "   "} {
+		c, err := Load(with("SES_TENANT_NAME", value))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.SESTenantName != "" {
+			t.Errorf("SES_TENANT_NAME=%q → %q, want no tenant", value, c.SESTenantName)
+		}
+	}
+	// A stray space around a correct name is still a correct name: the operator pasted it.
+	if c, err := Load(with("SES_TENANT_NAME", " t-123 ")); err != nil || c.SESTenantName != "t-123" {
+		t.Errorf("a padded name = %q %v", c.SESTenantName, err)
+	}
+	// What SES refuses, this refuses — at startup, naming the setting and the rule.
+	for _, value := range []string{
+		"t 123", "t.123", "t/123", "té", strings.Repeat("t", 65),
+	} {
+		_, err := Load(with("SES_TENANT_NAME", value))
+		if err == nil || !strings.Contains(err.Error(), "SES_TENANT_NAME") {
+			t.Errorf("SES_TENANT_NAME=%q was accepted (%v)", value, err)
+		}
+	}
+}
+
 func TestDefaultsAreSafe(t *testing.T) {
 	c, _ := Load(with("APP_URL", "https://mail.example.com/"))
 	if c.SendingOn || c.SendApproval != "auto" || c.AppURL != "https://mail.example.com" ||

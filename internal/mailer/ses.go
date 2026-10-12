@@ -17,9 +17,10 @@ import (
 
 // SESSender sends through Amazon SES v2. It is the production Sender.
 type SESSender struct {
-	client    *sesv2.Client
-	configSet string
-	sendingOn bool
+	client     *sesv2.Client
+	configSet  string
+	tenantName string
+	sendingOn  bool
 }
 
 // SESOptions is where SES is and who is asking.
@@ -39,6 +40,14 @@ type SESOptions struct {
 	// credential timeout on the first request, not as a missing setting.
 	AccessKeyID string
 	SecretKey   string
+	// TenantName is SES_TENANT_NAME: the tenant to send through, empty for none. It is here rather
+	// than as another constructor argument because it is part of the same picture — where SES is and
+	// who is asking — and because there is one place that builds these options.
+	//
+	// Only the sender uses it. A tenant has its own identities and configuration sets, but which
+	// tenant an operator means is settled by this name, not by looking it up: the domain check and
+	// the quota reader stay account-level, and associating resources with a tenant is done in SES.
+	TenantName string
 }
 
 // NewSES builds the production Sender.
@@ -47,7 +56,10 @@ func NewSES(ctx context.Context, options SESOptions, configSet string, sendingOn
 	if err != nil {
 		return nil, err
 	}
-	return &SESSender{client: sesv2.NewFromConfig(cfg), configSet: configSet, sendingOn: sendingOn}, nil
+	return &SESSender{
+		client: sesv2.NewFromConfig(cfg), configSet: configSet,
+		tenantName: options.TenantName, sendingOn: sendingOn,
+	}, nil
 }
 
 // awsConfig is the one place a client is built, so neither the endpoint override nor the credentials
@@ -95,6 +107,13 @@ func (s *SESSender) Send(ctx context.Context, email rules.RecipientEmail, tags m
 	}
 	if s.configSet != "" {
 		input.ConfigurationSetName = &s.configSet
+	}
+	if s.tenantName != "" {
+		// The whole point of naming a tenant: SES accepts the send only when everything it names — the
+		// identity, the configuration set, the template — is associated with that tenant (SendEmail's
+		// TenantName). A send with no tenant is the account's own, which is what a deployment that has
+		// no tenants wants.
+		input.TenantName = &s.tenantName
 	}
 	for _, name := range sortedKeys(tags) {
 		input.EmailTags = append(input.EmailTags, types.MessageTag{Name: pointer(name), Value: pointer(tags[name])})

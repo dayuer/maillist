@@ -152,6 +152,7 @@ func sesOptions(cfg config.Config) mailer.SESOptions {
 	return mailer.SESOptions{
 		Region: cfg.SESRegion, Endpoint: cfg.SESEndpoint,
 		AccessKeyID: cfg.SESAccessKeyID, SecretKey: cfg.SESSecretAccessKey,
+		TenantName: cfg.SESTenantName,
 	}
 }
 
