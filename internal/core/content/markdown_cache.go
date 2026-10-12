@@ -116,7 +116,13 @@ func (c *Cache) Render(src string, isEmail bool) (rendered string, within bool) 
 		c.hits.Add(1)
 		return entry.rendered, entry.within
 	}
-	rendered, within = c.parseBody(src, isEmail)
+	rendered, within, saturated := c.parseBody(src, isEmail)
+	if saturated {
+		// Every slot was held, so this body was shown as text without being judged. That is a fact
+		// about the moment, not about the body: remembering it would turn one busy second into a
+		// page that is plain text until the entry is evicted. The next request tries again.
+		return rendered, within
+	}
 	c.store(key, rendered, within)
 	return rendered, within
 }
@@ -136,11 +142,11 @@ func (c *Cache) Peak() int64 { return c.peak.Load() }
 //
 // The slot is taken before the goroutine starts and held until the parse ends — including the ones that
 // are abandoned. That is what makes the cap a cap: past MaxConcurrentParses, the parse is not started.
-func (c *Cache) parseBody(src string, isEmail bool) (rendered string, within bool) {
+func (c *Cache) parseBody(src string, isEmail bool) (rendered string, within, saturated bool) {
 	if !c.acquire() {
 		// Every slot is held by a parse that has not finished. Starting another is the unbounded growth
 		// this cap exists to stop, so the body is shown as the text somebody wrote.
-		return plainText(src), false
+		return plainText(src), false, true
 	}
 	c.parses.Add(1)
 	c.trackLiveness(1)
@@ -154,9 +160,9 @@ func (c *Cache) parseBody(src string, isEmail bool) (rendered string, within boo
 	}()
 	select {
 	case rendered := <-done:
-		return rendered, true
+		return rendered, true, false
 	case <-time.After(MarkdownBudget):
-		return plainText(src), false
+		return plainText(src), false, false
 	}
 }
 
