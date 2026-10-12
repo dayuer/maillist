@@ -24,6 +24,11 @@ stderr 'not on the suppression list'
 ! mailcheap suppression add not-an-address
 stderr 'is not an address'
 
+# --json 的失败也是 JSON：一个把 stdout 当 JSON 读的脚本，不该在错误时读到一段裸文本。
+# 退出码照旧是 1，只是 stderr 的形状跟上了输出形状。
+! mailcheap suppression add not-an-address --json
+stderr '^\{"error":.*is not an address.*\}\n$'
+
 mailcheap campaign create --newsletter field-notes --subject 'Issue 12' --file issue.md --preview-text 'This week'
 mailcheap campaign send --subject 'Issue 12' --yes
 stdout 'queued 2 recipients'
