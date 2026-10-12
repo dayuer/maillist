@@ -211,6 +211,57 @@ func TestServeExitsWhenAComponentFails(t *testing.T) {
 	}
 }
 
+// 发送关闭时 serve 照常运行：归档、退订、MCP 都要在线，只是不发信。
+//
+// deploy/.env.example ships SENDING_ENABLED=false, and every other serve test turns sending on, so
+// nothing noticed that the sender reported "Sending is off" as a failure and took the whole process
+// down with it about a quarter of a second after start.
+func TestServeStaysUpWhileSendingIsOff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a subprocess")
+	}
+	dir := t.TempDir()
+	addr := freeAddr(t)
+	child := exec.Command(os.Args[0], "-test.run=TestServeChild") //nolint:gosec // G204: re-running this test binary as the serve child
+	child.Env = append(os.Environ(),
+		"MAILCHEAP_TEST_SERVE_ADDR="+addr,
+		"SESSION_SECRET=test-session-secret-with-at-least-32-characters",
+		"APP_URL=https://mail.example.com",
+		"SENDING_ENABLED=false",
+		"MAILCHEAP_DB="+filepath.Join(dir, "mailcheap.db"),
+		"MAILCHEAP_FAKE_SES_LOG="+filepath.Join(dir, "sent.jsonl"),
+	)
+	var stderr bytes.Buffer
+	child.Stdout = io.Discard
+	child.Stderr = &stderr
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+
+	// Well past the moment the old sender gave up, the process is still there.
+	select {
+	case err := <-exited:
+		t.Fatalf("serve exited (%v) with sending off; stderr:\n%s", err, stderr.String())
+	case <-time.After(2 * time.Second):
+	}
+	waitForHealth(t, addr)
+
+	if err := child.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("serve exited with %v after SIGTERM; stderr:\n%s", err, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		_ = child.Process.Kill()
+		t.Fatal("serve did not exit within ten seconds of SIGTERM")
+	}
+}
+
 func waitForHealth(t *testing.T, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

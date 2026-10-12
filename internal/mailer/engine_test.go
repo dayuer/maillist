@@ -569,6 +569,40 @@ func TestQueueAndSendRefuseWhenSendingIsOff(t *testing.T) {
 	}
 }
 
+// 发送关闭时，后台发送循环照常空转，直到 ctx 结束才返回，且不返回错误。
+//
+// Sending off is a setting, not a failure. serve stops everything when one of its components returns
+// an error, so a Run that reported "Sending is off" took the archive, the unsubscribe links and MCP
+// down with it — and SENDING_ENABLED=false is what deploy/.env.example ships.
+func TestRunKeepsRunningWhileSendingIsOff(t *testing.T) {
+	f := newFixture(t, 1)
+	f.engine.cfg.SendingOn = false
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.engine.Run(ctx) }()
+
+	// Twenty poll intervals: long enough for the old Run to have hit SendBatch and returned.
+	select {
+	case err := <-done:
+		cancel()
+		t.Fatalf("Run returned %v while sending is off, want it to keep running", err)
+	case <-time.After(20 * f.engine.cfg.PollInterval):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run after cancel = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop within five seconds of cancellation")
+	}
+	if f.fake.SentCount() != 0 {
+		t.Fatalf("sent = %d, want 0", f.fake.SentCount())
+	}
+}
+
 func messagesWithStatus(t *testing.T, f *fixture, status model.MessageStatus) []model.Message {
 	t.Helper()
 	rows, err := f.db.Rows(context.Background(),
