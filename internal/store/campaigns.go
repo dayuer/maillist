@@ -41,20 +41,20 @@ const campaignColumns = `id, newsletter_id, subject, preview_text, format, body,
     stats_delivered, stats_bounced, stats_complained, stats_opened, stats_clicked,
     stats_unsubscribed, stats_failed, last_chance_recipients, last_chance_sent,
     last_chance_delivered, last_chance_bounced, last_chance_complained, last_chance_failed,
-    last_chance_dormant, created_at, updated_at`
+    last_chance_dormant, created_at, updated_at, reserved_day`
 
 // CreateCampaign inserts one campaign. archive_listed is written explicitly: the model's
 // model.NewCampaign sets it, and the column default covers rows inserted without it.
 func (db *DB) CreateCampaign(ctx context.Context, c model.Campaign) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO campaigns (`+campaignColumns+`) VALUES (
-            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			c.ID, c.NewsletterID, c.Subject, c.PreviewText, string(c.Format), c.Body, string(c.Status),
 			c.AudienceLimit, c.Source, formatTimePtr(c.ScheduledAt), formatTimePtr(c.StartedAt),
 			formatTimePtr(c.SentAt), formatTimePtr(c.TestSentAt), c.ArchiveSlug, c.ThumbnailURL,
 			boolInt(c.ArchiveListed), boolInt(c.ArchivePinned), c.WebViews,
 			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-			formatTime(nonZero(c.CreatedAt)), formatTime(time.Now()))
+			formatTime(nonZero(c.CreatedAt)), formatTime(time.Now()), c.ReservedDay)
 		return err
 	})
 }
@@ -80,7 +80,7 @@ func scanCampaign(row interface{ Scan(...any) error }) (model.Campaign, error) {
 		&c.ThumbnailURL, &archiveListed, &archivePinned, &c.WebViews,
 		new(int), new(int), new(int), new(int), new(int), new(int), new(int), new(int), new(int),
 		new(int), new(int), new(int), new(int), new(int), new(int), new(int),
-		&createdAt, &updatedAt)
+		&createdAt, &updatedAt, &c.ReservedDay)
 	if err != nil {
 		return model.Campaign{}, err
 	}

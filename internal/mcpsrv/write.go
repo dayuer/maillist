@@ -787,14 +787,16 @@ func (s *session) checkBudget(ctx context.Context, credential store.Credential, 
 		return nil
 	}
 	day := store.Day(time.Now())
-	// A resume spends nothing new: the audience was chosen and the day reserved when this campaign
-	// first started (D15), and the engine reserves nothing for a resume. Applying the day's ceilings
-	// to it here is how a credential whose daily_budget is smaller than the list can never resume a
-	// campaign it has already paid for — the engine would have accepted the resume all along.
+	// A resume on the day the campaign was reserved spends nothing new: the audience was chosen and
+	// the day paid for when this campaign first started (D15), and the engine reserves nothing then
+	// either. Applying the day's ceilings here is how a credential whose daily_budget is smaller than
+	// the list could never resume a campaign it had already paid for — the engine would have accepted
+	// it all along.
 	//
-	// What is worth re-checking is the account's own allowance, because that one is about today and
-	// the resume does spend it.
-	if campaign.Status == model.CampaignPaused {
+	// A resume on a *later* day is not that: today's ledger has never seen these messages, and the
+	// engine reserves what is left before it sends. So this check applies the day's ceilings to the
+	// same number the engine will.
+	if campaign.Status == model.CampaignPaused && campaign.ReservedDay == day {
 		return s.checkAllowance(wanted)
 	}
 	if global := s.deps.Config.Limits.MaxSendsPerDay; global > 0 {

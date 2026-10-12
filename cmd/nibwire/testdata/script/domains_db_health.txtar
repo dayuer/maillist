@@ -26,6 +26,7 @@ stdout 'migration\(s\) applied'
 stdout '0001_init.sql'
 stdout '0002_serve_heartbeat.sql'
 stdout '0003_uploads.sql'
+stdout '0004_campaign_reserved_day.sql'
 
 nibwire newsletter create --name 'Field notes' --slug field-notes --from-email jane@example.net --postal-address '1 Main St, Paris'
 nibwire db backup --to snapshot.db
