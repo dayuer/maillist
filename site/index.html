@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nibwire — Your newsletter, without the per-subscriber tax</title>
-<meta name="description" content="Nibwire sends your newsletter through Amazon SES for a $29/mo including 50,000 emails. Source available, export anytime.">
+<meta name="description" content="Nibwire sends your newsletter through Amazon SES for a $29/mo including 50,000 emails. Open source under the AGPL, export anytime.">
 <link rel="canonical" href="https://nibwire.com/">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <meta property="og:title" content="Your newsletter, without the per-subscriber tax">
@@ -111,7 +111,7 @@
     <dl class="spec">
       <div><dt>Sent by Amazon SES, from your domain</dt><dd>The same delivery network behind a large share of the world's transactional email. DKIM, SPF and DMARC on your own domain, so the reputation you build is yours.</dd></div>
       <div><dt>Your list is a file you can take</dt><dd>Everything lives in one SQLite database: subscribers, issues, opens, clicks, unsubscribes. Download it any day. No export request, no waiting.</dd></div>
-      <div><dt>Source available</dt><dd>Read every line that touches your subscribers. If you ever want to run it yourself, it's a single binary.</dd></div>
+      <div><dt>Open source (AGPL-3.0)</dt><dd>Read every line that touches your subscribers. If you ever want to run it yourself, it's a single binary.</dd></div>
       <div><dt>Works with Claude and other AI agents</dt><dd>A built-in MCP server lets your assistant draft, schedule and report on issues — with a human approval step before anything goes out.</dd></div>
       <div><dt>Confirmed opt-in and clean lists</dt><dd>Double opt-in, one-click unsubscribe, automatic suppression of bounces and complaints. The things that keep you out of spam folders.</dd></div>
       <div><dt>Open and click tracking</dt><dd>Per-issue and per-subscriber stats, plus a re-engagement flow that quietly retires people who stopped reading.</dd></div>
@@ -203,7 +203,7 @@
     <div class="faq">
       <details><summary>Is Nibwire available today?</summary><p>The software runs today and the source is public. The hosted service opens to the early-access list first, in small batches, so every migration gets attention. Join and we'll email you when your spot opens.</p></details>
       <details><summary>Will my emails land in the inbox?</summary><p>Deliverability comes from your domain's authentication and your list's health more than from the platform. Nibwire sends through Amazon SES, signs mail with your domain, and suppresses bounces and complaints automatically. When you move, we warm your domain up by sending to your most engaged readers first.</p></details>
-      <details><summary>What does "source available" mean?</summary><p>The code is public under the Business Source License 1.1. You can read it, change it, and run it for your own newsletters for free. What you can't do is resell it as a hosted service. Each release converts to the AGPLv3 after four years.</p></details>
+      <details><summary>What license is Nibwire under?</summary><p>Nibwire is free software under the <a href="https://github.com/dayuer/nibwire/blob/main/LICENSE">GNU AGPL-3.0-only</a>. Running it for your own newsletters, including commercially, is free. A <a href="https://github.com/dayuer/nibwire/blob/main/COMMERCIAL-LICENSE.md">commercial license</a> is available if you want to offer a modified version as a service without publishing your changes, or embed Nibwire in closed-source software.</p></details>
       <details><summary>Can I leave?</summary><p>Yes, and it's easy. Your data is one SQLite file you can download any time, and you can run that same file on your own server with the open binary.</p></details>
       <details><summary>What happens to the email I give you here?</summary><p>We use it to tell you about early access and nothing else. It's stored on Nibwire itself — this waitlist runs on the product. Every email has a one-click unsubscribe.</p></details>
       <details><summary>I'm on Substack, Kit or Mailchimp. Does this work for me?</summary><p>If you can export a CSV of subscribers, yes. Nibwire doesn't do paid subscriptions yet, so if most of your revenue is paid subs, wait for that.</p></details>
