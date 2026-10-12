@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"mailcheap/internal/core/content"
 	"mailcheap/internal/core/model"
 	"mailcheap/internal/core/slowinput"
 )
@@ -62,10 +63,14 @@ func TestRenderingMarkdownIsLinearOnSlowInputs(t *testing.T) {
 	for label, shape := range slowinput.MarkdownShapes() {
 		small := campaignWith(model.FormatMarkdown, shape(smallInputSize))
 		large := campaignWith(model.FormatMarkdown, shape(largeInputSize))
-		// 两个尺寸都预热：解析结果被记住（content.Cache），所以这里量的是「每个读者付的那部分」
-		// ——清洗、免疫与渲染——而不是一次冷解析。冷解析有自己的闸门与预算测试。
-		_ = RenderIssueBody(small, newsletter)
-		_ = RenderIssueBody(large, newsletter)
+		// 两个尺寸都进稳定状态再量：解析结果（含「这份正文是纯文本」的判定）被记住，所以这里量的是
+		// 「每个读者付的那部分」——哈希、清洗与渲染——而不是一次冷解析。
+		//
+		// WaitIdle 是必要的：槽位被别的形状占着时，预热会直接退回纯文本而**不被记住**，那样计时就
+		// 取决于槽位时序，比率会随机（复核方 2026-10-12 在 -race 下量到约一半失败）。等到没有解析
+		// 在预算窗口里，预热拿得到槽位，判定是真的，于是随后两次都是缓存命中。
+		warmMarkdown(small)
+		warmMarkdown(large)
 
 		var rendered Body
 		smallTime := timed(t, label+" small", func() { _ = RenderIssueBody(small, newsletter) })
@@ -94,6 +99,8 @@ func TestSEOIsLinearOnSlowInputs(t *testing.T) {
 		small := campaignWith(model.FormatMarkdown, shape(smallInputSize))
 		large := campaignWith(model.FormatMarkdown, shape(largeInputSize))
 		small.PreviewText, large.PreviewText = small.Body[:1000], large.Body[:1000]
+		warmMarkdown(small)
+		warmMarkdown(large)
 
 		smallTime := timed(t, label+" small", func() {
 			_ = IssueSEO(newsletter, small, "https://mail.example.com", "news.example.com=field-notes")
@@ -122,6 +129,16 @@ func TestDeepNestingCannotOpenAScriptOnThePage(t *testing.T) {
 		rendered := RenderIssueBody(campaignWith(model.FormatMarkdown, slowinput.Nested(depth)), newsletter)
 		assertNoRunnableMarkup(t, rendered.HTML, "nested")
 	}
+}
+
+// warmMarkdown puts one body into the cache's stable state: no parse is inside its budget window, so the
+// render gets a slot, runs (or passes its budget and is remembered as text), and every later render is a
+// memory hit.
+func warmMarkdown(campaign model.Campaign) {
+	cache := content.DefaultCache()
+	cache.WaitIdle(10 * time.Second)
+	_ = RenderIssueBody(campaign, model.Newsletter{Slug: "field-notes", ArchiveEnabled: true})
+	cache.WaitIdle(10 * time.Second)
 }
 
 func campaignWith(format model.Format, body string) model.Campaign {
