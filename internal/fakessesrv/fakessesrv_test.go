@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	"github.com/aws/smithy-go"
 
 	"nibwire/internal/core/rules"
@@ -436,5 +439,58 @@ func TestAQuotaTheFakeWasNotGivenIsAnError(t *testing.T) {
 	}
 	if _, err := reader.Quota(context.Background()); err == nil {
 		t.Fatal("an unconfigured fake answered a quota")
+	}
+}
+
+// 假 SES 的身份列表按 PageSize 与 NextToken 翻页，最后一页没有 token：真客户端那侧的翻页循环才有
+// 东西可测（阶段 9 #56）。这里直接用 SDK，问的就是线上那份请求形状。
+func TestTheFakePagesIdentitiesLikeTheAPIDoes(t *testing.T) {
+	domains := make([]string, 0, 250)
+	for i := 0; i < 250; i++ {
+		domains = append(domains, fmt.Sprintf("tenant%03d.example", i))
+	}
+	fake := New(nil, WithVerifiedDomains(domains...))
+	server := httptest.NewServer(fake.Handler())
+	defer server.Close()
+
+	client := sesv2.NewFromConfig(aws.Config{
+		Region:       "eu-west-1",
+		Credentials:  credentials.NewStaticCredentialsProvider("test", "test", ""),
+		HTTPClient:   server.Client(),
+		BaseEndpoint: aws.String(server.URL),
+	})
+
+	pageSize := int32(100)
+	var seen []string
+	var next *string
+	for pages := 1; ; pages++ {
+		page, err := client.ListEmailIdentities(context.Background(), &sesv2.ListEmailIdentitiesInput{
+			PageSize: &pageSize, NextToken: next,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.EmailIdentities) > int(pageSize) {
+			t.Fatalf("a page carried %d identities, more than the %d asked for", len(page.EmailIdentities), pageSize)
+		}
+		for _, info := range page.EmailIdentities {
+			seen = append(seen, *info.IdentityName)
+		}
+		if page.NextToken == nil {
+			if pages != 3 {
+				t.Fatalf("the list took %d pages, want 3", pages)
+			}
+			break
+		}
+		if pages > 3 {
+			t.Fatal("the fake never ran out of pages")
+		}
+		next = page.NextToken
+	}
+	if len(seen) != 250 {
+		t.Fatalf("walking the pages found %d identities, want 250", len(seen))
+	}
+	if calls := fake.Calls("/v2/email/list-identities"); calls != 3 {
+		t.Fatalf("list-identities was called %d times, want 3", calls)
 	}
 }

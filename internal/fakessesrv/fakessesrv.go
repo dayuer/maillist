@@ -13,6 +13,7 @@ import (
 	"errors"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -71,7 +72,14 @@ type Server struct {
 	// tokens is the enforced rate's bucket, and tokenAt is when it was last filled.
 	tokens  float64
 	tokenAt time.Time
+	// calls counts requests per route, so a test can say "three pages of identities and nothing
+	// else" — the difference between a reader that pages and one that stops at the first answer.
+	calls map[string]int
 }
+
+// identityPageDefault is what ListEmailIdentities answers with when the caller names no PageSize:
+// the real API's own default, so a reader that never sets one still pages.
+const identityPageDefault = 1000
 
 // Limits is what the fake actually did, which is what a test asserting on an account that reports one
 // number and enforces another needs.
@@ -143,11 +151,32 @@ func New(fake *mailer.Fake, options ...Option) *Server {
 	if fake == nil {
 		fake = mailer.NewFake()
 	}
-	s := &Server{fake: fake}
+	s := &Server{fake: fake, calls: map[string]int{}}
 	for _, option := range options {
 		option(s)
 	}
 	return s
+}
+
+// Calls is how many requests arrived on one route — "/v2/email/list-identities" and
+// "/v2/email/identities/{domain}" are the two worth counting.
+func (s *Server) Calls(route string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls[route]
+}
+
+// count is one request arriving on a route.
+func (s *Server) count(route string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls[route]++
+}
+
+func (s *Server) callsRoute(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	writeJSON(w, http.StatusOK, s.calls)
 }
 
 // Handler is the whole fake as an http.Handler.
@@ -161,6 +190,7 @@ func (s *Server) Handler() http.Handler {
 	// future SDK that changes it does not turn this into a 404.
 	mux.HandleFunc("/v2/email/list-identities", s.listIdentities)
 	mux.HandleFunc("/v2/email/identities/{domain}", s.getIdentity)
+	mux.HandleFunc("GET /_calls", s.callsRoute)
 	// GetAccount is GET /v2/email/account (the SDK's own request snapshot says so). No method pinned,
 	// for the same reason as the identity routes.
 	mux.HandleFunc("/v2/email/account", s.account)
@@ -344,22 +374,57 @@ func (s *Server) limitsRoute(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.Limits())
 }
 
-// listIdentities is ListEmailIdentities. It is the first thing the pre-send domain check asks.
-func (s *Server) listIdentities(w http.ResponseWriter, _ *http.Request) {
+// listIdentities is ListEmailIdentities, paged the way the API pages: at most PageSize identities
+// and a NextToken while there are more. A fake that ignored the token could not tell a reader that
+// pages from one that stops at the first answer, and an account with more than a hundred identities
+// is exactly where that difference decides whether a send is allowed.
+func (s *Server) listIdentities(w http.ResponseWriter, r *http.Request) {
+	s.count("/v2/email/list-identities")
+	var in struct {
+		PageSize  int    `json:"PageSize"`
+		NextToken string `json:"NextToken"`
+	}
+	// An empty body is a caller that set neither, which the real API answers with its default page.
+	_ = json.NewDecoder(r.Body).Decode(&in)
+	pageSize := in.PageSize
+	if pageSize <= 0 {
+		pageSize = identityPageDefault
+	}
+	offset := 0
+	if in.NextToken != "" {
+		parsed, err := strconv.Atoi(in.NextToken)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "InvalidNextToken", in.NextToken+" is not a next token")
+			return
+		}
+		offset = parsed
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	identities := make([]map[string]any, 0, len(s.domains))
-	for _, domain := range s.domains {
+	// A token past the end is an empty page, the way the real API answers an exhausted list.
+	end := min(offset+pageSize, len(s.domains))
+	page := []string{}
+	if offset < len(s.domains) {
+		page = s.domains[offset:end]
+	}
+	identities := make([]map[string]any, 0, len(page))
+	for _, domain := range page {
 		identities = append(identities, map[string]any{
 			"IdentityName": domain, "IdentityType": "DOMAIN", "SendingEnabled": true,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"EmailIdentities": identities})
+	out := map[string]any{"EmailIdentities": identities}
+	if end < len(s.domains) {
+		out["NextToken"] = strconv.Itoa(end)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // getIdentity is GetEmailIdentity: a verified domain with DKIM in order. The MAIL FROM records are
 // left out, which is the state of a domain that has DKIM but no custom MAIL FROM.
 func (s *Server) getIdentity(w http.ResponseWriter, r *http.Request) {
+	s.count("/v2/email/identities/{domain}")
 	domain := r.PathValue("domain")
 	s.mu.Lock()
 	verified := false
