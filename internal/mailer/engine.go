@@ -560,6 +560,12 @@ func (e *Engine) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		// Sending off is a setting, not a failure: SendBatch refuses so that a caller asking to send
+		// hears why, but this loop just idles. Returning that refusal would make serve stop the
+		// archive, the unsubscribe links and MCP along with it.
+		if !e.cfg.SendingOn {
+			continue
+		}
 		for {
 			result, err := e.SendBatch(ctx, nil)
 			if err != nil {
