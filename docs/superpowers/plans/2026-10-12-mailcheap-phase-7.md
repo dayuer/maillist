@@ -1,0 +1,195 @@
+# Mailcheap 阶段 7 实施计划：归档与收尾
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**上游：** `marclou/mailcheap@67d13b0`，`scripts/fetch-upstream.sh` 拉到 `third_party/upstream/`（git 忽略）。
+**前置：** 阶段 0–6 已合并进 main（PR #2–#10）。`origin/main = 1f1b1f4`。
+**设计：** §10（读者侧 HTTP 面）、§12（安全模型）、§13（功能映射表）、§14（环境变量）、D11（阅读计数）、D12（归档 HTML 的处理）。
+**主计划：** `…-go-rewrite-plan.md` 阶段 7（Task 7.1–7.5）。
+
+**完成标志（计划的原文）：** 设计 §13 功能映射表逐条打勾。
+
+**不接 AWS（用户 2026-10-12 指示，持续有效）：** 本阶段不发任何真实 AWS 请求。告警邮件走的是同一套 `mailer.Sender`，本阶段用假 SES 验证。
+
+---
+
+## 0. 本阶段的约定
+
+### 0.1 §13 怎么打勾
+
+打勾的地方是 **PR 描述**，逐条列出「功能 → 在哪段代码 / 哪个测试」。一条勾必须有代码**和**测试；只有代码的条目写成「已实现，未验证」，只有测试的条目根本不会出现。
+
+### 0.2 本阶段不做
+
+1. **归档分享图（OG）**：设计 §13 明确砍掉。`archive-seo` 里与分享图有关的那一半（`getShareImage`、`/og` 路由、`SHARE_IMAGE_SIZE`）不移植；`openGraph.images` 与 `twitter.images` 用 issue 自己的 `thumbnailUrl`，没有就不给——**不**指向一个不存在的 `/og` 路由。这条在执行记录里写明。
+2. **不碰 main、不合并 PR**；提交与 PR 不带任何署名尾注。
+3. **不改 v1 API 与 MCP 的既有 tool 面**（除了按主计划把 `run_cleanup` 注册上）。
+
+### 0.3 设计决定
+
+#### D7-1 归档页按请求从 SQLite 渲染，不是静态生成
+
+设计 §10 的缓存段：没有 ISR，没有「什么时候该重刷」。归档页每次请求现渲染（微秒级读），`Cache-Control` 交给 caddy。**阅读计数因此天然准确**（D11）：计数发生在渲染之前的那一次请求里，不存在「静态页不经过服务端所以数不到」的问题。
+
+#### D7-2 阅读计数的三条规则
+
+上游把计数交给浏览器（`sendBeacon` + `localStorage` + `POST /api/views`）。前端废弃后这套反而更不准，所以搬进服务端（D11），但**保留上游的两条过滤**（`app/api/views/route.js`）：
+
+- **bot UA 过滤**：`bot|crawl|spider|slurp|preview|facebookexternalhit|headless|lighthouse|curl|wget|python|axios|go-http`（上游的 `BOT_PATTERN`，原样搬）。空 UA 也算 bot。
+- **IP + 日 去重**：同一个 IP 对同一期每天只计一次。上游用的是限流器（30 次/10 分钟）；服务端渲染没有「客户端再发一次」这一步，去重比限流更贴切，但用一个**进程内的 IP+日 集合**（`internal/httpsrv` 已有的 `MemoryLimiter` 形状），因为它和限流器一样是「丢一点精度换一个不会泄漏的负载」。
+- 只有 `archiveListed` 且状态是 `sending`/`paused`/`sent` 的 issue 计数（上游 `POST /api/views` 的 `$in` 条件）。
+
+计数写进 `campaign.web_views`（已存在的列）。
+
+#### D7-3 HTML issue 走 sandboxed iframe，Markdown issue 走清洗
+
+设计 §12 与 D12：
+
+| 格式 | 页面上的样子 | 为什么 |
+|---|---|---|
+| `markdown` | `article`：`MarkdownToHTML` → `CleanContent`（允许列表） | 我们自己的排版，清洗是安全的 |
+| `html` | `frame`：`render.Email(IsWebVersion)` → `KeepSafeURLs` + 响应式图片 + `<base target="_blank">`，放进 sandboxed iframe | 别人写的整封邮件保留它自己的设计；只把链接变成 frame 安全的，沙箱负责其余 |
+
+`rich` 格式随编辑器一起删除（阶段 2），上游那条分支不移植——`archive-content.test.mjs` 里针对 `rich` 的用例在执行记录里标为「不适用」。
+
+#### D7-4 `IssueWebURL` 补上 ARCHIVE_HOSTS（审计 F2）
+
+审计 F2：`core/rules.IssueWebURL` 少了归档域名参数，启用 `ARCHIVE_HOSTS` 时 Read-online 链接的 host 与路径形状都不对（上游是 `https://{host}/p/{slug}`）。修法：`IssueWebURL(appURL, archiveHosts, campaign, newsletter)`，内部走 `core/archive.ForNewsletter(slug, hosts, appURL).AbsolutePost(...)`——**归档 URL 只有一处实现**（`core/archive`），规则层与 HTTP 层共用它。
+
+`ArchiveHosts` 沿 `mailer.Config` → `rules.RecipientInput` 传下去（engine 已经在传 `AppURL`）。
+
+#### D7-5 名单清理：决策在 core，写入在 store
+
+`lib/cleanup.js` 是一组纯函数（`getCleanupAction`、`splitAudience`、`addToPreview`、`summarizePreview`、`getLastSignOfLife`、`withEngagement`）加两条数据库表达式。移植时：
+
+- 纯函数原样搬进 `internal/core/cleanup`（时间一律用 `time.Time`，`now` 是参数）；
+- `LAST_SIGN_OF_LIFE_EXPRESSION` 与 `cleanupTotalsPipeline` 是 Mongo 聚合，Go 侧对应的是 `store` 里的 SQL（`COUNT`/`MAX`）——**两条 SQL 与纯函数必须对同一批数据给出同一个答案**，所以各有一条测试对着同一组夹具断言（`core/cleanup` 的纯函数、`store` 的查询）。
+- **发送时 split 接进 `Engine.Queue`**：冷联系人拿到 last-chance 而不是这一期。上游的 `splitAudience` 在发送时按「最活跃优先」的受众顺序走，`limit` 只数 issue 收件人并在到达上限处停下。这与我们的 `SelectAudience` + `QueueStep` 的关系是：**同一个遍历**，所以 split 的结果直接决定写入哪些 kind 的消息。
+
+#### D7-6 告警邮件：一个 key 一条冷却
+
+`lib/alerts.js` 的语义：`sendAlert({key, title, detail, path, cooldownMinutes})` → 先 `claim`（唯一键 + 冷却窗口，抢不到就不发）→ 发一封给 `ADMIN_EMAIL`，`ALERT_FROM` 为发件人，**只在发送开着时发**，且**永不抛错**（告警失败不能把发送或 webhook 弄挂）。
+
+Go 版需要一个 `alerts` 表（key 唯一 + last_sent_at）——上游是 Mongo 的 `Alert` 模型。三个调用点（上游）：暂停（`sending.js` 两处）、连续失败（`scheduling.js`）、SNS 验签失败率（`ses-events.js`）；本阶段实现前两个 + 一个「webhook 拒收率」的等价物，第三个的具体换算在执行记录里写明。
+
+#### D7-7 `run_cleanup` 按主计划注册
+
+阶段 6 里它是唯一没注册的 §9 tool，理由写在上一份计划里：那时没有实现。本阶段实现 `cleanup --preview/--run` 之后，MCP 的 `run_cleanup` 与它共用同一个 service。
+
+### 0.4 命令与提交
+
+- 测试：`make test`；静态检查：`make lint`；端到端：`scripts/compose-smoke.sh`
+- 每个 Task 一次提交，Conventional Commits，**不带任何署名尾注**
+- 不新增外部依赖
+
+---
+
+## 1. 新增与改动的文件
+
+```
+internal/core/archive/author.go      getArchiveAuthor
+internal/core/archive/issues.go      getIssueDate、已发布状态、列表过滤
+internal/core/archive/content.go     renderIssueBody：article 与 frame
+internal/core/archive/seo.go         issue/home/author 的 metadata 与 JSON-LD（无分享图）
+internal/core/archive/headers.go     ARCHIVE_HOSTS 的路径改写（getArchiveHostUrl）
+internal/core/cleanup/cleanup.go     决策、split、preview、totals
+internal/core/cleanup/content.go     last-chance 邮件内容
+internal/core/slowinput/             恶意输入的形状（与 content 的 slow 测试共用）
+internal/archivehttp/                归档页、sitemap、robots、/p/、阅读计数（模板 + 处理函数）
+internal/alerts/alerts.go            告警：claim + 发信
+internal/store/alerts.go             alerts 表
+internal/store/migrations/0004_alerts.sql
+internal/mcpsrv/write.go             run_cleanup 注册
+cmd/mailcheap/cleanup.go             cleanup --preview/--run
+```
+
+改动：`core/rules/rules.go`（`IssueWebURL` 的 host 参数，F2）、`core/rules/recipient.go`、`internal/mailer/engine.go`（split 与 Charge 的落点、告警）、`internal/httpsrv/server.go`（归档路由）、`internal/store/contacts.go`（`IgnoredIssues` 的读写）、`internal/mcpsrv/tools.go`。
+
+---
+
+## 2. Task 列表
+
+### Task 7.1 `internal/core/archive`：作者、日期、内容、SEO
+
+- [ ] `author.go`：`Author(newsletter)` → `{Name, Slug, Bio, ImageURL}`，`fromName || name`，无照片时用 newsletter 的图。
+- [ ] `issues.go`：`IssueDate(campaign)` = `SentAt || StartedAt`；`Published(status)` 与 `Listed(campaign)` 两个过滤条件（上游 `PUBLISHED_STATUSES`、`LISTED_FILTER`）。
+- [ ] `content.go`：`RenderIssueBody(campaign, newsletter) (Body, error)`，`Body{Kind: Article|Frame, HTML}`；article 走 `MarkdownToHTML` → `CleanContent`（markdown 格式），frame 走 D7-3 的那串。
+- [ ] `seo.go`：`IssueSEO`、`HomeSEO`、`AuthorSEO`，各返回 `Metadata` 与 `JSONLD`（`map[string]any`，键序无关）；canonical 用 `ForNewsletter(...)`，社交账号从 `socialLinks` 里认出 X 的 handle。
+- [ ] `headers.go`：`HostURL(pathname, search, hostsValue)`，把 `/archive/{slug}/…` 映射到归档域名，`/sitemap`→`/sitemap.xml`、`/robots`→`/robots.txt`。
+- [ ] 翻译 `tests/archive.test.mjs` 的 hosts 部分（已有）、`archive-seo.test.mjs`、`archive-content.test.mjs`（`rich` 用例标为不适用）。
+
+**验收：** 三个 SEO 函数的字段与上游逐条一致（canonical、images、twitter creator、jsonLd 的 Person/BlogPosting/ProfilePage）；`renderIssueBody` 对 html 给 frame、对 markdown 给 article。
+
+### Task 7.2 归档页、sitemap、robots、`/p/`、阅读计数
+
+- [ ] `internal/archivehttp`：`Server` 拿 `Config/Store/Log`，四条路由：归档首页（issue 列表）、`/p/{slug}`、`/authors/{slug}`、`/sitemap.xml` 与 `/robots.txt`。模板用 `html/template`（自动转义），样式内嵌，**没有前端构建**。
+- [ ] 归档域名上的路径：`/` 首页、`/p/{slug}` issue、`/authors/{slug}`、`/sitemap.xml`、`/robots.txt`；`httpsrv.withArchiveHost` 已经把 slug 放进 context，这里把路径接管过来。
+- [ ] 应用域名上的路径：`/archive/{slug}` 与 `/archive/{slug}/p/{post}`（同一个 handler，slug 从路径来），`/p/{slug}`（307 到归档页，`SLUG_PATTERN` 校验）。
+- [ ] **阅读计数**（D7-2）：渲染 issue 页时先计数（bot UA 过滤 + IP+日 去重 + 已发布条件），再把 `webViews` 渲染进页面。
+- [ ] 未列出（`archiveListed=false`）的 issue 仍有页面，但不在列表里（上游语义）。
+- [ ] `Cache-Control`：首页/issue/作者 `public, max-age=60, stale-while-revalidate=600`；sitemap/robots 上游是 `s-maxage=3600`/`s-maxage=86400`，照搬成 `public, max-age=…`。
+- [ ] `IssueWebURL` 的 F2 修复（D7-4）+ 测试：启用 `ARCHIVE_HOSTS` 时 Read-online 链接是 `https://{host}/p/{slug}`。
+
+**验收：** 起 serve，建一个 `archiveEnabled` 的 newsletter + 一期，`curl` 首页/issue/作者/sitemap/robots 都 200 且内容对；`/p/{slug}` 307；同 IP 同 UA 第二次访问不涨 `webViews`，换 UA（curl 的 UA 就是 bot）不计数。
+
+### Task 7.3 名单清理与 last-chance
+
+- [ ] `internal/core/cleanup`：`Settings(newsletter)`、`LastSignOfLife(contact)`、`Action(contact, settings, now)`、`SplitAudience(...)`、`EmptyPreview`/`AddToPreview`/`SummarizePreview`、`WithEngagement`。
+- [ ] `internal/core/cleanup/content.go`：`LastChanceContent(newsletter)` → `{Subject, PreviewText, Markdown}`，含 `{{keep_url}}` 一个按钮。
+- [ ] `store`：`CleanupTotals(newsletterID)`（waiting/kept/dormant 三条计数，D7-5 的 SQL 侧）与 `Contact.IgnoredIssues` 的递增/清零路径（`withEngagement` 的 Go 版）。
+- [ ] `engine.Queue`：把 `SelectAudience` 的结果交给 `cleanup.SplitAudience`，冷联系人写 `last-chance` 消息、`waiting`/`dormant` 不写，`limit` 只数 issue 收件人（上游语义）。
+- [ ] `cmd/mailcheap/cleanup.go`：`cleanup --preview`（打印四类计数，不写）与 `cleanup --run`（把 dormant 置 dormant、清 `lastChanceAt`？——按上游 `cleanupTotalsPipeline` 的定义，dormant 是一种**状态**）。
+- [ ] `mcpsrv`：注册 `run_cleanup`（scope `write`，与 CLI 同一实现）。
+- [ ] 翻译 `tests/cleanup.test.mjs`、`tests/last-chance.test.mjs`。
+
+**验收：** 上游那 10 条清理用例逐条有对应测试；发送时冷联系人拿到 last-chance 而不是这一期（端到端断言假 SES 收到的主题）。
+
+### Task 7.4 告警邮件
+
+- [ ] `store/alerts.go` + 迁移：`alerts(key PRIMARY KEY, title, last_sent_at)`，`ClaimAlert(key, title, cooldown, now) (bool, error)` 用一条 `INSERT … ON CONFLICT DO UPDATE … WHERE last_sent_at < cutoff` 实现「抢到才发」。
+- [ ] `internal/alerts`：`Notifier{Sender, Config, Store, Log}`，`Send(ctx, Alert{Key, Title, Detail, Path, Cooldown})`：日志永远写，邮件在冷却窗口外发一封，**永不返回错误**。
+- [ ] 三个调用点：暂停（引擎 `pause`）、连续失败（job 变 dead）、webhook 拒收（`events` 里 SNS 验签失败累计到阈值）。
+- [ ] 邮件正文与上游同形：标题 `[Mailcheap] {title}`，正文 `title\ndetail\n{APP_URL}{path}`，HTML 是转义后的 `<pre>`。
+
+**验收：** 冷却内第二次不发、冷却外发；`ALERT_FROM`/`ADMIN_EMAIL` 缺一个就只记日志；发送关着时只记日志；发信失败不影响调用方。
+
+### Task 7.5 slow-inputs 的 renderIssueBody 一半
+
+- [ ] `internal/core/slowinput`：把恶意形状（`SHAPES`、`MARKDOWN_SHAPES`、`tagSoup`、`nested`）提成一个纯包，`content` 与 `archive` 的 slow 测试共用。
+- [ ] `internal/core/archive/slow_test.go`：14 种 HTML 形状 + 9 种 Markdown 形状，各自在预算内渲染完，且 article 的输出里没有能跑的标签。
+- [ ] 把 `internal/core/content/slow_test.go` 改成用共享的形状（删掉它的副本）。
+
+**验收：** 两条 slow 测试在 `-race` 下也过（预算按 `raceEnabled` 放宽，与阶段 4 的既有做法一致）。
+
+### Task 7.6 文档与收尾
+
+- [ ] 设计 §4.1 的「产物约 15–20 MB」改成实测值（二进制 24.5 MB、导出镜像 25.5 MB、CI 预算 30 MB）——**单独的 docs 提交**（复核方 2026-10-12 要求）。
+- [ ] 执行记录：偏差、缺陷、未验证。
+- [ ] PR 描述：§13 映射表逐条打勾（每条指向代码/测试），全部「未验证」与「仍开放」的清单。
+
+---
+
+## 3. 测试清单（新增）
+
+| 文件 | 覆盖 |
+|---|---|
+| `internal/core/archive/seo_test.go` | 三个 SEO 函数（翻译 `archive-seo.test.mjs`） |
+| `internal/core/archive/content_test.go` | article/frame 两条路（翻译 `archive-content.test.mjs`） |
+| `internal/core/archive/author_test.go` | 作者名/图/bio 的取值规则 |
+| `internal/core/archive/slow_test.go` | 恶意输入 |
+| `internal/core/cleanup/cleanup_test.go` | 决策与 split（翻译 `cleanup.test.mjs`） |
+| `internal/core/cleanup/content_test.go` | last-chance 内容（翻译 `last-chance.test.mjs` 的内容部分） |
+| `internal/archivehttp/*_test.go` | 路由、sitemap、robots、`/p/`、阅读计数、沙箱属性 |
+| `internal/alerts/alerts_test.go` | 冷却、缺配置、只记日志 |
+| `internal/store/cleanup_test.go` | 两条 SQL 与纯函数对同一夹具给同一个答案 |
+| `cmd/mailcheap/cleanup_test.go` | `--preview` 不写、`--run` 写 |
+| `internal/mcpsrv/…` | `run_cleanup` 的 scope 与审计 |
+
+---
+
+## 4. 风险与未验证
+
+1. **归档页的模板**：上游是 React 组件，我们抄不了。模板要**看上去像那么回事**（标题、正文、作者、日期、阅读数、订阅表单、「继续阅读」），但不追求像素级一致——设计 §13 只要求「保留」，没有要求视觉一致。这一条在执行记录里说明。
+2. **阅读计数的去重是进程内的**：多副本部署时每个副本各记一次。上游的限流器也是进程内的，同一个取舍。写进执行记录。
+3. **真实 SES/SNS**：仍然未验证（阶段 5 的清单照旧）。告警邮件在真实 SES 上未验证。
+4. **`%!w(<nil>)`**：阶段 1–3 审计的 Minor 池里仍有一项没有定位；本阶段收尾时再找一次，找不到就作为「仍开放」列进 PR。
