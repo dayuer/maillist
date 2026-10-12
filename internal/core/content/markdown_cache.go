@@ -13,26 +13,27 @@ import (
 )
 
 // A CommonMark parser has shapes it is quadratic on, and a body may be half a megabyte: measured, 500 KB
-// of "[a](" takes 77 seconds while the same bytes of prose take a millisecond. Three things keep that
-// from being an amplification anybody can trigger:
+// of "[a](" takes 77 seconds while the same bytes of prose take a millisecond. Four things keep that from
+// being an amplification anybody can trigger:
 //
 //   - a body is parsed once, when it is saved, and refused if it cannot be rendered inside the budget
 //     (CheckRenderable). A body that costs seconds never reaches the database.
-//   - a parse that runs past the budget is abandoned, and only MaxConcurrentParses of those may be
-//     running at once: past that, a body is shown as text instead of parsed. This is what stops a body
-//     that is already in the database — one saved before this gate existed — from turning every reader
-//     of its page and every recipient of its email into another minutes-long goroutine.
-//   - identical bodies are parsed once (Cache), which is what makes a page a hundred readers ask for
-//     one parse rather than a hundred.
+//   - a body is parsed once however many requests ask for it at the same time (Render's single flight),
+//     and once ever after (the memo). A page a hundred readers open at once is one parse.
+//   - at most MaxConcurrentParses *different* bodies may be parsed at once, and a slot is held only
+//     until the budget passes — not for as long as the abandoned parse runs, which would make every
+//     other render wait minutes behind it.
+//   - a parse that passes the budget is a verdict, and it is remembered: that body is text from then on,
+//     so the first reader waits a second and every reader after is answered from memory.
 //
-// goldmark cannot be interrupted, so what the budget bounds is the waiting. The cap and the memo are
-// what bound the work.
+// goldmark cannot be interrupted, so an abandoned parse does run to its end. What is bounded here is how
+// many may be started, and what every later request costs — which is nothing.
 
-// MaxConcurrentParses is how many Markdown parses may be in flight at once.
+// MaxConcurrentParses is how many different bodies may be parsed at once.
 //
-// Two, because a parse past its budget is a parse being abandoned, and the number exists to keep a few
-// of them from adding up. A parse that finishes inside the budget holds its slot for microseconds, so
-// a healthy deployment never notices the cap; it only bites when parses are already overrunning.
+// Two, because a parse past its budget is one being abandoned, and the number exists to keep a few of
+// them from adding up. A slot is held for at most the budget, so a healthy deployment never queues
+// behind one.
 const MaxConcurrentParses = 2
 
 // DefaultCacheBytes is how much rendered Markdown the process remembers, by total size. A body may be
@@ -83,15 +84,25 @@ type Cache struct {
 	maxBytes int
 	slots    chan struct{}
 
-	mu    sync.Mutex
-	order *list.List
-	items map[string]*cacheEntry
-	bytes int
+	mu       sync.Mutex
+	order    *list.List
+	items    map[string]*cacheEntry
+	bytes    int
+	inflight map[string]*call
 
-	parses atomic.Int64
-	hits   atomic.Int64
-	live   atomic.Int64
-	peak   atomic.Int64
+	parses  atomic.Int64
+	hits    atomic.Int64
+	shared  atomic.Int64
+	live    atomic.Int64
+	peak    atomic.Int64
+	orphans atomic.Int64
+}
+
+// call is one parse that other renderers are waiting on.
+type call struct {
+	done     chan struct{}
+	rendered string
+	within   bool
 }
 
 // NewCache returns an empty cache that remembers at most maxBytes of rendered Markdown.
@@ -101,6 +112,7 @@ func NewCache(maxBytes int) *Cache {
 		slots:    make(chan struct{}, MaxConcurrentParses),
 		order:    list.New(),
 		items:    map[string]*cacheEntry{},
+		inflight: map[string]*call{},
 	}
 }
 
@@ -116,27 +128,86 @@ func (c *Cache) Render(src string, isEmail bool) (rendered string, within bool) 
 		c.hits.Add(1)
 		return entry.rendered, entry.within
 	}
-	rendered, within, saturated := c.parseBody(src, isEmail)
-	if saturated {
-		// Every slot was held, so this body was shown as text without being judged. That is a fact
-		// about the moment, not about the body: remembering it would turn one busy second into a
-		// page that is plain text until the entry is evicted. The next request tries again.
-		return rendered, within
+	if inFlight, leader := c.join(key); !leader {
+		// Somebody else is parsing this exact body. Waiting for their answer costs nothing and saves a
+		// parse: it is what makes a page a hundred readers open at once one parse rather than a
+		// hundred, and one abandoned parse rather than a hundred.
+		<-inFlight.done
+		c.shared.Add(1)
+		return inFlight.rendered, inFlight.within
 	}
-	c.store(key, rendered, within)
+
+	rendered, within, saturated := c.parseBody(src, isEmail)
+	if !saturated {
+		// A parse that ran and passed its budget is a verdict about the body, and it is remembered.
+		// What is not remembered is having found every slot busy: that is a fact about the moment, and
+		// remembering it would turn one busy second into a page that is plain text until the entry is
+		// evicted. The next request tries again.
+		c.store(key, rendered, within)
+	}
+	c.publish(key, rendered, within)
 	return rendered, within
 }
 
-// Parses is how many bodies this cache has parsed, and Hits how many renders it answered from memory.
-// Together they are the whole story of what the memo did.
+// join either joins the parse already running for this body, or becomes its leader.
+func (c *Cache) join(key string) (*call, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if inFlight, ok := c.inflight[key]; ok {
+		return inFlight, false
+	}
+	inFlight := &call{done: make(chan struct{})}
+	c.inflight[key] = inFlight
+	return inFlight, true
+}
+
+// publish hands the leader's answer to everyone waiting on it.
+func (c *Cache) publish(key, rendered string, within bool) {
+	c.mu.Lock()
+	inFlight := c.inflight[key]
+	delete(c.inflight, key)
+	if inFlight != nil {
+		inFlight.rendered, inFlight.within = rendered, within
+	}
+	c.mu.Unlock()
+	if inFlight != nil {
+		close(inFlight.done)
+	}
+}
+
+// Parses is how many bodies this cache has parsed, Hits how many renders it answered from memory, and
+// Shared how many it answered by waiting on a parse somebody else had started. The three together are
+// the whole story of what the memo did.
 func (c *Cache) Parses() int64 { return c.parses.Load() }
 
 // Hits is how many renders the memo answered without parsing.
 func (c *Cache) Hits() int64 { return c.hits.Load() }
 
-// Peak is the most parses that have ever been running at once. It is what the concurrency cap is
-// asserted against, and what an operator would look at to see the cap working.
+// Shared is how many renderers waited on a parse that was already running.
+func (c *Cache) Shared() int64 { return c.shared.Load() }
+
+// Peak is the most parses that have ever been running at once, and Orphans how many passed their budget
+// and were left to finish on their own. The two together are what the cap did.
 func (c *Cache) Peak() int64 { return c.peak.Load() }
+
+// Orphans is how many parses passed the budget and finished without anybody waiting for them.
+func (c *Cache) Orphans() int64 { return c.orphans.Load() }
+
+// WaitIdle blocks until no parse is inside its budget window, which is what a caller that has to measure
+// something needs: with a slot free, the next render is parsed rather than shown as text. ok is false
+// when the timeout passed first.
+//
+// It is about slots, not about abandoned parses: those are past their budget and hold nothing.
+func (c *Cache) WaitIdle(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(c.slots) == 0 {
+			return true
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return len(c.slots) == 0
+}
 
 // parseBody runs one parse: a slot, a goroutine, and a budget.
 //
@@ -151,17 +222,19 @@ func (c *Cache) parseBody(src string, isEmail bool) (rendered string, within, sa
 	c.parses.Add(1)
 	c.trackLiveness(1)
 	done := make(chan string, 1)
-	go func() {
-		defer func() {
-			c.trackLiveness(-1)
-			<-c.slots
-		}()
-		done <- convertMarkdown(src, isEmail)
-	}()
+	go func() { done <- convertMarkdown(src, isEmail) }()
 	select {
 	case rendered := <-done:
+		c.trackLiveness(-1)
+		c.release()
 		return rendered, true, false
 	case <-time.After(MarkdownBudget):
+		// The slot goes back now, not when the parse eventually ends. A slot held for the length of an
+		// abandoned parse is one every other render waits that long for — an outage that is worse than
+		// the CPU it would have saved.
+		c.trackLiveness(-1)
+		c.release()
+		c.orphans.Add(1)
 		return plainText(src), false, false
 	}
 }
@@ -180,6 +253,8 @@ func (c *Cache) acquire() bool {
 		return false
 	}
 }
+
+func (c *Cache) release() { <-c.slots }
 
 // trackLiveness counts the parses running right now, and remembers the high-water mark.
 func (c *Cache) trackLiveness(delta int64) {

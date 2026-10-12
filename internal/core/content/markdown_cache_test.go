@@ -1,6 +1,7 @@
 package content
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -13,23 +14,26 @@ import (
 // overBudget is a body a CommonMark parser cannot finish inside the budget: a long run of link openers.
 func overBudget() string { return slowinput.Repeat("[a](", 100_000) }
 
-// 并发上限：无论多少请求同时撞上一份超预算的正文，同时在跑的解析不超过 MaxConcurrentParses。
+// 并发上限：同时在解析的**不同**正文不超过 MaxConcurrentParses。
 //
-// 这是「等待有界、CPU 无界」的修法：预算内的解析占槽位只有微秒，真正会长时间占住槽位的是被放弃的
-// 那些；槽位满了就不再起新的 goroutine，直接给纯文本。
+// 这是「等待有界、CPU 无界」的修法：槽位只占到预算为止（不是占到那个被放弃的解析跑完），槽位满了
+// 就不起新的 goroutine，直接给纯文本。
 func TestAbandonedParsesAreCapped(t *testing.T) {
 	cache := NewCache(DefaultCacheBytes)
-	body := overBudget() // over budget, so every parse that starts is abandoned
+	// 五十份不同的病态正文：同一份会被单飞合成一次解析，那样测不到上限。
+	bodies := make([]string, 50)
+	for i := range bodies {
+		bodies[i] = overBudget() + "\n<!-- " + strconv.Itoa(i) + " -->"
+	}
 
-	const callers = 50
 	start := time.Now()
 	var wg sync.WaitGroup
-	rendered := make([]string, callers)
-	for i := 0; i < callers; i++ {
+	rendered := make([]string, len(bodies))
+	for i := range bodies {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			rendered[i], _ = cache.Render(body, true)
+			rendered[i], _ = cache.Render(bodies[i], true)
 		}(i)
 	}
 	wg.Wait()
@@ -50,19 +54,80 @@ func TestAbandonedParsesAreCapped(t *testing.T) {
 	// 真正的后果：多数调用方根本没有开始解析，而是在槽位被占满时直接拿到纯文本。
 	started := cache.Parses()
 	if started > smallCap {
-		t.Errorf("%d of %d callers started a parse, want only the capped few", started, callers)
+		t.Errorf("%d of %d bodies were parsed, want only the capped few", started, len(bodies))
 	}
 	if started == 0 {
-		t.Error("no caller parsed at all: the cap would make every body text")
+		t.Error("nothing parsed at all: the cap would make every body text")
 	}
 	// 每个调用方都在预算 + 一点余量内拿到答案，而不是排队等被放弃的解析跑完。
 	if elapsed > 3*MarkdownBudget {
-		t.Errorf("%d callers took %s, want each to be answered within the budget", callers, elapsed)
+		t.Errorf("%d callers took %s, want each to be answered within the budget", len(bodies), elapsed)
 	}
 	for i, got := range rendered {
-		if !strings.Contains(got, "&lt;a&gt;") && !strings.Contains(got, "[a](") {
-			t.Errorf("caller %d got neither the rendering nor the text: %.40q", i, got)
+		if !strings.Contains(got, "[a](") && !strings.Contains(got, "&lt;a&gt;") {
+			t.Errorf("caller %d got neither a rendering nor the text: %.40q", i, got)
 		}
+	}
+}
+
+// 同一份正文的并发请求共用一次解析：这是「一百个读者问同一期」的另一半，也是被放弃的解析只有一份
+// 而不是一百份的原因。
+func TestConcurrentReadersOfOneBodyShareOneParse(t *testing.T) {
+	cache := NewCache(DefaultCacheBytes)
+	body := overBudget()
+
+	const callers = 50
+	var wg sync.WaitGroup
+	rendered := make([]string, callers)
+	start := time.Now()
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rendered[i], _ = cache.Render(body, true)
+		}(i)
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	if parses := cache.Parses(); parses != 1 {
+		t.Errorf("%d parses for one body, want 1", parses)
+	}
+	if shared := cache.Shared(); shared != callers-1 {
+		t.Errorf("shared = %d, want %d", shared, callers-1)
+	}
+	if elapsed > 3*MarkdownBudget {
+		t.Errorf("%d readers waited %s, want the budget", callers, elapsed)
+	}
+	for i := 1; i < callers; i++ {
+		if rendered[i] != rendered[0] {
+			t.Fatalf("reader %d got a different answer", i)
+		}
+	}
+}
+
+// 超预算的判定被记住：第一个读者等一个预算，之后的读者是微秒级的。
+func TestTheSecondReaderOfASlowBodyIsAnsweredFromMemory(t *testing.T) {
+	cache := NewCache(DefaultCacheBytes)
+	body := overBudget()
+
+	if _, within := cache.Render(body, true); within {
+		t.Fatal("the pathological body was reported as rendered within the budget")
+	}
+	start := time.Now()
+	got, within := cache.Render(body, true)
+	elapsed := time.Since(start)
+	if within {
+		t.Error("the remembered verdict forgot that the body was over budget")
+	}
+	if elapsed > 50*time.Millisecond {
+		t.Errorf("the second reader waited %s, want the remembered verdict", elapsed)
+	}
+	if parses := cache.Parses(); parses != 1 {
+		t.Errorf("%d parses, want 1", parses)
+	}
+	if !strings.Contains(got, "[a](") {
+		t.Errorf("the remembered text is not the body: %.40q", got)
 	}
 }
 
@@ -92,28 +157,6 @@ func TestTheSameBodyIsParsedOnce(t *testing.T) {
 	cache.Render(body, false)
 	if parses := cache.Parses(); parses != 2 {
 		t.Errorf("parsed %d times, want the archive renderer to be its own entry", parses)
-	}
-}
-
-// 超预算的结果也被记住：一次退回纯文本，此后不再为同一份正文花时间。
-func TestTheFallbackIsRememberedToo(t *testing.T) {
-	cache := NewCache(DefaultCacheBytes)
-	body := overBudget()
-
-	_, within := cache.Render(body, true)
-	if within {
-		t.Fatal("the pathological body was reported as rendered within the budget")
-	}
-	start := time.Now()
-	_, within = cache.Render(body, true)
-	if within {
-		t.Error("the cached answer forgot that it was a fallback")
-	}
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
-		t.Errorf("the second render took %s: the fallback was parsed again", elapsed)
-	}
-	if parses := cache.Parses(); parses != 1 {
-		t.Errorf("parsed %d times, want 1", parses)
 	}
 }
 
