@@ -41,6 +41,23 @@ type Server struct {
 	fake    *mailer.Fake
 	items   []Email
 	domains []string
+	// quota is what GetAccount reports. It is what the account says, which the tests deliberately
+	// keep separate from what the fake actually lets through: a real account's numbers are a ceiling
+	// the app has to discover, not a promise.
+	quota    Quota
+	hasQuota bool
+}
+
+// Quota is the sending quota GetAccount reports.
+type Quota struct {
+	MaxSendRate     float64 `json:"MaxSendRate"`
+	Max24HourSend   float64 `json:"Max24HourSend"`
+	SentLast24Hours float64 `json:"SentLast24Hours"`
+}
+
+// WithQuota makes GetAccount report these numbers.
+func WithQuota(quota Quota) Option {
+	return func(s *Server) { s.quota, s.hasQuota = quota, true }
 }
 
 // Option configures the fake.
@@ -77,6 +94,10 @@ func (s *Server) Handler() http.Handler {
 	// future SDK that changes it does not turn this into a 404.
 	mux.HandleFunc("/v2/email/list-identities", s.listIdentities)
 	mux.HandleFunc("/v2/email/identities/{domain}", s.getIdentity)
+	// GetAccount is GET /v2/email/account (the SDK's own request snapshot says so). No method pinned,
+	// for the same reason as the identity routes.
+	mux.HandleFunc("/v2/email/account", s.account)
+	mux.HandleFunc("POST /_quota", s.setQuota)
 	mux.HandleFunc("POST /_fail", s.fail)
 	mux.HandleFunc("POST /_reset", s.reset)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -267,4 +288,43 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 // writeError answers the way SES does: a __type and a message.
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]string{"__type": code, "message": message})
+}
+
+// account answers GetAccount. An unconfigured fake says it has no quota rather than inventing one:
+// the app's answer to that is one per second, and a test that wants a number sets one.
+func (s *Server) account(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", r.Method)
+		return
+	}
+	s.mu.Lock()
+	quota, hasQuota := s.quota, s.hasQuota
+	s.mu.Unlock()
+	if !hasQuota {
+		writeError(w, http.StatusNotFound, "NotFound", "this fake has no quota configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"SendQuota": map[string]any{
+			"MaxSendRate":     quota.MaxSendRate,
+			"Max24HourSend":   quota.Max24HourSend,
+			"SentLast24Hours": quota.SentLast24Hours,
+		},
+		"SendingEnabled":          true,
+		"ProductionAccessEnabled": true,
+	})
+}
+
+// setQuota changes what GetAccount reports, for a test that has to move the account's numbers while a
+// send is running (an increase being granted, a day's allowance running out).
+func (s *Server) setQuota(w http.ResponseWriter, r *http.Request) {
+	var quota Quota
+	if err := json.NewDecoder(r.Body).Decode(&quota); err != nil {
+		writeError(w, http.StatusBadRequest, "BadRequest", err.Error())
+		return
+	}
+	s.mu.Lock()
+	s.quota, s.hasQuota = quota, true
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

@@ -143,11 +143,21 @@ func (c *Controller) OnSuccess(now time.Time) {
 // Rate is the current ceiling, in sends per second.
 func (c *Controller) Rate(time.Time) float64 { return c.rate }
 
+// Unlimited is what Remaining24h answers for an account SES says has no 24-hour limit: the SDK's
+// documentation gives -1 that meaning, and an account like that has no ceiling to respect. Big enough
+// that min() against anything real picks the real one.
+const Unlimited = 1 << 40
+
 // Remaining24h is how many sends the account has left in its 24-hour window. It is 0 before any quota
 // is known: an unknown allowance is not an invitation to spend it.
 func (c *Controller) Remaining24h() int {
 	if !c.known {
 		return 0
+	}
+	if c.quota.Max24HourSend < 0 {
+		// -1 means unlimited (types.SendQuota.Max24HourSend). Read as a number it would leave this
+		// negative, and the largest accounts would be refused every send.
+		return Unlimited
 	}
 	remaining := c.quota.Max24HourSend - c.quota.SentLast24Hours
 	if remaining < 0 {

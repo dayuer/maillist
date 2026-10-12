@@ -135,3 +135,16 @@ func TestRemainingIsWhatIsLeftOfTheDay(t *testing.T) {
 		t.Fatalf("remaining = %d, want 0 rather than a negative number", got)
 	}
 }
+
+// SES 用 -1 表示「24 小时没有上限」（SDK 文档）。把它当数字读会留一个负数，于是最大的账号反而每封都
+// 被拒绝。
+func TestAnUnlimitedAccountIsNotACeiling(t *testing.T) {
+	c := New(defaultConfig())
+	unlimited := quota()
+	unlimited.Max24HourSend = -1
+	unlimited.SentLast24Hours = 1_000_000
+	c.SetQuota(unlimited, t0)
+	if got := c.Remaining24h(); got < 1<<30 {
+		t.Fatalf("remaining = %d, want an effectively unlimited number", got)
+	}
+}
