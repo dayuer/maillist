@@ -209,3 +209,37 @@ deploy/.env.example、docs/ses-smoke.md   两个新变量、ses:GetAccount、"�
 2. **`GetAccount` 的字段映射**：`MaxSendRate` 是 float、`Max24HourSend`/`SentLast24Hours` 是 float64——真实账号上是否与文档一致未验证。
 3. **压测的绝对秒数**：完成标志里的 `20000/450×1.2 s ≈ 53 s` 是上限；CI runner 上跑不出这个数字（核数与 IO 都不够），所以 2 万封那条压测**跑在本地与 CI 之外的机器上**（`-short` 时跳过并说明），CI 里跑 2000 封的小规模版本。
 4. **批量回写的失败面**：一个事务里继续执行错误的分段，前提是 SQLite 的约束冲突只回滚该语句（`ON CONFLICT ABORT` 的语义）。测试会用一条重复主键验证这一点；若某类错误会让事务进入不可继续的状态，批内其余段会一起失败——那时按「事务失败」处理。
+
+---
+
+## 5. 执行记录
+
+**分支**：`phase-8-throughput`，基线 `origin/main = d5d679e`；PR #15 合并后（`be3c208`）已 rebase。
+
+### Task A / Task B（审计 I-1、I-2）
+
+按复核方指定，先于 8.1 提交，各带复现测试。
+
+### Task 8.1–8.3（`ratectl` / `Bucket` / 配额读取）
+
+按计划实现，无偏离。两处实现细节值得记下：
+
+1. `ratectl.Unlimited`：SES 的 `Max24HourSend = -1` 表示不限量（SDK 快照里的说明），若按字面取 `min(...) = -1` 会把 24 小时上限算成负数，**发得越多拒绝得越早**。现在 `-1` 映射为 `1 << 40` 放进 `Remaining24h`，有专门用例。
+2. 真客户端钉路径的测试放在 `internal/fakessesrv`：`fakessesrv` 导入 `mailer`（`Quota` 类型），`mailer` 的测试再导入 `fakessesrv` 就是循环导入。测试搬过去之后组件层次反而更清楚——「真客户端与假服务端是否说同一件事」是 `fakessesrv` 的性质。
+
+### Task 8.4（并发发送）
+
+实现与 D8-4 一致：派发者 + N 个 worker，停止判定只在派发者一个 goroutine 上。三点在执行中显式化了：
+
+1. **worker 放弃一个 claim 时必须写回。** 领取之后、SES 调用之前的任何失败（读上下文、写状态、书写的错误）都要把消息放回队列，而且要用 `writeBack` 的**脱离 ctx** 通道：这些路径上最常见的原因恰恰是 ctx 刚被取消，用原 ctx 释放会失败并把它留成 claimed —— 下次启动按 unknown 恢复，也就是**静默漏发**（D14）。
+2. **取消不是失败。** `Run` 的 `select` 会在 done ctx 与 ticker 之间随机选，所以批次可能带着已取消的 ctx 进来；此时返回 error 等于把优雅关停报成发送故障。写回失败 + ctx 已取消时返回 `Retry` 而不是错误（既有 `TestSendBatchOnACancelledContextStopsCleanly` 就是为这条设的）。
+3. **已投递但没记上的，保持 claimed。** 释放它会重发（D14 最不能犯的错）；留成 claimed 只会让下次启动记成 unknown —— 「不知道」，永远不是「再发一次」。
+
+**测试的落点**（8.4 必测那条的实际情况）：`newFixture` 的 `SendConcurrency` 默认 16，整个 mailer 套件跑在生产形状上；**数「批次还没轮到的消息」的断言退回 1 个 worker**（`fixture.serial()`），因为在飞 16 个、总共 6 封时每封都已被派出，「还没轮到」这个概念不存在。这些句子属于队列，退回去写明白比放宽阈值诚实。并发下仍然成立的不变量另写用例，全部跑在 16：
+
+- `TestConsecutiveFailuresPauseTheCampaignUnderConcurrency`：暂停生效、失败数 ≤ 阈值 + 并发 − 1、失败 + pending = 总数；
+- `TestPausingMidBatchUnderConcurrencyLosesNothing`：连暂停都拦不住已在飞的那些，但**没有丢失、没有双份**；
+- `TestCancelledBatchReleasesClaimedMessages` 改成按实际计数：发出去的 + 回队列的 = 总数，claimed/unknown 均为 0，重启后每人恰好一封（`Fake.SentPerRecipient`）。
+
+**并发改变了停止的语义边界，这里显式记下**：连续失败与暂停规则只能拦住**还没交出去**的消息，在飞的（最多 `SEND_CONCURRENCY − 1` 个）一定会落地，其中暂停那部分还会真发出去。这不是缺陷而是并发的定义，代价是「5 连败暂停」实际可能发出 6 封失败（见上面的用例断言）；要完全避免只能让暂停先于派发，那会牺牲吞吐。
+
