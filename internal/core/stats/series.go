@@ -1,4 +1,4 @@
-// Package stats is the arithmetic behind `mailcheap stats`: the subscriber curve, the hourly send
+// Package stats is the arithmetic behind `nibwire stats`: the subscriber curve, the hourly send
 // series and the period-over-period comparisons. It is pure — the days and hours are bucketed here,
 // in Go, because SQLite has no IANA time zones (see the phase 4 plan, §0.3) — and the SQL that
 // fetches the rows lives in internal/store.

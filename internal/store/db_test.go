@@ -9,7 +9,7 @@ import (
 
 func openTemp(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ const migrationsAtThisRevision = 3
 // Opening twice must not re-apply a migration: 0001 creates tables without IF NOT EXISTS, so a
 // second run would fail loudly.
 func TestMigrateIsIdempotent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "mailcheap.db")
+	path := filepath.Join(t.TempDir(), "nibwire.db")
 	ctx := context.Background()
 	first, err := Open(ctx, path)
 	if err != nil {

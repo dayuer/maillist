@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/store"
 )
 
 // recorder is the mailer, seen from the notifier: it keeps what it was asked to send.
@@ -40,7 +40,7 @@ func (r *recorder) count() int {
 
 func newNotifier(t *testing.T, tweak func(*Notifier)) (*Notifier, *recorder) {
 	t.Helper()
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestAnAlertIsEmailedOncePerCooldown(t *testing.T) {
 
 	// 邮件长什么样：标题带前缀，正文是 title + detail + 路径。
 	last := sender.sent[len(sender.sent)-1]
-	if last.Subject != "[Mailcheap] Spam complaint" || last.From != "alerts@example.net" ||
+	if last.Subject != "[Nibwire] Spam complaint" || last.From != "alerts@example.net" ||
 		last.To != "admin@example.net" {
 		t.Fatalf("email = %+v", last)
 	}

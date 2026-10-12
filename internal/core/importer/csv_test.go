@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // tests/csv-import.test.mjs "maps common export headers". Upstream returns the header strings;

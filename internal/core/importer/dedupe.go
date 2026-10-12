@@ -1,6 +1,6 @@
 package importer
 
-import "mailcheap/internal/core/model"
+import "nibwire/internal/core/model"
 
 // Dedupe collapses rows that name the same address.
 //

@@ -3,7 +3,7 @@ package cleanup
 import (
 	"strings"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // KeepURLPlaceholder is where the "Yes, keep sending it" button's address goes. The email is rendered

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/ratectl"
-	"mailcheap/internal/core/rules"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/ratectl"
+	"nibwire/internal/core/rules"
 )
 
 // 限流的那封回到队列，最终只被 SES 接受一次。

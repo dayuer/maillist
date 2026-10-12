@@ -8,11 +8,11 @@
 #
 # The settings come from deploy/.env; see deploy/.env.example for what has to be in it.
 services:
-  mailcheap:
+  nibwire:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: mailcheap:local
+    image: nibwire:local
     restart: unless-stopped
     env_file:
       - .env
@@ -24,10 +24,10 @@ services:
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12}
     volumes:
       # The database, its -wal and -shm, and the uploaded images. Back it up with
-      # `mailcheap db backup`, not with cp (design §4.3).
-      - mailcheap-data:/data
+      # `nibwire db backup`, not with cp (design §4.3).
+      - nibwire-data:/data
     healthcheck:
-      test: ["CMD", "mailcheap", "health"]
+      test: ["CMD", "nibwire", "health"]
       interval: 30s
       timeout: 5s
       start_period: 10s
@@ -36,7 +36,7 @@ services:
     image: caddy:2
     restart: unless-stopped
     depends_on:
-      - mailcheap
+      - nibwire
     ports:
       - "80:80"
       - "443:443"
@@ -50,5 +50,5 @@ services:
       - caddy-data:/data
 
 volumes:
-  mailcheap-data:
+  nibwire-data:
   caddy-data:

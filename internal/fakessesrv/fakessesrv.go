@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/mailer"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/mailer"
 )
 
 // Email is one request the fake answered. The body travels with it because that is where a reader's

@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/archive"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/render"
-	"mailcheap/internal/core/sign"
-	"mailcheap/internal/core/slug"
+	"nibwire/internal/core/archive"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/render"
+	"nibwire/internal/core/sign"
+	"nibwire/internal/core/slug"
 )
 
 const (
@@ -82,7 +82,7 @@ var feedbackUnsafeChars = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 // FeedbackID is the SES feedback-id header value: Gmail Postmaster Tools reports spam rates per
 // field, and the last field identifies the sender.
 func FeedbackID(campaignID string, kind model.MessageKind, newsletterSlug string) string {
-	parts := []string{campaignID, newsletterSlug, string(kind), "mailcheap"}
+	parts := []string{campaignID, newsletterSlug, string(kind), "nibwire"}
 	if campaignID == "" {
 		parts[0] = string(kind)
 	}

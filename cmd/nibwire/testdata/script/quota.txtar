@@ -1,0 +1,27 @@
+# quota：账号允许什么，以及这个进程会按什么速率发。
+#
+# 仓库里不接触 AWS，所以这里是替身账号（newQuota 的假发送器分支）：500/s、24 小时不限。速率是账号
+# 的数字减掉一成 headroom——450——而不是配置里写死的数。
+
+nibwire init
+nibwire quota
+stdout 'account       500 sends a second, no 24-hour limit'
+stdout 'sending       450/s \(from the SES account\)'
+stdout '24h remaining unlimited'
+stdout 'estimated     2s for 1,000 messages'
+
+nibwire quota --json
+stdout '"maxSendRate": 500'
+stdout '"max24HourSend": -1'
+stdout '"perSecond": 450'
+stdout '"quotaKnown": true'
+
+# 读不到账号就是一条错误，不是一个猜测的数字：这是一个诊断命令，说不出来就该说"说不出来"。
+# （发信路径上同一次读取失败只是回到 1/s 并告警——慢是安全方向；这里是人在问，直接报错更有用。）
+env NIBWIRE_FAKE_SES_LOG=
+env SES_ENDPOINT=http://127.0.0.1:1
+env SES_REGION=eu-west-1
+env SES_ACCESS_KEY_ID=test
+env SES_SECRET_ACCESS_KEY=test
+! nibwire quota
+stderr 'could not read the SES sending quota'

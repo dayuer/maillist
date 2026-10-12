@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"mailcheap/internal/core/sns"
+	"nibwire/internal/core/sns"
 )
 
 // maxWebhookBody is upstream's MAX_BODY_LENGTH: an SNS message is at most 256 KiB and the envelope

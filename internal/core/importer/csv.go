@@ -1,4 +1,4 @@
-// Package importer maps a CSV export from another provider onto Mailcheap contacts.
+// Package importer maps a CSV export from another provider onto Nibwire contacts.
 package importer
 
 import (
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // MaxRowsPerRequest caps one API/MCP import call (upstream MAX_IMPORT_ROWS_PER_REQUEST). The CLI

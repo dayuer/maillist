@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"mailcheap/internal/store"
+	"nibwire/internal/store"
 )
 
 // 完成标志（设计 §13 第 6 条）：一个 agent 只靠 MCP 走完

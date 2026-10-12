@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // 翻译 tests/archive-content.test.mjs。上游有三种格式，本端口两种：`rich` 是编辑器的产物，随编辑器

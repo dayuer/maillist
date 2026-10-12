@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/slowinput"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/slowinput"
 )
 
 // overBudget is a body a CommonMark parser cannot finish inside the budget: a long run of link openers.

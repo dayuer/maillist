@@ -6,15 +6,15 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/store"
 )
 
 // openTemp opens a migrated database in the test's own directory.
 func openTemp(t *testing.T) *store.DB {
 	t.Helper()
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestBuildDoesNotCountAnImportedLeave(t *testing.T) {
 	now := time.Now().UTC()
 	lastWeek := now.AddDate(0, 0, -7)
 
-	// 导入：订阅与退订同一时刻，也就是「Mailcheap 认得他之前就退订了」。
+	// 导入：订阅与退订同一时刻，也就是「Nibwire 认得他之前就退订了」。
 	newContact(t, db, newsletter.ID, "imported@example.com", model.ContactUnsubscribed, &now, &now)
 	// 真正的一封信之后离开的人。
 	newContact(t, db, newsletter.ID, "gone@example.com", model.ContactUnsubscribed, &lastWeek, &now)

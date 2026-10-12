@@ -13,7 +13,7 @@ lint:
 	$(GOLANGCI) run ./...
 
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o bin/mailcheap ./cmd/mailcheap
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o bin/nibwire ./cmd/nibwire
 
 upstream:
 	scripts/fetch-upstream.sh

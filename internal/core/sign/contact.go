@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/ids"
+	"nibwire/internal/core/ids"
 )
 
 // base64url JSON payload + "." + full base64url HMAC-SHA256 (43 characters).

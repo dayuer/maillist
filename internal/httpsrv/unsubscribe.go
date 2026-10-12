@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // unsubscribeLimit is upstream's RATE_LIMIT: Gmail and Yahoo send one-click requests from shared

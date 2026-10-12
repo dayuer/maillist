@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 const (
@@ -20,7 +20,7 @@ const mailJSON = `{
 	"messageId": "` + sesMessageID + `",
 	"destination": ["Reader@Example.com"],
 	"headers": [{"name": "List-Unsubscribe", "value": "<https://mail.example.com/api/unsubscribe>"}],
-	"tags": {"message_id": ["` + testMessageID + `"], "kind": ["campaign"], "ses:configuration-set": ["mailcheap"]}
+	"tags": {"message_id": ["` + testMessageID + `"], "kind": ["campaign"], "ses:configuration-set": ["nibwire"]}
 }`
 
 var detailKey = map[string]string{

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/content"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/slowinput"
+	"nibwire/internal/core/content"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/slowinput"
 )
 
 // tests/slow-inputs.test.mjs 的归档那一半：500 KB 的恶意正文必须在线性时间内渲染完，而且渲染出来的

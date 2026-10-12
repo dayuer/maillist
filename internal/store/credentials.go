@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/creds"
+	"nibwire/internal/creds"
 )
 
 // Credential is one row of the credentials table. The token itself is never stored and never read

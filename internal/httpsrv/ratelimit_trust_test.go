@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/config"
+	"nibwire/internal/config"
 )
 
 // 伪造的 X-Forwarded-For 不能换来新的限额。

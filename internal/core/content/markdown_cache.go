@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // A CommonMark parser has shapes it is quadratic on, and a body may be half a megabyte: measured, 500 KB

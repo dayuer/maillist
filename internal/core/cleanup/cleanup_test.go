@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // 夹具与上游 tests/cleanup.test.mjs 相同：同一个 NOW、同一批联系人、同一组设置。

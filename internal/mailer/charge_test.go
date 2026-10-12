@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/creds"
-	"mailcheap/internal/jobs"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/creds"
+	"nibwire/internal/jobs"
+	"nibwire/internal/store"
 )
 
-// newCredential issues a credential with a daily_budget, the way `mailcheap credentials create`
+// newCredential issues a credential with a daily_budget, the way `nibwire credentials create`
 // does — the plaintext never exists here, only the row the engine reads.
 func newCredential(t *testing.T, f *fixture, budget int) store.Credential {
 	t.Helper()

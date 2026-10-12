@@ -116,7 +116,7 @@ func TestALeaverCountsUntilTheyLeft(t *testing.T) {
 	}
 }
 
-// 退信/投诉写进 suppression 时：只有 Mailcheap 自己知道离开时间的那条才算。
+// 退信/投诉写进 suppression 时：只有 Nibwire 自己知道离开时间的那条才算。
 func TestSuppressionLeavers(t *testing.T) {
 	contact := Activity{
 		Source: "cli", SubscribedAt: ptr(at("2026-09-20T10:00:00Z")), CreatedAt: at("2026-09-20T10:00:00Z"),
@@ -139,7 +139,7 @@ func TestSuppressionLeavers(t *testing.T) {
 		t.Fatalf("leaves = %v, want none", got.Leaves)
 	}
 
-	// The suppression was written as the import created the contact: it happened before Mailcheap.
+	// The suppression was written as the import created the contact: it happened before Nibwire.
 	imported := Activity{
 		Source: ImportSource, SubscribedAt: ptr(at("2026-10-01T10:00:00Z")),
 		CreatedAt: at("2026-10-01T10:00:00Z"), LeftAt: ptr(at("2026-10-01T10:00:30Z")),
@@ -150,18 +150,18 @@ func TestSuppressionLeavers(t *testing.T) {
 	}
 }
 
-func TestHasLeftInMailcheap(t *testing.T) {
+func TestHasLeftInNibwire(t *testing.T) {
 	created := at("2026-10-01T10:00:00Z")
-	if HasLeftInMailcheap(nil, created) {
+	if HasLeftInNibwire(nil, created) {
 		t.Error("no date is not a leave")
 	}
-	if HasLeftInMailcheap(ptr(created), created) {
+	if HasLeftInNibwire(ptr(created), created) {
 		t.Error("a leave at the moment of creation is the import's own row")
 	}
-	if HasLeftInMailcheap(ptr(created.Add(30*time.Second)), created) {
+	if HasLeftInNibwire(ptr(created.Add(30*time.Second)), created) {
 		t.Error("a leave inside the import window is not ours")
 	}
-	if !HasLeftInMailcheap(ptr(created.Add(61*time.Second)), created) {
+	if !HasLeftInNibwire(ptr(created.Add(61*time.Second)), created) {
 		t.Error("a leave after the import window is ours")
 	}
 }

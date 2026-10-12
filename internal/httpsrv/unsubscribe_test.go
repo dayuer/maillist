@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // GET 永不改状态：邮件客户端会把 List-Unsubscribe 的地址当普通链接打开。

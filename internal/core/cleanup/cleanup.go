@@ -9,7 +9,7 @@ package cleanup
 import (
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // LastChanceDays is how long a warned contact has to answer before a later send makes them dormant.
@@ -66,7 +66,7 @@ const (
 
 // LastSignOfLife is upstream getLastSignOfLife: an open, a click, the "keep sending it" click, the
 // confirmation click, or signing up — whichever is most recent. Someone who never engaged at all is
-// dated by the day they joined, which is the only thing Mailcheap knows about them.
+// dated by the day they joined, which is the only thing Nibwire knows about them.
 func LastSignOfLife(c model.Contact) time.Time {
 	times := []time.Time{c.CreatedAt}
 	if c.SubscribedAt != nil {

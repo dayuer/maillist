@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // PublishedStatuses are the states an issue can be read in: it is going out, it is paused half way,

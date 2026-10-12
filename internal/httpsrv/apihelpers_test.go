@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/creds"
+	"nibwire/internal/creds"
 )
 
 // The v1 API tests send JSON rather than form posts, and read status codes and error strings back.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 func signupForm(email string) url.Values { return url.Values{"email": {email}} }

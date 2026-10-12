@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/archive"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/stats"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/archive"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/stats"
+	"nibwire/internal/store"
 )
 
 // The archive is the deployment's public side: a newsletter's past issues, the author's page, the

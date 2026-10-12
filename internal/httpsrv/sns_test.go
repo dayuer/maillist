@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"mailcheap/internal/config"
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/core/sns"
+	"nibwire/internal/config"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/sns"
 )
 
 const testCertURL = "https://sns.us-east-1.amazonaws.com/SimpleNotificationService-9c6465fa7f48f5cacd23014631ec1136.pem"
@@ -79,7 +79,7 @@ func snsEnvelope(t *testing.T, messageType string, body map[string]string) []byt
 	return encoded
 }
 
-const testTopicARN = "arn:aws:sns:us-east-1:123456789012:mailcheap-ses-events"
+const testTopicARN = "arn:aws:sns:us-east-1:123456789012:nibwire-ses-events"
 
 func (s *testServer) postWebhook(t *testing.T, body []byte) *http.Response {
 	t.Helper()

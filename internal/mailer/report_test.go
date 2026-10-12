@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // 发一封测试邮件不碰任何报表。

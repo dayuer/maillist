@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // GET /o/{token} 永远返回 1×1 GIF，签名有效才记一次打开。

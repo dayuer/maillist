@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/alerts"
-	"mailcheap/internal/core/ratectl"
-	"mailcheap/internal/store"
+	"nibwire/internal/alerts"
+	"nibwire/internal/core/ratectl"
+	"nibwire/internal/store"
 )
 
 // flakyQuota answers the first N times with an error, then the quota.
@@ -102,7 +102,7 @@ func TestNeverHavingReadAQuotaWarnsOnce(t *testing.T) {
 // newQuotaTestStore is a migrated database in the test's own directory.
 func newQuotaTestStore(t *testing.T) *store.DB {
 	t.Helper()
-	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "mailcheap.db"))
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "nibwire.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

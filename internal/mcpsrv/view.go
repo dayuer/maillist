@@ -3,8 +3,8 @@ package mcpsrv
 import (
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/model"
+	"nibwire/internal/store"
 )
 
 // The views are what the read tools answer with. The core model's fields are Go names, and the tool

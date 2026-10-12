@@ -1,4 +1,4 @@
-// Package jobs is Mailcheap's task queue: the jobs table in internal/store plus the lease, retry and
+// Package jobs is Nibwire's task queue: the jobs table in internal/store plus the lease, retry and
 // wake-up policy. It replaces QStash (design D2) — a scheduled task is a row with a run_at.
 package jobs
 
@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"mailcheap/internal/core/ids"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/ids"
+	"nibwire/internal/store"
 )
 
 // State is where a job is in its life.
@@ -25,7 +25,7 @@ const (
 	// Dead is a job whose attempts ran out. It stays for the audit trail and is never leased again.
 	Dead State = "dead"
 	// AwaitingApproval is a job a human has to release (SEND_APPROVAL=manual, design §11). Lease never
-	// picks it up; `mailcheap approve <id>` moves it back to Pending.
+	// picks it up; `nibwire approve <id>` moves it back to Pending.
 	AwaitingApproval State = "awaiting_approval"
 )
 

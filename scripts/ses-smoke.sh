@@ -39,10 +39,10 @@ ask() { printf '\n>>> %s\n' "$1"; }
 # run <args…> — the CLI, or the command it would run.
 run() {
 	if [ "$DRY_RUN" = "1" ]; then
-		printf 'mailcheap %s\n' "$*"
+		printf 'nibwire %s\n' "$*"
 		return 0
 	fi
-	mailcheap "$@"
+	nibwire "$@"
 }
 
 step_ok() {
@@ -78,7 +78,7 @@ if step_ok; then
 	domains=$(run domains)
 	printf '%s\n' "$domains"
 	printf '%s' "$domains" | grep -q "verified" || fail "no verified sending identity: publish the
-      DNS records `mailcheap domains` prints, wait for SES to see them, and run this again"
+      DNS records `nibwire domains` prints, wait for SES to see them, and run this again"
 	from=$(printf '%s' "$domains" | awk '/verified/{print $1; exit}')
 	pass "the sending domain is verified ($from)"
 else

@@ -52,7 +52,7 @@ contains() {
 }
 
 # run <args…> — the CLI inside the container.
-run() { $COMPOSE exec -T mailcheap mailcheap "$@"; }
+run() { $COMPOSE exec -T nibwire nibwire "$@"; }
 
 step "writing deploy/.env"
 cat >"$ENV_FILE" <<'EOF'
@@ -62,8 +62,8 @@ SESSION_SECRET=smoke-test-session-secret-of-at-least-32-characters
 APP_URL=http://localhost
 SENDING_ENABLED=true
 SES_REGION=eu-west-1
-SES_CONFIGURATION_SET=mailcheap-smoke
-SES_SNS_TOPIC_ARN=arn:aws:sns:eu-west-1:000000000000:mailcheap-smoke
+SES_CONFIGURATION_SET=nibwire-smoke
+SES_SNS_TOPIC_ARN=arn:aws:sns:eu-west-1:000000000000:nibwire-smoke
 SITE_ADDRESS=http://localhost
 TRUSTED_PROXIES=172.16.0.0/12
 EOF
@@ -84,7 +84,7 @@ until run health >/dev/null 2>&1; do
 	[ "$tries" -gt 90 ] && fail "the app never became healthy"
 	sleep 1
 done
-pass "mailcheap health"
+pass "nibwire health"
 
 tries=0
 until curl -fsS "$SITE/healthz" >/dev/null 2>&1; do
@@ -120,7 +120,7 @@ step "sending the issue"
 sent=$(run campaign send --subject "$SUBJECT" --yes)
 contains "$sent" "queued 1 recipients" "the send was queued"
 tries=0
-until $COMPOSE exec -T mailcheap mailcheap campaign report --subject "$SUBJECT" >/dev/null 2>&1; do
+until $COMPOSE exec -T nibwire nibwire campaign report --subject "$SUBJECT" >/dev/null 2>&1; do
 	tries=$((tries + 1))
 	[ "$tries" -gt 60 ] && fail "the campaign report never became readable"
 	sleep 1
@@ -273,7 +273,7 @@ audience=$(mktemp)
 # 0644 before the copy: docker cp keeps the source's mode, and the app runs as a non-root user in the
 # container, so a mktemp file's 0600 arrives unreadable.
 chmod 0644 "$audience"
-$COMPOSE cp "$audience" mailcheap:/tmp/audience.csv >/dev/null
+$COMPOSE cp "$audience" nibwire:/tmp/audience.csv >/dev/null
 rm -f "$audience"
 imported=$(run contact import /tmp/audience.csv --newsletter "$SLUG" --source smoke)
 contains "$imported" "created $BULK" "the audience was imported"
@@ -332,7 +332,7 @@ answer=$( (
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"count_audience","arguments":{"newsletter":"$SLUG"}}}
 EOF
 	sleep 2
-) | $COMPOSE exec -T mailcheap mailcheap mcp --stdio --token "$token" 2>/dev/null) ||
+) | $COMPOSE exec -T nibwire nibwire mcp --stdio --token "$token" 2>/dev/null) ||
 	fail "the stdio MCP server did not answer"
 contains "$answer" "count_audience" "the tool list came back over stdio"
 contains "$answer" "send_campaign" "including the ones that can send"

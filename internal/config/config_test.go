@@ -84,7 +84,7 @@ func TestTheConcurrencyAndHeadroomSettings(t *testing.T) {
 func TestDefaultsAreSafe(t *testing.T) {
 	c, _ := Load(with("APP_URL", "https://mail.example.com/"))
 	if c.SendingOn || c.SendApproval != "auto" || c.AppURL != "https://mail.example.com" ||
-		c.DBPath != "/data/mailcheap.db" || c.MCPHTTPAddr != "127.0.0.1:8081" || c.Limits.MaxSendsPerDay != 50_000 {
+		c.DBPath != "/data/nibwire.db" || c.MCPHTTPAddr != "127.0.0.1:8081" || c.Limits.MaxSendsPerDay != 50_000 {
 		t.Fatalf("unexpected defaults %+v", c)
 	}
 }
@@ -116,7 +116,7 @@ func TestSendingOnNeedsSomewhereToSend(t *testing.T) {
 	if _, err := Load(env); err == nil {
 		t.Fatal("SENDING_ENABLED=true with no SES_REGION, endpoint or fake was accepted")
 	}
-	for _, key := range []string{"SES_REGION", "SES_ENDPOINT", "MAILCHEAP_FAKE_SES_LOG"} {
+	for _, key := range []string{"SES_REGION", "SES_ENDPOINT", "NIBWIRE_FAKE_SES_LOG"} {
 		env := with("SENDING_ENABLED", "true")
 		env[key] = "something"
 		if _, err := Load(env); err != nil {
@@ -129,10 +129,10 @@ func TestSendingOnNeedsSomewhereToSend(t *testing.T) {
 	}
 }
 
-// MAILCHEAP_FAKE_SES_DOMAINS is the stand-in identity list the end-to-end script drives the
+// NIBWIRE_FAKE_SES_DOMAINS is the stand-in identity list the end-to-end script drives the
 // unverified branch with; commas and blanks are the operator's, not ours.
 func TestFakeSESDomains(t *testing.T) {
-	c, err := Load(with("MAILCHEAP_FAKE_SES_DOMAINS", " example.net , other.example,"))
+	c, err := Load(with("NIBWIRE_FAKE_SES_DOMAINS", " example.net , other.example,"))
 	if err != nil {
 		t.Fatal(err)
 	}

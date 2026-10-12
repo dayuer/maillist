@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"mailcheap/internal/core/model"
-	"mailcheap/internal/store"
+	"nibwire/internal/core/model"
+	"nibwire/internal/store"
 )
 
 // 重跑一次 queueCampaign（job 重试）不会把当天的预算算两遍。

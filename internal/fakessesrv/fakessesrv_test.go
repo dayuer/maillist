@@ -14,8 +14,8 @@ import (
 
 	"github.com/aws/smithy-go"
 
-	"mailcheap/internal/core/rules"
-	"mailcheap/internal/mailer"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/mailer"
 )
 
 // postSend makes one send request the way the real client does, and answers with the status and the
@@ -153,7 +153,7 @@ func TestTheRealSESClientCanSendThroughTheFake(t *testing.T) {
 	sender, err := mailer.NewSES(context.Background(), mailer.SESOptions{
 		Region: "eu-west-1", Endpoint: server.URL,
 		AccessKeyID: "test", SecretKey: "test",
-	}, "mailcheap-test", true)
+	}, "nibwire-test", true)
 	if err != nil {
 		t.Fatal(err)
 	}

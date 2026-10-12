@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf16"
 
-	"mailcheap/internal/core/model"
+	"nibwire/internal/core/model"
 )
 
 // subject-length 按 UTF-16 码元算，不是按 rune。

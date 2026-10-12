@@ -10,7 +10,7 @@ import (
 
 	"github.com/aws/smithy-go"
 
-	"mailcheap/internal/core/rules"
+	"nibwire/internal/core/rules"
 )
 
 func TestFakeRecordsSends(t *testing.T) {

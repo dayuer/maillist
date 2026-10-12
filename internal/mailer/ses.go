@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2/types"
 
-	"mailcheap/internal/core/rules"
+	"nibwire/internal/core/rules"
 )
 
 // SESSender sends through Amazon SES v2. It is the production Sender.

@@ -1,6 +1,6 @@
 package importer
 
-import "mailcheap/internal/core/model"
+import "nibwire/internal/core/model"
 
 // Write is what one imported row asks for. The caller (the store, phase 2) applies it: an Insert
 // adds the contact with the row's status, an UpdateID moves an existing contact's status forward.
