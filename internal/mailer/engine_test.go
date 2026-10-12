@@ -597,3 +597,58 @@ func messagesWithStatus(t *testing.T, f *fixture, status model.MessageStatus) []
 	}
 	return out
 }
+
+// 归档打开时，一期在发出时拿到自己页面的地址（上游 assignArchiveSlug）：从主题来、唯一、且此后不再变。
+func TestAnIssueGetsItsArchiveSlugWhenItGoesOut(t *testing.T) {
+	f := newFixture(t, 1)
+	ctx := context.Background()
+	f.newsletter.ArchiveEnabled = true
+	if err := f.db.UpdateNewsletter(ctx, f.newsletter); err != nil {
+		t.Fatal(err)
+	}
+	f.campaign.Subject = "Issue 12: the one about pricing!"
+	if err := f.db.UpdateCampaign(ctx, f.campaign); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := f.db.Campaign(ctx, f.campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.ArchiveSlug != "issue-12-the-one-about-pricing" {
+		t.Fatalf("slug = %q", queued.ArchiveSlug)
+	}
+
+	// 第二期同样的主题：地址不撞车。
+	second := model.NewCampaign(f.newsletter.ID, "Issue 12: the one about pricing!", time.Now().UTC())
+	second.Body = "# Hello\n\nRead [this](https://example.com)."
+	if err := f.db.CreateCampaign(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.engine.Queue(ctx, second.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	other, err := f.db.Campaign(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.ArchiveSlug != "issue-12-the-one-about-pricing-2" {
+		t.Fatalf("second slug = %q", other.ArchiveSlug)
+	}
+
+	// 归档关着：不分配（一个永远不会被服务的地址只是看着像回事）。
+	off := newFixture(t, 1)
+	off.newsletter.ArchiveEnabled = false
+	if err := off.db.UpdateNewsletter(ctx, off.newsletter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := off.engine.Queue(ctx, off.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	if plain, err := off.db.Campaign(ctx, off.campaign.ID); err != nil || plain.ArchiveSlug != "" {
+		t.Fatalf("archive off: %q %v", plain.ArchiveSlug, err)
+	}
+}
