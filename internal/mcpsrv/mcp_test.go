@@ -116,6 +116,33 @@ func newFixtureFull(t *testing.T, scopes []creds.Scope, budget int) *fixture {
 	}
 }
 
+// seedQueuedMessages writes the messages a campaign would have been given when it first started, with
+// the deployment's own pool rather than this credential's. It is how a test reaches the state
+// "queued, then paused" without going through a send.
+func (f *fixture) seedQueuedMessages(t *testing.T, campaign model.Campaign, newsletter model.Newsletter,
+	contacts int) {
+	t.Helper()
+	ctx := context.Background()
+	audience, err := f.store.SelectAudience(ctx, newsletter.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audience) < contacts {
+		t.Fatalf("the audience has %d contacts, want at least %d", len(audience), contacts)
+	}
+	messages := make([]model.Message, 0, contacts)
+	for _, contact := range audience[:contacts] {
+		messages = append(messages, model.Message{
+			ID: ids.New(), Kind: model.KindCampaign, CampaignID: campaign.ID,
+			NewsletterID: newsletter.ID, ContactID: contact.ID, Email: contact.Email,
+			Status: model.MessagePending, CreatedAt: time.Now().UTC(),
+		})
+	}
+	if _, err := f.store.InsertMessages(ctx, messages); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // connectWith opens a session for this fixture's credential.
 func (f *fixture) connect(t *testing.T) *mcp.ClientSession {
 	t.Helper()

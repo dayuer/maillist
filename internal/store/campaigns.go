@@ -155,18 +155,26 @@ func (db *DB) Campaigns(ctx context.Context, newsletterID string, limit, offset 
 	return out, rows.Err()
 }
 
-// UpdateCampaign writes every mutable column of c back. created_at is never rewritten.
+// UpdateCampaign writes the columns an editor owns — the ones an operator changes by hand or through
+// an agent — and created_at is never rewritten.
+//
+// What is left out is the point of this function. status, the four sending timestamps and web_views
+// belong to something else (SetCampaignStatus, SetCampaignSchedule, SetCampaignStartedAt/SentAt,
+// SetCampaignTestSentAt, AddWebViews), and editing a campaign is a read-modify-write: the operator
+// loads it, changes a field, and writes it back. Writing the sender's own columns from a copy read
+// before the sender finished would undo work that had already happened — a campaign the sender had
+// just marked sent would go back to sending, and an issue's view count would be reset to whatever it
+// was when the editor opened the page. Each of those columns has a setter that only moves it as part
+// of a decision, which is where the guard against a wrong transition lives.
 func (db *DB) UpdateCampaign(ctx context.Context, c model.Campaign) error {
 	return db.Write(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `UPDATE campaigns SET
-            subject = ?, preview_text = ?, format = ?, body = ?, status = ?, audience_limit = ?,
-            source = ?, scheduled_at = ?, started_at = ?, sent_at = ?, test_sent_at = ?,
-            archive_slug = ?, thumbnail_url = ?, archive_listed = ?, archive_pinned = ?,
-            web_views = ?, updated_at = ? WHERE id = ?`,
-			c.Subject, c.PreviewText, string(c.Format), c.Body, string(c.Status), c.AudienceLimit,
-			c.Source, formatTimePtr(c.ScheduledAt), formatTimePtr(c.StartedAt),
-			formatTimePtr(c.SentAt), formatTimePtr(c.TestSentAt), c.ArchiveSlug, c.ThumbnailURL,
-			boolInt(c.ArchiveListed), boolInt(c.ArchivePinned), c.WebViews,
+            newsletter_id = ?, subject = ?, preview_text = ?, format = ?, body = ?,
+            audience_limit = ?, source = ?, archive_slug = ?, thumbnail_url = ?,
+            archive_listed = ?, archive_pinned = ?, updated_at = ? WHERE id = ?`,
+			c.NewsletterID, c.Subject, c.PreviewText, string(c.Format), c.Body,
+			c.AudienceLimit, c.Source, c.ArchiveSlug, c.ThumbnailURL,
+			boolInt(c.ArchiveListed), boolInt(c.ArchivePinned),
 			formatTime(time.Now()), c.ID)
 		if err != nil {
 			return err

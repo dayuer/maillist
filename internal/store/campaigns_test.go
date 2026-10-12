@@ -43,6 +43,61 @@ func TestArchiveListedColumnDefaultsToListed(t *testing.T) {
 	}
 }
 
+// 编辑是读—改—写：写回的列里不能再带上状态机拥有的那些，否则并发做过的状态迁移会被安静地回滚。
+//
+// The hazard is an interleaving, not parallel goroutines, so the test is the interleaving: the editor
+// reads the row, the sender finishes the campaign and a reader's page view lands, and then the editor
+// writes the copy it has been holding. What the sender and the reader did has to survive — the
+// database is not the editor's to overwrite, it is only the editor's to partly change.
+func TestEditingACampaignCannotUndoAConcurrentChange(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	newsletter := seedNewsletter(t, db)
+	campaign := model.NewCampaign(newsletter.ID, "Issue 12", time.Now().UTC())
+	if err := db.CreateCampaign(ctx, campaign); err != nil {
+		t.Fatal(err)
+	}
+	// The editor's copy, read now.
+	open, err := db.Campaign(ctx, campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The campaign goes out while the operator is typing.
+	if moved, err := db.SetCampaignStatus(ctx, campaign.ID,
+		[]model.CampaignStatus{model.CampaignDraft}, model.CampaignSending); err != nil || !moved {
+		t.Fatalf("start sending: %v", err)
+	}
+	if moved, err := db.SetCampaignStatus(ctx, campaign.ID,
+		[]model.CampaignStatus{model.CampaignSending}, model.CampaignSent); err != nil || !moved {
+		t.Fatalf("finish: %v", err)
+	}
+	if err := db.AddWebViews(ctx, campaign.ID, 7); err != nil {
+		t.Fatal(err)
+	}
+
+	// The editor writes back.
+	open.Subject = "Issue 12 (renamed)"
+	if err := db.UpdateCampaign(ctx, open); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := db.Campaign(ctx, campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Subject != "Issue 12 (renamed)" {
+		t.Errorf("subject = %q, want the edit to have happened", after.Subject)
+	}
+	if after.Status != model.CampaignSent {
+		t.Errorf("status = %s, want sent: the edit rolled back a state change it never saw",
+			after.Status)
+	}
+	if after.WebViews != 7 {
+		t.Errorf("web views = %d, want 7: the edit overwrote a count it never saw", after.WebViews)
+	}
+}
+
 // 端到端：走 model.NewCampaign 建草稿再读回来，仍然 listed。
 func TestCreatedCampaignRoundTripsAsListed(t *testing.T) {
 	db := openTemp(t)
