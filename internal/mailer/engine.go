@@ -187,6 +187,11 @@ func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 250 * time.Millisecond
 	}
+	if cfg.SendRatePerSec < 1 {
+		// A bucket with a rate of zero would never hand out a slot. One a second is what an unknown
+		// account gets anyway (D8-2), and the controller corrects it as soon as there is a reading.
+		cfg.SendRatePerSec = 1
+	}
 	if log == nil {
 		log = slog.Default()
 	}
@@ -198,6 +203,22 @@ func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log
 
 // Close stops the rate limiter.
 func (e *Engine) Close() { e.bucket.Close() }
+
+// Bucket is the rate limiter. It is what the quota poller moves when the account's numbers change:
+// the controller decides the rate and the bucket enforces it (D8-1).
+func (e *Engine) Bucket() *Bucket { return e.bucket }
+
+// SetQuota applies a reading from SES to the rate.
+//
+// It is what the poller does on each tick, and what a command does once before it drains its own
+// queue: a CLI process has no poller, and a rate it never read is one email a second (D8-2).
+func (e *Engine) SetQuota(quota ratectl.Quota, now time.Time) {
+	if e.control == nil {
+		return
+	}
+	e.control.SetQuota(quota, now)
+	FollowControl(e.control, e.bucket, now)
+}
 
 // SendBatch sends one batch. With no ids it claims up to rules.SendBatchSize messages itself, which
 // is what Run uses; with ids it sends exactly those (the CLI's path).
@@ -894,7 +915,9 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 		// Sending off is a setting, not a failure: SendBatch refuses so that a caller asking to send
 		// hears why, but this loop just idles. Returning that refusal would make serve stop the
-		// archive, the unsubscribe links and MCP along with it.
+		// archive, the unsubscribe links and MCP along with it — this process still serves readers,
+		// runs the scheduler and answers the admin surface, and any supervisor would restart a
+		// non-zero exit forever.
 		if !e.cfg.SendingOn {
 			continue
 		}

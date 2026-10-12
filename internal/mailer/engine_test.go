@@ -691,13 +691,13 @@ func TestRunKeepsRunningWhileSendingIsOff(t *testing.T) {
 	f := newFixture(t, 1)
 	f.engine.cfg.SendingOn = false
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- f.engine.Run(ctx) }()
 
 	// Twenty poll intervals: long enough for the old Run to have hit SendBatch and returned.
 	select {
 	case err := <-done:
-		cancel()
 		t.Fatalf("Run returned %v while sending is off, want it to keep running", err)
 	case <-time.After(20 * f.engine.cfg.PollInterval):
 	}
@@ -713,6 +713,49 @@ func TestRunKeepsRunningWhileSendingIsOff(t *testing.T) {
 	}
 	if f.fake.SentCount() != 0 {
 		t.Fatalf("sent = %d, want 0", f.fake.SentCount())
+	}
+}
+
+// 空转就是空转：队列里的消息一封都不发、不领取，而且都还在队列里等着发送打开。
+//
+// The two tests overlap on purpose: the one above arrived on main with PR #19 and this one with the
+// phase 8 branch, and the reviewer asked for both. This one queues its messages first, so it says
+// what idling means for the work that is already waiting rather than only that the loop survived.
+func TestRunIdlesWhenSendingIsOff(t *testing.T) {
+	f := newFixture(t, 2)
+	ctx := context.Background()
+	if _, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	}
+	f.engine.cfg.SendingOn = false
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- f.engine.Run(runCtx) }()
+	// Twenty ticks of the fixture's 10 ms poll interval: an engine that stopped on the first one has
+	// had every chance to say so.
+	select {
+	case err := <-done:
+		cancel()
+		t.Fatalf("Run returned %v while sending is off, want it to idle", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want a clean stop", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop when its context was cancelled")
+	}
+
+	// Idle means idle: the queued messages are still in the queue and nothing was claimed or sent.
+	if claimed, unknown, pending := claimedCount(t, f.db); claimed != 0 || unknown != 0 || pending != 2 {
+		t.Fatalf("claimed = %d, unknown = %d, pending = %d, want 0/0/2", claimed, unknown, pending)
+	}
+	if sent := f.fake.SentCount(); sent != 0 {
+		t.Fatalf("%d messages were sent while sending is off", sent)
 	}
 }
 

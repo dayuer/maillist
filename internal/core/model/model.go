@@ -202,10 +202,17 @@ type Message struct {
 // well before. These live in model, not config, so core packages (rules, checks) reference them
 // without pulling in internal/config, which reads os (phase-1 purity gate).
 type Limits struct {
-	BounceRate               float64
-	ComplaintRate            float64
-	MaxEmailBytes            int
-	SendRatePerSecond        int
+	BounceRate    float64
+	ComplaintRate float64
+	MaxEmailBytes int
+	// SendRatePerSecond is a ceiling of our own on the send rate, 0 for none. It can only lower the
+	// rate the account gives: the account's numbers are the truth, and this is the operator being
+	// careful (design §19, D17).
+	SendRatePerSecond int
+	// SendRateHeadroom is the fraction of the account's rate to aim at, SEND_RATE_HEADROOM. Sending at
+	// exactly the account's limit means every rounding and every other client of the same account
+	// lands on a throttle.
+	SendRateHeadroom         float64
 	WelcomeEmailsPer10Minute int
 	MaxSendsPerDay           int
 }

@@ -733,6 +733,13 @@ func reportDryRun(ctx context.Context, a *app.App, cmd *cobra.Command, campaign 
 // drainQueue is the CLI's own sender: it drains queued messages until there are none left. It is
 // what a command does when no serve process holds the heartbeat.
 func drainQueue(ctx context.Context, a *app.App) error {
+	// The rate follows the account (D17), and this process has no poller: without a reading the send
+	// goes at one a second, which is the right answer to an account that cannot be asked and a very
+	// wrong one to an account that simply was not. A failure here is not fatal — slow is the safe
+	// direction — but it is worth saying.
+	if _, err := a.ReadQuota(ctx); err != nil {
+		a.Log.Warn("could not read the SES sending quota; sending at one a second", "error", err)
+	}
 	for {
 		batch, err := a.Mailer.SendBatch(ctx, nil)
 		if err != nil {

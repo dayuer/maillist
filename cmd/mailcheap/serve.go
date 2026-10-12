@@ -93,9 +93,13 @@ func runServe(cmd *cobra.Command, _ []string) error {
 			}
 		}()
 
-		errs := make(chan error, 4)
+		errs := make(chan error, 5)
 		var wg sync.WaitGroup
 		for name, run := range map[string]func() error{
+			// The rate follows the account's own numbers (D17), and this is what keeps them current:
+			// it reads once now and again every minute. A server is the process that needs this — it
+			// is the one that sends for hours — while a command asks once before it drains (app.ReadQuota).
+			"quota":     func() error { return a.Poller.Run(runCtx) },
 			"sender":    func() error { return a.Mailer.Run(runCtx) },
 			"scheduler": func() error { return runner.Run(runCtx) },
 			"http":      func() error { return a.HTTP.Run(runCtx, addr, shutdownTimeout) },

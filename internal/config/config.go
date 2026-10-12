@@ -13,9 +13,21 @@ import (
 
 const (
 	MinSessionSecretLength = 32
-	DefaultSendRate        = 10
-	MaxSendRate            = 14
 	DefaultMaxSendsPerDay  = 50_000
+
+	// DefaultSendConcurrency is how many sends are in flight at once. It is a starting point, not a
+	// number that is right for every account: what a deployment needs is the account's rate times how
+	// long one send takes, so an account allowed 450 a second against 80 ms of latency needs at least
+	// 36. `mailcheap quota` prints what the current pair comes to (docs/ses-smoke.md).
+	DefaultSendConcurrency = 16
+	// MaxSendConcurrency is where a typo stops being a typo: below this, more workers than there is
+	// memory for one send each is the only cost.
+	MaxSendConcurrency = 256
+	// DefaultSendHeadroom is the fraction of the account's rate to aim at (D17).
+	DefaultSendHeadroom = 0.9
+	// MaxSendRateCap bounds SEND_RATE_PER_SECOND. It replaced a hard 14: a deployment was never really
+	// limited to fourteen a second, and saying so only made the biggest accounts slow.
+	MaxSendRateCap = 5000
 )
 
 type Config struct {
@@ -26,8 +38,10 @@ type Config struct {
 	SendingOn     bool
 	SendApproval  string // "auto" or "manual"
 	MCPHTTPAddr   string
-	SESRegion     string
-	SESConfigSet  string
+	// SendConcurrency is SEND_CONCURRENCY: how many sends may be in flight at once (D16).
+	SendConcurrency int
+	SESRegion       string
+	SESConfigSet    string
 	// SESEndpoint replaces the SES service address (SES_ENDPOINT). The compose smoke stack points it
 	// at a fake SES; empty means the real one for the region.
 	SESEndpoint string
@@ -135,13 +149,15 @@ func Load(env map[string]string) (Config, error) {
 	}
 	dataDir := or(env["MAILCHEAP_DATA_DIR"], "/data")
 	return Config{
-		SessionSecret:      env["SESSION_SECRET"],
-		AppURL:             strings.TrimSuffix(or(env["APP_URL"], "http://localhost:8080"), "/"),
-		DataDir:            dataDir,
-		DBPath:             or(env["MAILCHEAP_DB"], dataDir+"/mailcheap.db"),
-		SendingOn:          env["SENDING_ENABLED"] == "true",
-		SendApproval:       approval,
-		MCPHTTPAddr:        or(env["MCP_HTTP_ADDR"], "127.0.0.1:8081"),
+		SessionSecret: env["SESSION_SECRET"],
+		AppURL:        strings.TrimSuffix(or(env["APP_URL"], "http://localhost:8080"), "/"),
+		DataDir:       dataDir,
+		DBPath:        or(env["MAILCHEAP_DB"], dataDir+"/mailcheap.db"),
+		SendingOn:     env["SENDING_ENABLED"] == "true",
+		SendApproval:  approval,
+		MCPHTTPAddr:   or(env["MCP_HTTP_ADDR"], "127.0.0.1:8081"),
+		SendConcurrency: intIn(env["SEND_CONCURRENCY"], 1, MaxSendConcurrency,
+			DefaultSendConcurrency),
 		SESRegion:          env["SES_REGION"],
 		SESConfigSet:       env["SES_CONFIGURATION_SET"],
 		SESEndpoint:        env["SES_ENDPOINT"],
@@ -155,10 +171,13 @@ func Load(env map[string]string) (Config, error) {
 		FakeSESLog:         env["MAILCHEAP_FAKE_SES_LOG"],
 		FakeSESDomains:     splitList(env["MAILCHEAP_FAKE_SES_DOMAINS"]),
 		Limits: model.Limits{
-			BounceRate:               0.02,
-			ComplaintRate:            0.0008,
-			MaxEmailBytes:            100_000,
-			SendRatePerSecond:        intIn(env["SEND_RATE_PER_SECOND"], 1, MaxSendRate, DefaultSendRate),
+			BounceRate:    0.02,
+			ComplaintRate: 0.0008,
+			MaxEmailBytes: 100_000,
+			// 0 is "no ceiling of our own": the rate follows the account (D17). It used to default to
+			// 10 and cap at 14, which is a guess about an account the deployment can see.
+			SendRatePerSecond:        intIn(env["SEND_RATE_PER_SECOND"], 1, MaxSendRateCap, 0),
+			SendRateHeadroom:         floatIn(env["SEND_RATE_HEADROOM"], 0.1, 1, DefaultSendHeadroom),
 			WelcomeEmailsPer10Minute: 100,
 			MaxSendsPerDay:           intIn(env["MAX_SENDS_PER_DAY"], 1, 10_000_000, DefaultMaxSendsPerDay),
 		},
@@ -194,6 +213,17 @@ func intIn(v string, lo, hi, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// floatIn is intIn for a fraction, with the same convention: anything out of range falls back rather
+// than failing the process, because a badly spelled setting should not be a deployment that will not
+// start.
+func floatIn(v string, lo, hi, fallback float64) float64 {
+	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil || f < lo || f > hi {
+		return fallback
+	}
+	return f
 }
 
 func environ() map[string]string {
