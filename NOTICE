@@ -1,7 +1,13 @@
-This repository (product name "Nibwire") is licensed under the Business Source License 1.1;
-see LICENSE. It is source-available, not Open Source: production and commercial use is permitted,
-offering it to third parties as a hosted service is not, and each version converts to
-AGPL-3.0-or-later four years after its first public release.
+Nibwire
+Copyright (c) 2026 dayuer
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU
+Affero General Public License as published by the Free Software Foundation, version 3 only
+(SPDX: AGPL-3.0-only); see LICENSE. It is distributed WITHOUT ANY WARRANTY; without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+The copyright holder also offers the same code under a separate commercial licence, for those who
+cannot or do not want to meet the AGPL's terms; see COMMERCIAL-LICENSE.md.
 
 The upstream project this port follows remains available under the MIT License from its own
 repository. Its copyright and permission notice, which the MIT License requires to be kept, follows.
