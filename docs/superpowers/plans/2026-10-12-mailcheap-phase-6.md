@@ -221,3 +221,50 @@ cmd/mailcheap/mcp.go  `mailcheap mcp --stdio | --http`
 2. **`send_test` 的例外**（D6-4）：它同步发送，且只记 1 的预算。如果复核方认为它也该经 jobs，改法是把它变成 `send_test` job + `get_job`，但那会失去「立刻知道发出去了没有」这个唯一的信息，建议保留。
 3. **未验证**：真实 SES 下的身份查询分页与缓存（`list_domains` 会走到它）——与阶段 5 同一条，仍然留给用户在真实账号上验证。
 4. **`git`**：本分支从 `origin/main = f14220f` 切出，不碰 main，不合并 PR。
+
+---
+
+## 5. 执行记录
+
+每个 Task 一次提交，共 7 个：计划、共享操作层、引擎记账、读 tool、写 tool、传输、冒烟脚本 + 执行记录。
+
+### 5.1 与计划的偏差
+
+| # | 计划 | 实际 | 为什么 |
+|---|---|---|---|
+| 1 | 未列 Task 6.0 | 新增 Task 6.0「共享操作层」，并把 `store.Campaigns` 加上 offset | MCP 需要 CLI 已有的三段操作（upload / stats / import）。抄一份就是 D6 明令禁止的分叉；提成包之后 CLI 的三个命令变成薄调用者，原有测试（`upload_test.go` 的魔数、testscript 的 `stats_report`/`import_contacts`）跟着成了这次搬家的回归网 |
+| 2 | 未提「视图」 | 新增 `internal/mcpsrv/view.go`：读 tool 返回映射过的结构（`from_email`、`preview_text`…） | 核心模型的字段是 Go 名字，输出会变成 `ID`/`FromEmail`，而同一批 tool 的**入参**是 snake_case。agent 读到的名字和它写的名字应该是一套；顺带把「一页 campaign 里每封正文都跟着回来」换成 `body_bytes` |
+| 3 | 6.1「读 tool 强制分页上限 100」 | 上限之外还拒绝**负数** offset/limit，而不是夹到边界 | 传负数说明调用方对这个字段的理解和服务器不一样，夹到边界会让它继续错下去 |
+| 4 | 0.2 说 `run_cleanup` 推迟到阶段 7 | 照此执行：注册 26 个 tool（设计 §9 的 27 个减去它） | 一个永远回答「还没实现」的 tool 比不存在的更糟 |
+| 5 | 计划的测试清单里有 `internal/importsvc/importsvc_test.go` | 没有单独写；覆盖来自 testscript `import_contacts`（走的是同一条代码路径）与 `TestImportContactsAppliesRows`（MCP 侧） | 该包的逻辑本来就在 `core/importer`（另有单测），这里只是分块与计数；重复测一遍不加信息 |
+| 6 | 计划的 6.5「脚本化 agent 测试」 | 除了 in-memory transport，另加一条**真 HTTP** 的客户端测试（`TestAnHTTPClientCanCallATool`）与一条**子进程 stdio** 的测试（`TestMCPStdioServesTools`） | in-memory 走不到认证中间件、会话头和事件流。stdio 那条只能在进程里跑：它用的是进程自己的 stdin/stdout |
+| 7 | 阶段 5 的冒烟脚本 | 在末尾加了一步：容器里签发 mcp 凭据 → 容器里 `mcp --stdio` 走一遍 initialize → tools/list → tools/call | 阶段 5 的完成标志是「栈里真的走通」，阶段 6 的对应物是「栈里 agent 真的连得上」。**本地已跑过（exit=0）** |
+
+### 5.2 抓到的缺陷
+
+1. **`list_newsletters` 没应用 offset**（写成 `paginate(views(all), limit, offset)`，切片漏了）。抓到它的是 lint 的 unused helper 提示，不是测试——**这是本阶段唯一一个「本该被测试抓到」的缺陷**，补了 `TestPagingThroughNewsletters`。
+2. **`send_test` 的预算测试写错了预期**：凭据 `daily_budget=1`、当天还没预留时，`0+1 <= 1` 是**通过**的。设计是对的，测试是错的。改成「第一次发出去、第二次被拒、假 SES 只看到一封」——这条才是那个规则的样子。
+3. **stdio 会话被自己的管道掐断**（冒烟脚本）：stdin 关闭是 stdio server 收到「客户端结束」的方式，一次性写完就 EOF 会让会话在答复回来之前结束。真客户端会等答复，所以脚本在请求之后 `sleep 2` 保持管道打开。
+4. **测试夹具用了假形状的 token**（`mc_` + 24 位十六进制）：`creds.ReadBearer` 要求 `mc_` + 43 位 base64url，于是夹具测的是拒绝路径而不是接受路径。夹具改用 `creds.Generate()`。
+5. **全局预算不在 tool 的预检里**（第一版只在有凭据预算时才查）：一个 `MAX_SENDS_PER_DAY` 已经用尽的部署会拿到 `job_id`，直到 job 执行完才失败。预检改成两条上限都查，报文分别点名是哪一条。
+
+### 5.3 复核方点名的两件事
+
+1. **`scripts/compose-smoke.sh` 的 `pass` 文案**（旧的第 194 行）打印的是 `$unsub`（页面链接）而实际 POST 的是 `$oneclick`。已改成打印 `$oneclick`。
+2. **stdio 模式在 serve 未运行时的行为**：`send_campaign` / `resume_campaign` / `schedule_campaign` **拒绝**并说明要启动什么（`TestSendingWithoutAServerIsRefused`）。入队等待会让只看 `job_id` 的 agent 以为已经发出去了；HTTP 模式下 serve 就在本进程里，这条不会触发。
+
+### 5.4 数字
+
+| 项 | 数字 |
+|---|---|
+| 注册的 tool | **26** = 读 13 + 写 13（设计 §9 的 27 减去 `run_cleanup`） |
+| 未注册的名字 | `delete_*` 全部、`create_credentials`、`revoke_credentials`（`TestSurfaceHoldsNothingForbidden`） |
+| 新增依赖 | `github.com/modelcontextprotocol/go-sdk v1.8.0`（设计 §3 指定的版本） |
+| 本地验证 | `make test`（-race 全绿）、`make lint`（0 issues）、`scripts/compose-smoke.sh` **exit=0**（含新增的 MCP 一步） |
+
+### 5.5 未验证
+
+1. **真实 SES**：`list_domains` 在真账号上会走 `ListEmailIdentities` 的分页与缓存——与阶段 5 同一条，仍未验证。
+2. **MCP 规范的完备性**：SDK 自带的 conformance 测试没有跑；本阶段验证的是「一个真客户端（SDK 的 Streamable 客户端、以及一个手写 JSON-RPC 的 stdio 客户端）能连上并调用」。
+3. **HTTP 会话的断线续传**：`StreamableHTTPOptions.EventStore` 没开，会话超时 10 分钟；跨断线重放事件不在本阶段范围内。
+4. **`send_test` 的例外**（D6-4）：它同步发送、绕过「发送属于 server」。用凭据预算兜底（每次计 1）。如果复核方认为它也该经 jobs，改法是把它变成 job + `get_job`，代价是失去「立刻知道发出去了没有」这个唯一的信息。
