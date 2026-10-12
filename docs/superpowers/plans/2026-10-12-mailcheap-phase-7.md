@@ -272,3 +272,33 @@ ok  mailcheap/internal/core/archive  368.111s
 ok  mailcheap/internal/core/content   15.124s
 ok  mailcheap/internal/core/render    98.036s
 ```
+
+### 5.5 第二轮审计：robots 指向的 sitemap 是 404
+
+第二轮审计（`docs/superpowers/audits/2026-10-12-phase-4-7-audit.md`）实测出来的：`robots.txt` 里的
+`Sitemap:` 写的是 `/archive/<slug>/sitemap`，而本端口服务的是 `/archive/<slug>/sitemap.xml`——上游的
+Next 应用把文件按**它的路由名**命名，本端口按扩展名命名，于是爬虫被告知去读一个 404。
+
+修法是把 robots 指向真的存在的那个地址；两条 sitemap 测试现在会把 robots 里的**每一个** Sitemap 地址
+真的取一次（这就是这类错唯一能被发现的方式——对着旧地址它会说 `robots names … which answers 404`），
+冒烟脚本也从进程外说了同一件事。
+
+### 5.6 测试确定性的后续
+
+复核方第二次复核要求：slow 测试必须与槽位时序无关。两处改动：
+
+1. **归档的 Markdown 比率测试只在两个尺寸都真的过了解析器时才断言比率**。越过预算之后正文走的是另一条
+   管道（显示为转义后的纯文本，体积是输入的几倍），跨着预算比较两条不同管道没有意义——CI 上就是这样：
+   慢 runner 上 500 KB 的那一份越过了预算，125 KB 的没有。
+2. **`make test` 改为 `-p 1`**（包一个一个跑）：slow 测试量的是耗时，而产出恶意正文的那些包会在自己的
+   goroutine 里留下被放弃的解析，它们会在另一个包被计时的时候吃着 CPU。代价是 `test` 这个 job 从
+   4m23s 变成 7m22s。
+
+本地按复核方给的命令跑（加 `-p 1`）：
+
+```
+go test -race -count=10 -p 1 -run 'SlowInputs|Linear' ./internal/core/archive ./internal/core/content ./internal/core/render
+ok  mailcheap/internal/core/archive  372.235s
+ok  mailcheap/internal/core/content   14.262s
+ok  mailcheap/internal/core/render    75.057s
+```
