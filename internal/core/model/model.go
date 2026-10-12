@@ -125,6 +125,11 @@ type Campaign struct {
 	TestSentAt    *time.Time
 	ArchiveSlug   string
 	ThumbnailURL  string
+	// ReservedDay is the UTC day this campaign's audience was reserved against the send ledger, as
+	// store.Day formats it, or "" for one that has never been queued. It is written with the
+	// reservation itself, and a resume on a later day reserves today's allowance for what is left
+	// before it sends (design D15, §11 invariant 4).
+	ReservedDay string
 	// ArchiveListed follows the upstream schema default of true: the store must write true on
 	// insert, because the Go zero value reads as "not listed" (upstream checks `=== false`).
 	ArchiveListed bool

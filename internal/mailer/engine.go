@@ -980,6 +980,31 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		if refusal := e.sesQuotaRefusal(unfinished); refusal != "" {
 			return QueueResult{Reason: refusal}, nil
 		}
+		// And if the campaign was reserved on an earlier day, today's ledger has never seen these
+		// messages: charge today for what is left, in one transaction with the record that it did, or
+		// refuse the step whole. Without this a campaign queued yesterday and resumed today would
+		// spend today's allowance while today's ledger stayed empty, and MAX_SENDS_PER_DAY — the whole
+		// of a managed deployment's quota split — would be no limit at all.
+		day := store.Day(time.Now())
+		if campaign.ReservedDay != day {
+			// A day later: nothing about these messages has reached today's ledger. Charge today for
+			// what is left, in one transaction with the record that it happened, or refuse the step
+			// whole. (Same day, the Queue that started this campaign paid, and charging again would
+			// double-count.)
+			pool, credentialMax, err := e.resolveCharge(ctx, charge)
+			if err != nil {
+				return QueueResult{}, err
+			}
+			fits, err := e.store.ReserveForResume(ctx, day, pool, campaignID, unfinished,
+				e.cfg.Limits.MaxSendsPerDay, credentialMax)
+			if err != nil {
+				return QueueResult{}, err
+			}
+			if !fits {
+				return QueueResult{Reason: e.budgetReason(ctx, day, pool, unfinished,
+					e.cfg.Limits.MaxSendsPerDay, credentialMax)}, nil
+			}
+		}
 	} else {
 		// The archive page's address is decided as the issue goes out (upstream assignArchiveSlug), so
 		// the page exists before the first email links to it.
@@ -1033,7 +1058,8 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 			return QueueResult{}, err
 		}
 		if !fits {
-			return QueueResult{Reason: e.budgetReason(ctx, day, len(messages), e.cfg.Limits.MaxSendsPerDay, credentialMax)}, nil
+			return QueueResult{Reason: e.budgetReason(ctx, day, pool, len(messages), e.cfg.Limits.MaxSendsPerDay,
+				credentialMax)}, nil
 		}
 		if inserted < len(messages) {
 			written, err := e.store.InsertMessages(ctx, messages[inserted:])
@@ -1209,7 +1235,8 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 		return QueueResult{}, err
 	}
 	if !fits {
-		return QueueResult{Reason: e.budgetReason(ctx, day, len(messages), e.cfg.Limits.MaxSendsPerDay, credentialMax)}, nil
+		return QueueResult{Reason: e.budgetReason(ctx, day, pool, len(messages), e.cfg.Limits.MaxSendsPerDay,
+			credentialMax)}, nil
 	}
 	if inserted < len(messages) {
 		written, err := e.store.InsertMessages(ctx, messages[inserted:])
@@ -1346,23 +1373,31 @@ func (e *Engine) resolveCharge(ctx context.Context, charge Charge) (pool string,
 	return credential.ID, credential.DailyBudget, nil
 }
 
-// budgetReason says which ceiling a step ran into.
+// budgetReason says which ceiling a step ran into, and how much room is left under it.
 //
 // Both are checked before anything is written, and the global one first, so on the refusal path the
 // engine asks which of them the day has actually reached. "MAX_SENDS_PER_DAY" and "this credential's
-// daily_budget" are different answers to whoever reads the job's last_error, and guessing wrong
-// sends them looking at the wrong number.
-func (e *Engine) budgetReason(ctx context.Context, day string, messages, globalMax, credentialMax int) string {
+// daily_budget" are different answers to whoever reads the job's last_error, and guessing wrong sends
+// them looking at the wrong number — but the number they need to act on is the room that is left, not
+// the ceiling's name. That is what tells them to wait for tomorrow or to send a smaller step.
+func (e *Engine) budgetReason(ctx context.Context, day, pool string, messages, globalMax,
+	credentialMax int) string {
 	if globalMax > 0 {
 		if reserved, err := e.store.Reserved(ctx, day, ""); err == nil && reserved+messages > globalMax {
-			return fmt.Sprintf(
-				"the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", messages)
+			return fmt.Sprintf("the daily send budget is spent: %d of MAX_SENDS_PER_DAY are already "+
+				"reserved, so there is room for %d more today and this step is %d",
+				reserved, max(globalMax-reserved, 0), messages)
 		}
 	}
 	if credentialMax > 0 {
-		return fmt.Sprintf(
-			"the daily send budget is spent: %d messages would go over this credential's daily_budget of %d",
-			messages, credentialMax)
+		spent, err := e.store.Reserved(ctx, day, pool)
+		if err == nil {
+			return fmt.Sprintf("this credential's daily_budget is %d and %d of it is already reserved "+
+				"today, so there is room for %d more and this step is %d",
+				credentialMax, spent, max(credentialMax-spent, 0), messages)
+		}
+		return fmt.Sprintf("this credential's daily_budget of %d is smaller than this step of %d",
+			credentialMax, messages)
 	}
 	return fmt.Sprintf("the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", messages)
 }
