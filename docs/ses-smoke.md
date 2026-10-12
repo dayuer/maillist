@@ -9,7 +9,7 @@
 | 项 | 说明 |
 |---|---|
 | SES 发信域名 | 已在 SES 里 verified。DKIM 与 MAIL FROM 都要配好——`mailcheap domains` 会把要发布的记录逐条打出来 |
-| IAM 凭据 | 一个 user 或 role，权限只需 `ses:SendEmail`、`ses:GetEmailIdentity` 与 `ses:GetAccount`。**不要**给 `ses:SendRawEmail` 之外的任何东西。少了 `ses:GetAccount` 应用**仍然能发**，但只按 1/s 发（见下节） |
+| IAM 凭据 | 一个 user 或 role，**只需要**「最小 IAM policy」一节里那四条。别的都不要给：不要 `ses:SendRawEmail`，不要 `ses:*` |
 | Configuration set | 一个 SES configuration set；它的 **event destination** 把 `Delivery`/`Bounce`/`Complaint` 发到 SNS |
 | SNS topic | 订阅到 `https://<你的域名>/api/webhooks/ses`，**已确认订阅**（确认是自动的：应用会去 GET 那个 SubscribeURL） |
 | 收信地址 | 一个你能打开的邮箱，且**它在 SES 沙箱里也是已验证的**（沙箱只能发给已验证地址） |
@@ -57,6 +57,40 @@ DRY_RUN=1 … scripts/ses-smoke.sh
 - **打开了但 `Opened` 是 0**：很多客户端默认拦图片。允许图片后重开一次。
 - **点了但 `Clicked` 是 0**：发送后 30 秒内的点击按扫描器处理（上游 `SCANNER_WINDOW_MS`），`curl` 一类的 User-Agent 也一律不计。用真正的浏览器点，且不要在发出后立刻点。
 - **退订了但状态没变**：`SESSION_SECRET` 如果在这封信发出之后被换过，信里所有链接的签名都会失效。换密钥等于让已发出的邮件里的链接全部作废——这是上游行为，不是 bug。
+
+## 最小 IAM policy
+
+应用只调用四个 SES v2 操作，**权限就是这四条，不多不少**。每一行都写着少了它会怎样——第一条是发不出去，最后一条最隐蔽。
+
+| 代码 | SES v2 操作 | 需要的权限 | 少了它会怎样 |
+|---|---|---|---|
+| `internal/mailer/ses.go` | `SendEmail` | `ses:SendEmail` | 一封都发不出去，第一封就报错 |
+| `internal/mailer/identity.go` | `ListEmailIdentities` | `ses:ListEmailIdentities` | `mailcheap domains` 与发送前的域名检查看不到任何身份 |
+| `internal/mailer/identity.go` | `GetEmailIdentity` | `ses:GetEmailIdentity` | 域名检查无法判定，`domains` 打不出 DKIM 状态 |
+| `internal/mailer/quota.go` | `GetAccount` | `ses:GetAccount` | **仍然能发，但只按 1/s 发**（见「发信速率」） |
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ses:SendEmail",
+        "ses:GetEmailIdentity",
+        "ses:ListEmailIdentities",
+        "ses:GetAccount"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+- `ses:SendEmail` 的 Resource 可以收窄到发信身份的 ARN（`arn:aws:ses:<region>:<account>:identity/<domain>`）；`ses:GetAccount` 是账号级操作，SES 不接受资源限定，所以这里统一用 `*`。这几条的资源语义**没有在真实账号上验证过**——第一次跑请按「能跑通」而不是「最小」来收。
+- 不需要 `ses:SendRawEmail`：应用不自己构造 MIME。
+- 不需要 `ses:ListIdentities`（没有 v2 前缀）：那是 SES v1 的操作，应用用的是 v2。
+- 代码里调用的操作与这张表由测试钉住（`internal/mailer/ses_permissions_test.go`）：加一次 SES 调用而没加权限说明，测试会红。
 
 ## 发信速率（阶段 8）
 

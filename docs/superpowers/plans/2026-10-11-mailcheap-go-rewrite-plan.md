@@ -2284,7 +2284,7 @@ func Suggestions(history, taken []time.Time, now time.Time) []Suggestion
 |---|---|---|
 | 阶段 0 | GitHub 仓库 `dayuer/nibwire` 的 Actions 权限 | 跑 CI（仓库已由 dayuer/maillist 改名而来）|
 | 阶段 0 | 能访问 `github.com/marclou/mailcheap` | 拉上游参考（已核实可访问） |
-| 阶段 5 | AWS IAM 凭据，权限 `ses:SendEmail`、`ses:GetEmailIdentity`（阶段 8 起另需 `ses:GetAccount`） | 真实冒烟发信与 `domains` 命令 |
+| 阶段 5 | AWS IAM 凭据，权限 `ses:SendEmail`、`ses:GetEmailIdentity`、`ses:ListEmailIdentities`（阶段 8 起另需 `ses:GetAccount`）；最小 policy 见 `docs/ses-smoke.md` | 真实冒烟发信与 `domains` 命令 |
 | 阶段 5 | SES 已验证的发信域名，DKIM 与 MAIL FROM 已配置 | 发信身份 |
 | 阶段 5 | SNS topic + SES configuration set，订阅到 `https://<域名>/api/webhooks/ses` | 事件回写 |
 | 阶段 5 | 一个指向部署机的域名 | caddy 签发 TLS |
