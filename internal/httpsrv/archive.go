@@ -275,16 +275,16 @@ func (s *Server) archiveSitemap(w http.ResponseWriter, r *http.Request, n model.
 	_, _ = w.Write([]byte(b.String()))
 }
 
-// archiveRobots points crawlers at the sitemap. On the newsletter's own domain that is
-// /sitemap.xml; under the application's it stays at the archive's own path.
+// archiveRobots points crawlers at the sitemap.
+//
+// The address has to be one this server answers: on the newsletter's own domain the file is served at
+// /sitemap.xml, and under the application's it is at /archive/{slug}/sitemap.xml. Upstream's Next app
+// served the second one at /archive/<slug>/sitemap (no extension, because that is what its route file
+// was called) and this port names it .xml — which is the sort of difference that produces a robots.txt
+// pointing at a 404. The test fetches what this writes.
 func (s *Server) archiveRobots(w http.ResponseWriter, r *http.Request, n model.Newsletter) {
 	urls := archive.ForNewsletter(n.Slug, s.Config.ArchiveHosts, s.Config.AppURL)
-	// On its own domain the archive serves the file itself, at /sitemap.xml; under the application's it
-	// lives at the archive's path, which is upstream's /archive/<slug>/sitemap.
-	sitemap := strings.TrimSuffix(urls.SiteIndex, "/") + "/sitemap"
-	if urls.Host != "" {
-		sitemap = strings.TrimSuffix(urls.SiteIndex, "/") + "/sitemap.xml"
-	}
+	sitemap := strings.TrimSuffix(urls.SiteIndex, "/") + "/sitemap.xml"
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", feedCacheControl)
 	_, _ = w.Write([]byte("User-agent: *\nAllow: /\n\nSitemap: " + sitemap + "\n"))

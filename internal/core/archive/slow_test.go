@@ -57,39 +57,49 @@ func TestFramingIsLinearOnSlowInputs(t *testing.T) {
 	}
 }
 
-// 恶意 Markdown：article 一路同样线性，输出里没有能跑的标签，而且渲染器自己的预算被守住了。
+// 恶意 Markdown：article 一路同样线性，输出里没有能跑的标签。
+//
+// 比率只在两个尺寸都**真的被渲染**时断言。超预算的正文走的是另一条路——把转义后的正文当纯文本显示 ——
+// 那条路的输出是输入的几倍，跨着预算比较两个不同管道的耗时没有意义，也会让测试随机器快慢翻脸（CI 上就是
+// 这样：慢 runner 上 500 KB 的那一份跨过了预算，而 125 KB 的没有）。超预算后的行为由预算、并发上限与记忆
+// 三条各自的测试负责；这里量的是「一个读者付的那部分」与输入大小的关系。
 func TestRenderingMarkdownIsLinearOnSlowInputs(t *testing.T) {
 	newsletter := model.Newsletter{Slug: "field-notes", Name: "Field notes", ArchiveEnabled: true}
 	for label, shape := range slowinput.MarkdownShapes() {
 		small := campaignWith(model.FormatMarkdown, shape(smallInputSize))
 		large := campaignWith(model.FormatMarkdown, shape(largeInputSize))
-		// 两个尺寸都进稳定状态再量：解析结果（含「这份正文是纯文本」的判定）被记住，所以这里量的是
-		// 「每个读者付的那部分」——哈希、清洗与渲染——而不是一次冷解析。
-		//
-		// WaitIdle 是必要的：槽位被别的形状占着时，预热会直接退回纯文本而**不被记住**，那样计时就
-		// 取决于槽位时序，比率会随机（复核方 2026-10-12 在 -race 下量到约一半失败）。等到没有解析
-		// 在预算窗口里，预热拿得到槽位，判定是真的，于是随后两次都是缓存命中。
 		warmMarkdown(small)
 		warmMarkdown(large)
 
 		var rendered Body
 		smallTime := timed(t, label+" small", func() { _ = RenderIssueBody(small, newsletter) })
 		largeTime := timed(t, label+" large", func() { rendered = RenderIssueBody(large, newsletter) })
-		if smallTime >= tooQuickToJudge {
-			if ratio := float64(largeTime) / float64(smallTime); ratio > ratioLimit {
-				t.Errorf("%s: %d bytes took %.1fx the time of %d bytes, want under %.0fx",
-					label, largeInputSize, ratio, smallInputSize, ratioLimit)
-			}
-		}
-		// 这里不断言解析器的预算：那是 MarkdownToHTML 自己的事，在 content 包里直接量（那条测的是
-		// 「有没有在预算内退回纯文本」）。归档这一步在预算之后还有清洗与渲染，而清洗 500 KB 的
-		// 转义文本本身就要时间——把它算进预算，量到的就不是预算了。
 		if rendered.Kind != KindArticle {
 			t.Errorf("%s: a Markdown issue should be an article", label)
 			continue
 		}
 		assertNoRunnableMarkup(t, rendered.HTML, label)
+
+		if !renderedWithinBudget(small) || !renderedWithinBudget(large) {
+			t.Logf("%s: past the parser's budget at one of the two sizes, so the ratio would compare two "+
+				"different pipelines; the budget and the cap have their own tests", label)
+			continue
+		}
+		if smallTime < tooQuickToJudge {
+			continue
+		}
+		if ratio := float64(largeTime) / float64(smallTime); ratio > ratioLimit {
+			t.Errorf("%s: %d bytes took %.1fx the time of %d bytes, want under %.0fx",
+				label, largeInputSize, ratio, smallInputSize, ratioLimit)
+		}
 	}
+}
+
+// renderedWithinBudget reports whether a body went through the parser or was shown as text. The warm-up
+// has already paid for it, so asking is a memory hit.
+func renderedWithinBudget(campaign model.Campaign) bool {
+	_, within := content.DefaultCache().Render(campaign.Body, false)
+	return within
 }
 
 // SEO 也只是字符串处理，同样不该被大输入拖住。

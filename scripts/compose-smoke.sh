@@ -234,9 +234,16 @@ case "$(curl -s -o /dev/null -w '%{http_code}' "$SITE/archive/$SLUG/sitemap.xml"
 	200) pass "the sitemap is served" ;;
 	*) fail "the sitemap did not answer 200" ;;
 esac
-case "$(curl -s "$SITE/archive/$SLUG/robots.txt")" in
+robots=$(curl -s "$SITE/archive/$SLUG/robots.txt")
+case "$robots" in
 	*"Sitemap:"*) pass "robots points at the sitemap" ;;
 	*) fail "robots did not name a sitemap" ;;
+esac
+# 指向 404 的 Sitemap 是搜索引擎读不到归档的全部原因：这里把 robots 说的那个地址真的取一次。
+sitemap_url=$(printf '%s\n' "$robots" | sed -n 's/^Sitemap:[[:space:]]*//p' | head -1)
+case "$(curl -s -o /dev/null -w '%{http_code}' "$sitemap_url")" in
+	200) pass "the sitemap robots names answers 200 ($sitemap_url)" ;;
+	*) fail "robots names $sitemap_url, which is not there" ;;
 esac
 # curl 的 UA 在上游的机器名单里：页面照样 200，但不该计成一个读者。
 if [ "$(run campaign show --subject "$SUBJECT" --json | sed -n 's/.*"WebViews": \([0-9]*\).*/\1/p')" = "0" ]; then
