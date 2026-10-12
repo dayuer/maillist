@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"nibwire/internal/core/model"
 	"nibwire/internal/core/ratectl"
 )
 
@@ -54,6 +55,38 @@ func TestSendCampaignGoesAheadWithinTheAllowance(t *testing.T) {
 	out := call[sendOut](t, session, "send_campaign", map[string]any{"campaign": draft.ID})
 	if out.JobID == "" {
 		t.Fatalf("send_campaign = %+v", out)
+	}
+}
+
+// resume 不重新花预算：受众是首次入队时选的、那一天也预留过了，所以凭据的 daily_budget 比名单小也不该
+// 挡住恢复——引擎对 resume 根本不预留，预检比引擎更严就等于"永远恢复不了"（#41）。
+func TestResumingIsNotRefusedByABudgetTheCampaignAlreadyPaid(t *testing.T) {
+	f := newFixtureWithBudget(t, 1)
+	newsletter := f.seedNewsletter(t, 3)
+	draft := f.seedCampaign(t, "Issue 12")
+	ctx := context.Background()
+
+	// Three messages exist from when it first started — written and charged then — and the sender
+	// stopped: an operator paused it, or the bounce limit did.
+	f.seedQueuedMessages(t, draft, newsletter, 3)
+	if moved, err := f.store.SetCampaignStatus(ctx, draft.ID,
+		[]model.CampaignStatus{model.CampaignDraft}, model.CampaignPaused); err != nil || !moved {
+		t.Fatalf("could not pause the campaign: %v", err)
+	}
+	session := f.connect(t)
+
+	out := call[resumeCampaignOut](t, session, "resume_campaign", map[string]any{"campaign": draft.ID})
+	if out.JobID == "" {
+		t.Fatalf("resume_campaign = %+v, want the resume this campaign already paid for", out)
+	}
+	// The credential's budget is still one, and it still refuses a send that would be *new* — what
+	// changed here is that a resume is not one. (send_campaign on a paused campaign is a resume too,
+	// which is why the contrast needs a draft.)
+	other := f.seedCampaign(t, "Issue 13")
+	if message := callError(t, session, "send_campaign", map[string]any{
+		"campaign": other.ID,
+	}); !strings.Contains(message, "daily_budget") {
+		t.Fatalf("a fresh send said %q, want the budget to still refuse it", message)
 	}
 }
 

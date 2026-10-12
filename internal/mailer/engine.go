@@ -970,7 +970,14 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		// The audience was chosen and the day reserved when this campaign first started, so neither of
 		// those is decided again — but the account's own allowance has moved since, and resuming on a
 		// spent one would only produce a batch of throttles.
-		if refusal := e.sesQuotaRefusal(recipients + lastChance); refusal != "" {
+		//
+		// What the resume spends is what is still queued, not the whole list: asking for the rest of a
+		// campaign that has fifty messages left would refuse a resume that fits.
+		unfinished, err := e.store.CountUnfinishedCampaignMessages(ctx, campaignID)
+		if err != nil {
+			return QueueResult{}, err
+		}
+		if refusal := e.sesQuotaRefusal(unfinished); refusal != "" {
 			return QueueResult{Reason: refusal}, nil
 		}
 	} else {

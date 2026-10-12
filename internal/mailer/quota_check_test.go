@@ -181,6 +181,45 @@ func TestTheLowerOfTheTwoDayCeilingsRefusesTheStep(t *testing.T) {
 	}
 }
 
+// 恢复时账号额度按「还没发的」算：一封已经发完大半的 campaign 不该因为"名单很大"被拒绝。
+func TestResumingChecksTheAllowanceAgainstWhatIsLeft(t *testing.T) {
+	control := ratectl.New(ratectl.Config{Headroom: 0.9})
+	f := newFixtureConfigured(t, 20, func(cfg *Config) { cfg.RateControl = control })
+	ctx := context.Background()
+	control.SetQuota(ratectl.Quota{MaxSendRate: 500, Max24HourSend: 100}, time.Now().UTC())
+	if queued, err := f.engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {
+		t.Fatal(err)
+	} else if !queued.Queued {
+		t.Fatalf("queued = %+v", queued)
+	}
+
+	// Seventeen of the twenty went out before the campaign was paused.
+	pending := messagesWithStatus(t, f, model.MessagePending)
+	if len(pending) != 20 {
+		t.Fatalf("the fixture has %d pending messages, want 20", len(pending))
+	}
+	for _, message := range pending[:17] {
+		if err := f.db.MarkMessageSent(ctx, message.ID, "ses-"+message.ID, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.SetCampaignStatus(ctx, f.campaign.ID,
+		[]model.CampaignStatus{model.CampaignSending}, model.CampaignPaused); err != nil {
+		t.Fatal(err)
+	}
+
+	// The account has three sends left and so does the campaign: the resume fits.
+	control.SetQuota(ratectl.Quota{MaxSendRate: 500, Max24HourSend: 3}, time.Now().UTC())
+	queued, err := f.engine.Queue(ctx, f.campaign.ID, Charge{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !queued.Queued {
+		t.Fatalf("queued = %+v: the resume spends three of the account's allowance, not twenty",
+			queued)
+	}
+}
+
 // 速率与剩余额度的读数：读不到配额时是下限与「未知」，不是 0/s 也不是「还剩 0 封」。
 func TestSendingRateReportsTheQuotaAndTheEstimate(t *testing.T) {
 	control := ratectl.New(ratectl.Config{Headroom: 0.9})

@@ -787,6 +787,16 @@ func (s *session) checkBudget(ctx context.Context, credential store.Credential, 
 		return nil
 	}
 	day := store.Day(time.Now())
+	// A resume spends nothing new: the audience was chosen and the day reserved when this campaign
+	// first started (D15), and the engine reserves nothing for a resume. Applying the day's ceilings
+	// to it here is how a credential whose daily_budget is smaller than the list can never resume a
+	// campaign it has already paid for — the engine would have accepted the resume all along.
+	//
+	// What is worth re-checking is the account's own allowance, because that one is about today and
+	// the resume does spend it.
+	if campaign.Status == model.CampaignPaused {
+		return s.checkAllowance(wanted)
+	}
 	if global := s.deps.Config.Limits.MaxSendsPerDay; global > 0 {
 		reserved, err := s.deps.Store.Reserved(ctx, day, "")
 		if err != nil {
@@ -809,9 +819,14 @@ func (s *session) checkBudget(ctx context.Context, credential store.Credential, 
 				credential.DailyBudget, spent, wanted)
 		}
 	}
-	// The account's own allowance is the ceiling SES enforces, and the one nothing else here can see.
-	// An unread quota is not checked: without a reading the number would be a guess, and refusing a
-	// send on a deployment that does not read one is worse than finding out from the job.
+	return s.checkAllowance(wanted)
+}
+
+// checkAllowance is D18's third ceiling: the account's own remaining 24-hour allowance.
+//
+// An unread quota is not checked: without a reading the number would be a guess, and refusing a send
+// on a deployment that does not read one is worse than finding out from the job.
+func (s *session) checkAllowance(wanted int) error {
 	rate := s.deps.Mailer.SendingRate()
 	if rate.Known && wanted > rate.Remaining24h {
 		return fmt.Errorf(
@@ -822,8 +837,16 @@ func (s *session) checkBudget(ctx context.Context, credential store.Credential, 
 	return nil
 }
 
-// audienceSize is what a full send of this campaign would write.
+// audienceSize is how many sends this campaign is about to make: the whole active audience for one
+// that has not started, and what is still queued for one that has been paused.
+//
+// A resume sends the messages the campaign already has rather than the list again, so counting the
+// list would overstate it by everything that went out before the pause — and overstate the account's
+// remaining allowance by the same amount.
 func (s *session) audienceSize(ctx context.Context, campaign model.Campaign) (int, error) {
+	if campaign.Status == model.CampaignPaused {
+		return s.deps.Store.CountUnfinishedCampaignMessages(ctx, campaign.ID)
+	}
 	audience, err := s.deps.Store.SelectAudience(ctx, campaign.NewsletterID, campaign.AudienceLimit)
 	if err != nil {
 		return 0, err
