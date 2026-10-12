@@ -1,6 +1,7 @@
 package archive
 
 import (
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,19 @@ func timed(t *testing.T, label string, run func()) time.Duration {
 	return elapsed
 }
 
+// pauseGC turns the collector off around a timing and returns what restores it. A GC cycle is not
+// work proportional to the body being timed: a mark assist costs the scan of the live heap — every
+// body the memo has remembered by then — and the abandoned parses earlier shapes leave behind are
+// still allocating, so a cycle can arrive inside one timed run and not the other. That is how a pair
+// where both sizes are cache hits and the work is linear (3.4-4.9x here, on a quiet machine, on a
+// loaded one, at GOMAXPROCS=1) crossed the line on CI as 70 ms against 716 ms, a 10.2x (run
+// 38196929873): only the large run allocates enough to be charged for the whole heap. With the
+// collector off for the pair, the ratio measures the render path, which is the property under test.
+func pauseGC() func() {
+	previous := debug.SetGCPercent(-1)
+	return func() { debug.SetGCPercent(previous) }
+}
+
 // 恶意 HTML：frame 一路（渲染成邮件、保住设计、放进 iframe）在四倍输入下不能超过八倍耗时。
 func TestFramingIsLinearOnSlowInputs(t *testing.T) {
 	newsletter := model.Newsletter{Slug: "field-notes", Name: "Field notes", FromName: "Jane Doe", ArchiveEnabled: true}
@@ -45,8 +59,10 @@ func TestFramingIsLinearOnSlowInputs(t *testing.T) {
 		large := campaignWith(model.FormatHTML, shape(largeInputSize))
 		_ = RenderIssueBody(small, newsletter) // warm the renderers
 
+		resumeGC := pauseGC()
 		smallTime := timed(t, label+" small", func() { _ = RenderIssueBody(small, newsletter) })
 		largeTime := timed(t, label+" large", func() { _ = RenderIssueBody(large, newsletter) })
+		resumeGC()
 		if smallTime < tooQuickToJudge {
 			continue
 		}
@@ -71,9 +87,11 @@ func TestRenderingMarkdownIsLinearOnSlowInputs(t *testing.T) {
 		warmMarkdown(small)
 		warmMarkdown(large)
 
+		resumeGC := pauseGC()
 		var rendered Body
 		smallTime := timed(t, label+" small", func() { _ = RenderIssueBody(small, newsletter) })
 		largeTime := timed(t, label+" large", func() { rendered = RenderIssueBody(large, newsletter) })
+		resumeGC()
 		if rendered.Kind != KindArticle {
 			t.Errorf("%s: a Markdown issue should be an article", label)
 			continue
@@ -112,12 +130,14 @@ func TestSEOIsLinearOnSlowInputs(t *testing.T) {
 		warmMarkdown(small)
 		warmMarkdown(large)
 
+		resumeGC := pauseGC()
 		smallTime := timed(t, label+" small", func() {
 			_ = IssueSEO(newsletter, small, "https://mail.example.com", "news.example.com=field-notes")
 		})
 		largeTime := timed(t, label+" large", func() {
 			_ = IssueSEO(newsletter, large, "https://mail.example.com", "news.example.com=field-notes")
 		})
+		resumeGC()
 		if smallTime < tooQuickToJudge {
 			continue
 		}
