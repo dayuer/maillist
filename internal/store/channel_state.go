@@ -25,13 +25,38 @@ func (s ChannelDownState) DownAt(now time.Time) bool {
 	return s.Reason != "" && (s.Until == nil || now.Before(*s.Until))
 }
 
-// channelStateTarget is where a channel's down state lives: its row in channels, or the one row of
-// default_channel_state, which stands in for the default channel's missing row.
-func channelStateTarget(name string) (table, where string, args []any) {
+// stateQueries read and write a channel's down state where it lives: its row in channels, or the one
+// row of default_channel_state, which stands in for the default channel's missing row. args is what
+// the WHERE clause binds: the name for a row of channels, nothing for the default channel.
+type stateQueries struct {
+	mark, reason, clear, read string
+	args                      []any
+}
+
+func stateQueriesFor(name string) stateQueries {
 	if name == model.DefaultChannel {
-		return "default_channel_state", "only = 1", nil
+		return stateQueries{
+			mark: `UPDATE default_channel_state SET
+                down_since = CASE WHEN down_reason = '' THEN ? ELSE down_since END,
+                down_reason = ?, down_until = ?
+            WHERE only = 1`,
+			reason: "SELECT down_reason FROM default_channel_state WHERE only = 1",
+			clear: `UPDATE default_channel_state SET down_reason = '', down_since = NULL, down_until = NULL
+            WHERE only = 1`,
+			read: "SELECT down_reason, down_since, down_until FROM default_channel_state WHERE only = 1",
+		}
 	}
-	return "channels", "name = ?", []any{name}
+	return stateQueries{
+		mark: `UPDATE channels SET
+                down_since = CASE WHEN down_reason = '' THEN ? ELSE down_since END,
+                down_reason = ?, down_until = ?
+            WHERE name = ?`,
+		reason: "SELECT down_reason FROM channels WHERE name = ?",
+		clear: `UPDATE channels SET down_reason = '', down_since = NULL, down_until = NULL
+            WHERE name = ?`,
+		read: "SELECT down_reason, down_since, down_until FROM channels WHERE name = ?",
+		args: []any{name},
+	}
 }
 
 // MarkChannelDown records that a channel is out of service. Marking a channel that is already down
@@ -41,14 +66,11 @@ func (db *DB) MarkChannelDown(ctx context.Context, name, reason string, until *t
 	if reason == "" {
 		return errors.New("a channel is marked down with a reason")
 	}
-	table, where, args := channelStateTarget(name)
+	queries := stateQueriesFor(name)
 	now := formatTime(time.Now().UTC())
 	return db.Write(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx, `UPDATE `+table+` SET
-                down_since = CASE WHEN down_reason = '' THEN ? ELSE down_since END,
-                down_reason = ?, down_until = ?
-            WHERE `+where,
-			append([]any{now, reason, formatTimePtr(until)}, args...)...)
+		result, err := tx.ExecContext(ctx, queries.mark,
+			append([]any{now, reason, formatTimePtr(until)}, queries.args...)...)
 		if err != nil {
 			return err
 		}
@@ -59,11 +81,11 @@ func (db *DB) MarkChannelDown(ctx context.Context, name, reason string, until *t
 // ClearChannelDown puts a channel back in service and says whether it had a down state recorded
 // (an expired one counts: it is cleared all the same).
 func (db *DB) ClearChannelDown(ctx context.Context, name string) (bool, error) {
-	table, where, args := channelStateTarget(name)
+	queries := stateQueriesFor(name)
 	var was bool
 	err := db.Write(ctx, func(tx *sql.Tx) error {
 		var reason string
-		err := tx.QueryRowContext(ctx, "SELECT down_reason FROM "+table+" WHERE "+where, args...).Scan(&reason)
+		err := tx.QueryRowContext(ctx, queries.reason, queries.args...).Scan(&reason)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("channel %s: %w", name, ErrNotFound)
 		}
@@ -71,8 +93,7 @@ func (db *DB) ClearChannelDown(ctx context.Context, name string) (bool, error) {
 			return err
 		}
 		was = reason != ""
-		_, err = tx.ExecContext(ctx, `UPDATE `+table+` SET down_reason = '', down_since = NULL,
-            down_until = NULL WHERE `+where, args...)
+		_, err = tx.ExecContext(ctx, queries.clear, queries.args...)
 		return err
 	})
 	return was, err
@@ -80,9 +101,8 @@ func (db *DB) ClearChannelDown(ctx context.Context, name string) (bool, error) {
 
 // ChannelDown reads a channel's down state. An unknown channel is ErrNotFound.
 func (db *DB) ChannelDown(ctx context.Context, name string) (ChannelDownState, error) {
-	table, where, args := channelStateTarget(name)
-	state, err := scanDownState(db.sql.QueryRowContext(ctx,
-		"SELECT down_reason, down_since, down_until FROM "+table+" WHERE "+where, args...))
+	queries := stateQueriesFor(name)
+	state, err := scanDownState(db.sql.QueryRowContext(ctx, queries.read, queries.args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ChannelDownState{}, fmt.Errorf("channel %s: %w", name, ErrNotFound)
 	}
@@ -133,7 +153,8 @@ func (db *DB) SetChannelFallbacks(ctx context.Context, channel string, fallbacks
 
 // ChannelFallbacks is a channel's fallback chain, in order. A channel without one has an empty chain.
 func (db *DB) ChannelFallbacks(ctx context.Context, channel string) ([]string, error) {
-	all, err := db.readFallbacks(ctx, "WHERE channel = ?", channel)
+	all, err := db.readFallbacks(ctx,
+		"SELECT channel, fallback FROM channel_fallbacks WHERE channel = ? ORDER BY position", channel)
 	if err != nil {
 		return nil, err
 	}
@@ -142,12 +163,12 @@ func (db *DB) ChannelFallbacks(ctx context.Context, channel string) ([]string, e
 
 // AllChannelFallbacks is every channel's fallback chain, by channel. Channels without one are absent.
 func (db *DB) AllChannelFallbacks(ctx context.Context) (map[string][]string, error) {
-	return db.readFallbacks(ctx, "")
+	return db.readFallbacks(ctx, "SELECT channel, fallback FROM channel_fallbacks ORDER BY channel, position")
 }
 
-func (db *DB) readFallbacks(ctx context.Context, where string, args ...any) (map[string][]string, error) {
-	rows, err := db.sql.QueryContext(ctx,
-		"SELECT channel, fallback FROM channel_fallbacks "+where+" ORDER BY channel, position", args...)
+// readFallbacks groups the (channel, fallback) rows query returns by channel, in the order returned.
+func (db *DB) readFallbacks(ctx context.Context, query string, args ...any) (map[string][]string, error) {
+	rows, err := db.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
