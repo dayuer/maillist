@@ -104,3 +104,36 @@ func sesProblems(s Spec, lookup func(string) string, secretOK bool) []string {
 	}
 	return problems
 }
+
+// SecretVars are the environment variables a channel of this type reads its secrets from, in a fixed
+// order. Only their names ever leave the process; their values never do.
+func SecretVars(kind, prefix string) []string {
+	if kind == TypeSES {
+		id, secret := SESKeys(prefix)
+		return []string{id, secret}
+	}
+	return nil
+}
+
+// ValidateFallbacks checks a fallback chain on its own terms: no empty names, not the channel itself,
+// no channel twice. Whether each name exists is the caller's to check, against the database. A chain
+// is one hop (a channel's mail goes to the first usable channel of its own chain, never on to that
+// channel's chain), so a→b and b→a is not a loop and is allowed.
+func ValidateFallbacks(channel string, chain []string) error {
+	if len(chain) == 0 {
+		return errors.New("the fallback chain is empty")
+	}
+	seen := map[string]bool{}
+	for _, fallback := range chain {
+		switch {
+		case fallback == "":
+			return errors.New("the fallback chain has an empty name in it")
+		case fallback == channel:
+			return fmt.Errorf("%s cannot fall back to itself", channel)
+		case seen[fallback]:
+			return fmt.Errorf("%s appears twice in the fallback chain", fallback)
+		}
+		seen[fallback] = true
+	}
+	return nil
+}
