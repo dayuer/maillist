@@ -1,0 +1,82 @@
+# route fallback：每个渠道一条 fallback 链，按顺序存；default 两边都可以出现。
+# 本期只存不生效：渠道不可用时改派在 2d 第二段。
+
+nibwire init
+
+nibwire channel add aws2 --type ses --secret-env AWS2 --region us-east-1
+nibwire channel add back --type ses --secret-env BACK --region us-east-1
+nibwire channel add spare --type ses --secret-env SPARE --region us-east-1
+
+# --to 与 --clear 必须且只能给一个。
+! nibwire route fallback aws2
+stderr 'give --to'
+! nibwire route fallback aws2 --to back --clear
+stderr 'either --to or --clear'
+
+# 链本身的问题：指向自己、重复、空名字。
+! nibwire route fallback aws2 --to back,aws2
+stderr 'aws2 cannot fall back to itself'
+! nibwire route fallback aws2 --to back,back
+stderr 'back appears twice'
+! nibwire route fallback aws2 --to back,
+stderr 'empty name'
+
+# 不存在的渠道：源与目标都要查。
+! nibwire route fallback missing --to back
+stderr 'no channel named missing'
+! nibwire route fallback aws2 --to back,missing
+stderr 'no channel named missing'
+
+# 已停用的渠道不能进链（与 route add 一致）。
+nibwire channel disable spare --yes
+! nibwire route fallback aws2 --to spare
+stderr 'channel spare is disabled'
+nibwire channel enable spare
+
+# 设好之后：route list、channel show、channel list --json 都看得到。
+nibwire route fallback aws2 --to 'back, default'
+stdout 'aws2 falls back to back,default'
+nibwire route fallback default --to aws2,spare
+stdout 'default falls back to aws2,spare'
+
+nibwire route list
+stdout 'no rules'
+stdout '^fallback\taws2\tback,default\tok$'
+stdout '^fallback\tdefault\taws2,spare\tok$'
+
+nibwire channel show aws2
+stdout 'fallbacks\s+back,default'
+nibwire channel show default
+stdout 'fallbacks\s+aws2,spare'
+nibwire channel list --json
+stdout '"fallbacks": \['
+
+# 整条替换，不留尾巴。
+nibwire route fallback aws2 --to spare
+nibwire route list
+stdout '^fallback\taws2\tspare\tok$'
+! stdout 'back,default'
+
+# 链上的渠道后来被停用：route list 标出来。
+nibwire channel disable spare --yes
+nibwire route list
+stdout '^fallback\taws2\tspare\tchannel spare is disabled$'
+stdout '^fallback\tdefault\taws2,spare\tchannel spare is disabled$'
+
+# 规则与 fallback 一起列出。
+nibwire route add --default --to aws2
+nibwire route list
+stdout 'default\taws2\tok'
+stdout '^fallback\taws2'
+
+nibwire route fallback aws2 --to back --json
+stdout '"channel": "aws2"'
+stdout '"fallbacks": \['
+
+nibwire route fallback aws2 --clear
+stdout 'aws2 has no fallback chain'
+nibwire route list
+! stdout '^fallback\taws2'
+
+nibwire audit list --action route.fallback
+stdout 'aws2'
