@@ -19,6 +19,7 @@ type ChannelRow struct {
 	MaxPerSecond int               // 0 = no ceiling of our own
 	MaxPerDay    int               // 0 = no ceiling of our own
 	Enabled      bool
+	Down         ChannelDownState // read only: MarkChannelDown and ClearChannelDown write it
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -28,6 +29,9 @@ var ErrChannelExists = errors.New("channel already exists")
 
 const channelColumns = `name, type, secret_env, params, max_per_second, max_per_day, enabled,
     created_at, updated_at`
+
+// channelReadColumns is what scanChannel reads: the written columns and the down state.
+const channelReadColumns = channelColumns + ", down_reason, down_since, down_until"
 
 // CreateChannel writes a new channel. The name must be free.
 func (db *DB) CreateChannel(ctx context.Context, c ChannelRow) error {
@@ -60,7 +64,7 @@ func (db *DB) CreateChannel(ctx context.Context, c ChannelRow) error {
 // Channel loads one channel by name.
 func (db *DB) Channel(ctx context.Context, name string) (ChannelRow, error) {
 	row, err := scanChannel(db.sql.QueryRowContext(ctx,
-		"SELECT "+channelColumns+" FROM channels WHERE name = ?", name))
+		"SELECT "+channelReadColumns+" FROM channels WHERE name = ?", name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ChannelRow{}, fmt.Errorf("channel %s: %w", name, ErrNotFound)
 	}
@@ -69,7 +73,7 @@ func (db *DB) Channel(ctx context.Context, name string) (ChannelRow, error) {
 
 // Channels lists every configured channel by name. The default channel is not among them.
 func (db *DB) Channels(ctx context.Context) ([]ChannelRow, error) {
-	rows, err := db.sql.QueryContext(ctx, "SELECT "+channelColumns+" FROM channels ORDER BY name")
+	rows, err := db.sql.QueryContext(ctx, "SELECT "+channelReadColumns+" FROM channels ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -85,12 +89,17 @@ func (db *DB) Channels(ctx context.Context) ([]ChannelRow, error) {
 	return out, rows.Err()
 }
 
-// SetChannelEnabled turns a channel on or off. An unknown name is ErrNotFound.
+// SetChannelEnabled turns a channel on or off. Turning it on also clears its down state: that is how
+// an operator puts back a channel that failed with ErrorPause (design §4.4). An unknown name is
+// ErrNotFound.
 func (db *DB) SetChannelEnabled(ctx context.Context, name string, enabled bool) error {
+	query := "UPDATE channels SET enabled = ?, updated_at = ? WHERE name = ?"
+	if enabled {
+		query = `UPDATE channels SET enabled = ?, updated_at = ?, down_reason = '', down_since = NULL,
+            down_until = NULL WHERE name = ?`
+	}
 	return db.Write(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx,
-			"UPDATE channels SET enabled = ?, updated_at = ? WHERE name = ?",
-			boolInt(enabled), formatTime(time.Now().UTC()), name)
+		result, err := tx.ExecContext(ctx, query, boolInt(enabled), formatTime(time.Now().UTC()), name)
 		if err != nil {
 			return err
 		}
@@ -104,9 +113,11 @@ func scanChannel(row interface{ Scan(...any) error }) (ChannelRow, error) {
 		params             string
 		enabled            int
 		created, updatedAt string
+		downReason         string
+		downSince, downTo  sql.NullString
 	)
 	if err := row.Scan(&c.Name, &c.Type, &c.SecretEnv, &params, &c.MaxPerSecond, &c.MaxPerDay,
-		&enabled, &created, &updatedAt); err != nil {
+		&enabled, &created, &updatedAt, &downReason, &downSince, &downTo); err != nil {
 		return ChannelRow{}, err
 	}
 	c.Params = map[string]string{}
@@ -115,6 +126,9 @@ func scanChannel(row interface{ Scan(...any) error }) (ChannelRow, error) {
 	}
 	c.Enabled = enabled != 0
 	var err error
+	if c.Down, err = downState(downReason, downSince, downTo); err != nil {
+		return ChannelRow{}, err
+	}
 	if c.CreatedAt, err = parseTime(created); err != nil {
 		return ChannelRow{}, err
 	}
