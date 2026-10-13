@@ -45,7 +45,7 @@ func TestOpenConfiguresSQLite(t *testing.T) {
 
 // migrationsAtThisRevision is how many files internal/store/migrations holds. It is spelled out so
 // that adding a migration is a deliberate edit here too, rather than a test that quietly follows.
-const migrationsAtThisRevision = 6
+const migrationsAtThisRevision = 7
 
 // Opening twice must not re-apply a migration: 0001 creates tables without IF NOT EXISTS, so a
 // second run would fail loudly.

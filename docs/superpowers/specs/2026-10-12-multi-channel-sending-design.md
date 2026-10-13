@@ -252,13 +252,14 @@ Resend 与 SendGrid 的具体错误码、字段名和签名算法，在实现时
 |---|---|---|
 | `0005_message_channel.sql` | 1（已实现） | `messages.channel`；`messages`、`events` 的 `ses_message_id` 改名 `provider_message_id`；唯一部分索引 `messages_channel_provider_message_id ON messages(channel, provider_message_id) WHERE provider_message_id <> ''` |
 | `0006_channels.sql` | 2a | `channels` |
-| `0007_routes_ledger.sql` | 2c | `routes`；`send_ledger` 重建（主键加 `channel`） |
-| `0008_channel_state.sql` | 2d | `channel_fallbacks`；`channels.down_reason`、`channels.down_until` |
-| `0009_webhook_events.sql` | 3 | `webhook_events` |
+| `0007_routes.sql` | 2c-1 | `routes` |
+| `0008_send_ledger_channel.sql` | 2c-2 | `send_ledger` 重建（主键加 `channel`） |
+| `0009_channel_state.sql` | 2d | `channel_fallbacks`；`channels.down_reason`、`channels.down_until` |
+| `0010_webhook_events.sql` | 3 | `webhook_events` |
 
 0005 是第一个改列名（非纯增量）的迁移：新版二进制打开数据库即迁移，迁移后旧版 `serve` 与回滚到旧版都会因找不到 `ses_message_id` 而失败。升级顺序必须是：停 `serve` → `nibwire db backup` → 换二进制 → 启动。
 
-下面是三个文件合在一起的目标结构（0005 已按上表实现，以代码为准）：
+下面是上表这些文件合在一起的目标结构（0005、0006 已按上表实现，以代码为准）：
 
 ```sql
 CREATE TABLE channels (

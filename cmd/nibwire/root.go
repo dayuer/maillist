@@ -50,6 +50,7 @@ func newRootCmd() *cobra.Command {
 		newUploadCmd(),
 		newDomainsCmd(),
 		newChannelCmd(),
+		newRouteCmd(),
 		newQuotaCmd(),
 		newApproveCmd(),
 		newDBCmd(),

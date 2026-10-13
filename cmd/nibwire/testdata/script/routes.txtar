@@ -1,0 +1,105 @@
+# route add|remove|move|list：规则按顺序存进数据库，--default 永远最后，指向停用渠道的
+# 规则被标出。本期只存不生效：入队时分配渠道在 2c-2。
+
+nibwire init
+
+# 一条规则都没有时，所有邮件都走 default。
+nibwire route list
+stdout 'no rules'
+
+nibwire channel add aws2 --type ses --secret-env AWS2 --region us-east-1
+nibwire channel add back --type ses --secret-env BACK --region us-east-1
+
+# --match 与 --default、--to 与 --split 各给一个，两边都不能都不给。
+! nibwire route add --match domain:example.org --default --to aws2
+stderr 'either --default or --match'
+! nibwire route add --to aws2
+stderr 'give --match'
+! nibwire route add --match domain:example.org
+stderr 'give --to <channel>'
+! nibwire route add --default
+stderr 'give --to <channel>'
+! nibwire route add --match domain:example.org --to aws2 --split aws2:50,back:50
+stderr 'either --to or --split'
+
+# 写错的条件不会静默地匹配不到任何东西。
+! nibwire route add --match example.org --to aws2
+stderr 'write default, domain:a.b or mailbox:gmail'
+! nibwire route add --match 'domain:exam ple.org' --to aws2
+stderr 'is not a domain name'
+! nibwire route add --match mailbox:fastmail --to aws2
+stderr 'use gmail, outlook, yahoo, icloud, proton, other'
+! nibwire route add --match domain:example.org --split aws2:0,back:50
+stderr 'from 1 to 1000000'
+! nibwire route add --match domain:example.org --split aws2:50,aws2:50
+stderr 'appears twice'
+! nibwire route add --match domain:example.org --to missing
+stderr 'no channel named missing'
+
+# 规则按加入顺序排列；域名存成小写；单目标打印成渠道名。
+nibwire route add --match domain:EXAMPLE.org --to aws2
+stdout '^added [0-9a-f]{24}: domain:example.org -> aws2$'
+nibwire route add --match mailbox:gmail --to back
+stdout '^added [0-9a-f]{24}: mailbox:gmail -> back$'
+nibwire route add --default --split aws2:80,default:20
+stdout '^added [0-9a-f]{24}: default -> aws2:80,default:20$'
+
+nibwire route list
+stdout '^[0-9a-f]{24}\tdomain:example.org\taws2\tok$'
+stdout '^[0-9a-f]{24}\tmailbox:gmail\tback\tok$'
+stdout '^[0-9a-f]{24}\tdefault\taws2:80,default:20\tok$'
+
+# --default 只能有一条。
+! nibwire route add --default --to back
+stderr 'already a default rule'
+
+# 顺序：move 把一条规则放到另一条前面；default 不能被移动。
+routeid DOMAIN_ID domain:example.org
+routeid MAILBOX_ID mailbox:gmail
+routeid DEFAULT_ID default
+
+nibwire route move $MAILBOX_ID --before $DOMAIN_ID
+stdout '^moved '
+nibwire route list
+stdout '^[0-9a-f]{24}\tmailbox:gmail\tback\tok\n[0-9a-f]{24}\tdomain:example.org\taws2\tok\n[0-9a-f]{24}\tdefault\t'
+
+! nibwire route move $DEFAULT_ID --before $DOMAIN_ID
+stderr 'the default rule is always last'
+! nibwire route move $DOMAIN_ID --before $DOMAIN_ID
+stderr 'cannot move in front of itself'
+! nibwire route move 000000000000000000000000 --before $DOMAIN_ID
+stderr 'no route with id 000000000000000000000000'
+! nibwire route move $DOMAIN_ID --before 000000000000000000000000
+stderr 'no route with id 000000000000000000000000'
+
+# 停用的渠道：list 标出、add 拒绝；default 永远可用。
+nibwire channel disable aws2 --yes
+nibwire route list
+stdout '^[0-9a-f]{24}\tdomain:example.org\taws2\tchannel aws2 is disabled$'
+! nibwire route add --match domain:other.org --to aws2
+stderr 'aws2 is disabled'
+nibwire route add --match domain:other.org --to default
+stdout '^added '
+nibwire channel enable aws2
+
+# JSON：id、规范后的 match 与权重。
+nibwire route list --json
+stdout '"match": "default"'
+stdout '"channel": "aws2"'
+stdout '"weight": 80'
+
+# 删掉一条规则，留下的位置收拢。
+routeid OTHER_ID domain:other.org
+nibwire route remove $OTHER_ID
+stdout '^removed '
+nibwire route list
+! stdout 'domain:other.org'
+! nibwire route remove $OTHER_ID
+stderr 'no route with id'
+
+# 每条规则都留下了痕迹：加了四条，删了一条。
+nibwire audit list --action route.add
+stdout -count=4 'route\.add'
+stdout $OTHER_ID
+nibwire audit list --action route.remove
+stdout -count=1 'route\.remove'
