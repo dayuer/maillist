@@ -7,11 +7,13 @@ package route
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
+	"nibwire/internal/core/model"
 	"nibwire/internal/core/providers"
 )
 
@@ -39,6 +41,14 @@ type Match struct {
 	Default   bool
 	Domains   []string
 	Mailboxes []string
+}
+
+// Rule is one routing rule. ID is what a split hashes together with the contact, so it has to stay
+// put for as long as the rule exists: another rule appearing above this one must not move anybody.
+type Rule struct {
+	ID      string
+	Match   Match
+	Targets []Target
 }
 
 // ParseMatch reads the stored form of a match: "default", "domain:example.org,example.net" or
@@ -117,6 +127,126 @@ func ParseSplit(text string) ([]Target, error) {
 		targets = append(targets, Target{Channel: name, Weight: weight})
 	}
 	return targets, nil
+}
+
+// Validate reports whether rules can be used as they stand: each one matches something, sends
+// somewhere and can be hashed, and the single default rule — when there is one — is last.
+func Validate(rules []Rule) error {
+	defaults := 0
+	lastDefault := -1
+	for i, rule := range rules {
+		if rule.ID == "" {
+			return fmt.Errorf("rule %d has no id", i+1)
+		}
+		if len(rule.Match.Domains) == 0 && len(rule.Match.Mailboxes) == 0 && !rule.Match.Default {
+			return fmt.Errorf("rule %s matches nothing", rule.ID)
+		}
+		if len(rule.Targets) == 0 {
+			return fmt.Errorf("rule %s has no targets", rule.ID)
+		}
+		for _, target := range rule.Targets {
+			if target.Channel == "" || target.Weight < 1 || target.Weight > maxWeight {
+				return fmt.Errorf("rule %s: %q needs a channel and a weight from 1 to %d",
+					rule.ID, target.Channel, maxWeight)
+			}
+		}
+		if rule.Match.Default {
+			defaults++
+			lastDefault = i
+		}
+	}
+	if defaults > 1 {
+		return fmt.Errorf("%d default rules: there can be only one default rule", defaults)
+	}
+	if lastDefault >= 0 && lastDefault != len(rules)-1 {
+		return fmt.Errorf("rule %s: the default rule is always last", rules[lastDefault].ID)
+	}
+	return nil
+}
+
+// Pick returns the channel a message goes out through: the first rule that matches, or the default
+// channel when none does — which is where a deployment with no rules sends everything.
+//
+// contactID may be empty for one-off mail, a test message or a confirmation: there the address
+// stands in for it, so the same recipient lands in the same share of a split every time.
+func Pick(rules []Rule, contactID, email string) string {
+	for _, rule := range rules {
+		if !rule.Match.matches(email) {
+			continue
+		}
+		return rule.pick(splitKey(contactID, email))
+	}
+	return model.DefaultChannel
+}
+
+// pick sends a one-target rule straight to its channel; several targets are split by weight, so
+// which share a key lands in is stable for as long as the rule's targets are.
+func (r Rule) pick(key string) string {
+	total := 0
+	for _, target := range r.Targets {
+		if target.Weight > 0 {
+			total += target.Weight
+		}
+	}
+	if total == 0 {
+		// No targets, or none of them with a weight: nothing to split between.
+		return model.DefaultChannel
+	}
+	// The remainder is smaller than the weights it was taken from, so the whole walk stays in
+	// uint64 and never has to be narrowed back to an int.
+	remaining := weighted(key, r.ID) % uint64(total)
+	channel := model.DefaultChannel
+	for _, target := range r.Targets {
+		if target.Weight <= 0 {
+			continue
+		}
+		channel = target.Channel
+		if remaining < uint64(target.Weight) {
+			break
+		}
+		remaining -= uint64(target.Weight)
+	}
+	return channel
+}
+
+// matches reports whether a message to this address is the rule's business.
+func (m Match) matches(email string) bool {
+	switch {
+	case m.Default:
+		return true
+	case len(m.Domains) > 0:
+		return slices.Contains(m.Domains, domainOf(email))
+	default:
+		return slices.Contains(m.Mailboxes, providers.Mailbox(email))
+	}
+}
+
+// domainOf is the part of an address after its first "@", lower-cased — the same reading of an
+// address that providers.Mailbox uses, so that "a@b@c" means the same thing to both.
+func domainOf(email string) string {
+	address := strings.TrimSpace(email)
+	at := strings.Index(address, "@")
+	if at < 0 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(address[at+1:]))
+}
+
+// splitKey is what a split hashes: the contact, or the address when there is no contact. Folding the
+// address to lower case keeps one mailbox on one side of the split.
+func splitKey(contactID, email string) string {
+	if contactID != "" {
+		return contactID
+	}
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// weighted is fnv64a of "contact/rule": stable across runs, and independent for each rule because
+// the rule's id is part of what is hashed (design §4.1).
+func weighted(key, ruleID string) uint64 {
+	sum := fnv.New64a()
+	_, _ = sum.Write([]byte(key + "/" + ruleID))
+	return sum.Sum64()
 }
 
 // splitList reads a comma-separated list: trimmed, lower-cased, without repeats, never empty.
