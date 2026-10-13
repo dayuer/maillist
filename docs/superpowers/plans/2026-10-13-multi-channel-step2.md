@@ -1660,39 +1660,1335 @@ EOF
 
 ---
 
-## 2b：引擎按渠道发信（概要；2a 合并后补写到可执行粒度）
+## 2b：引擎按渠道发信
 
-**目标**：邮件记在哪个渠道，就从哪个渠道发出；每个渠道独立限速与分类。
+**目标**：邮件记在哪个渠道，就从哪个渠道发出；每个渠道一条「通道」（lane）：自己的限速桶、自己的 `ratectl.Controller`、自己的配额轮询、自己的分派循环与工作协程，一个渠道被限速或堵住只影响它自己（设计第 6 节）。
 
-**接口与结构**
+**合并后**：未登记渠道的部署行为不变（只有 `default` 一条通道，所有现有测试只改构造方式）。登记了渠道的部署：每个渠道各自轮询配额、各自限速；由于路由在 2c，入队的邮件仍全部记在 `default` 上。
+
+### 设计要点
+
+1. **通道**：`internal/mailer/lane.go` 的 `lane{channel, bucket, control}`。`NewEngine(db, *Registry, signer, cfg, log)` 为 Registry 中每个渠道建一条通道，`default` 在前。
+   - `default`：`control = cfg.RateControl`，桶的初始速率 `cfg.SendRatePerSec`，并发 `cfg.SendConcurrency`——即本步之前的引擎。
+   - 其他渠道：引擎遵循配额（`cfg.RateControl != nil`）时自建 `ratectl.New({Headroom: cfg.Limits.SendRateHeadroom, Cap: max_per_second, Floor: 1})`；否则（只出现在测试里）桶用固定速率 `max_per_second`，未设时 `SendRatePerSec`。并发 `cfg.ChannelConcurrency`（app 传 `config.DefaultSendConcurrency`；0 表示同 `SendConcurrency`）。
+   - `max_per_second` 经 `Config.ChannelLimits map[string]ChannelLimit` 传入（app 从 `channels` 表读出）。
+   - 并发数在每批开始时从 `e.cfg` 读，不在构造时冻结：现有测试会在构造后改 `cfg.SendConcurrency`。
+2. **按渠道领取与分派**：`store.ClaimChannelMessages(ctx, channel, n)` 只领取该渠道的邮件。`SendBatch(ctx, nil)` 让每条通道同时各领各发（`sendLane` → `runLane`，`runLane` 就是原来的分派器加工作池，参数化为一条通道），结果相加；`SendBatch(ctx, ids)` 领取后按渠道分组，每组交给对应通道。`Run` 为每条通道各跑一个轮询循环，任一循环出错就停掉其余循环并返回该错误。
+3. **只分类 `Send` 的错误**：`deliver` 把 `channel.Send` 的错误包成 `*sendError`；`handleSendError` 只在 `errors.As(cause, &sendError)` 时用该通道渠道的 `Classify`，其余（渲染、签名、限速桶）一律 `ErrorFail`。删除 `Engine.classify` 与按类型断言选分类函数的代码。`onThrottle`/`onSuccess` 移到 `lane` 上，只动该通道。
+4. **没有通道的渠道上的邮件（strays）**：`store.ClaimMessagesOutside(ctx, 通道名, n)` 领取 `channel` 不在通道列表里的待发邮件，按 `channels` 表区分（#75 的要求）：
+   - 表里没有这个渠道：邮件失败，错误为 `channel X does not exist`，计入 campaign 的失败数；所在 campaign 若已无待发邮件则照常结束。
+   - 表里有但本进程没有通道（已停用、构建失败、或在进程启动后才启用）：campaign 邮件退回队列、不计失败，campaign 暂停，原因指明渠道与修复方法（`channel X is disabled: …`、`channel X could not be loaded (<ChannelProblems 中的原因>): …`、`channel X is not loaded in this process: …`）。非 campaign 邮件（欢迎信、确认信）没有 campaign 可暂停，留在队列里会每个轮询周期被领取一次，因此以同一原因失败。
+   - 这样 CLI 的 drain 与单封发送（不经过 `serve` 的 `CheckChannels`）也不会把停用渠道上的邮件记成失败。
+5. **配额**：`App.Poller` 改为 `App.Pollers []*mailer.QuotaPoller`，每条有控制器的通道一个，`serve` 每个一个 goroutine（组件名 `quota <渠道名>`）。`QuotaPoller` 加 `Channel` 字段：`default` 的告警 key 不变（`ses-quota-unreadable`），其他渠道为 `ses-quota-unreadable-<name>`。`App.ReadQuota` 读所有渠道并逐一 `Engine.SetQuota(channel, quota, now)`，返回 `default` 的读数与错误；其他渠道读不到只记日志（它按 1/s 发）。`Engine.Bucket()` 删除，改为 `Engine.Lanes() []Lane`。
+6. **暂按 default**：`SendingRate`（`nibwire quota`、`campaign check`、MCP）与 `sesQuotaRefusal`（入队与续发时的 24 小时额度检查）读 `default` 通道。2b 中所有邮件都记在 `default` 上，所以这是准确的；2c 按渠道分配后，这两处改为按渠道（2c 任务 3 已列出 `sesQuotaRefusal`）。
+7. **不留给 2c/2d 返工**：通道只按 `messages.channel` 选，不改派、不改 `messages.channel`；`ErrorPause`/`ErrorQuota` 的处理仍是暂停 campaign（2d 在此处加改派）；strays 的「暂停并说明渠道」正是 2d 找不到备用渠道时的退路。
+
+### 文件
+
+| 文件 | 动作 | 职责 |
+|---|---|---|
+| `internal/store/messages_channel.go` | 新建 | `ClaimChannelMessages`、`ClaimMessagesOutside`（2c 再把其他按渠道的消息查询移入） |
+| `internal/store/messages_channel_test.go` | 新建 | 两个领取函数的测试 |
+| `internal/mailer/lane.go` | 新建 | `lane`、`Lane`、`ChannelLimit`、`newLanes`、`laneFor`、`Lanes`、`SetQuota`、`laneConcurrency`、`sendError` |
+| `internal/mailer/strays.go` | 新建 | 没有通道的渠道上的邮件 |
+| `internal/mailer/engine.go` | 改 | `Config` 加三个字段；`Engine` 持有通道；`NewEngine` 接收 `*Registry`；`SendBatch` 按通道分派；`deliver`、`handleSendError`、`Run` 按通道；删除 `classify`、`Bucket()`、旧 `SetQuota`、`onThrottle`/`onSuccess` |
+| `internal/mailer/quota.go` | 改 | `QuotaPoller.Channel` |
+| `internal/mailer/lanes_test.go` | 新建 | 第 2b 步的验收测试 |
+| `internal/mailer/quota_test.go` | 改 | 其他渠道的告警 key |
+| `internal/mailer/engine_test.go`、`classify_test.go`、`errors_test.go`、`throughput_test.go` | 改 | 只改构造方式（`defaultOnly` 包一层 Registry；`f.engine.bucket` → `f.engine.defaultLane().bucket`） |
+| `internal/httpsrv/testhelpers_test.go`、`internal/mcpsrv/mcp_test.go` | 改 | 只改构造方式 |
+| `internal/app/channels.go` | 改 | `loadChannels` 同时返回各渠道的 `ChannelLimit` |
+| `internal/app/app.go` | 改 | 传 Registry 与渠道配置；`Pollers`；`ReadQuota` 读全部渠道 |
+| `internal/app/app_channels_test.go` | 改 | 每个渠道一个轮询器、各自封顶 |
+| `cmd/nibwire/serve.go` | 改 | 每个轮询器一个组件 |
+| `docs/superpowers/specs/2026-10-12-multi-channel-sending-design.md` | 改 | 第 3.1 节表格：ses 为 `--region` 或 `--endpoint`（#78 复审） |
+
+### Task 0：认领与分支
+
+```bash
+gh issue comment 75 --body "[impl] CLAIM
+<!-- agent: impl-local -->
+
+CLAIM"
+gh issue edit 75 --remove-label status:accepted --add-label status:claimed
+git fetch origin && git switch -c impl/engine-lanes origin/main
+```
+
+本计划段落单独提交：
+
+```bash
+git add docs/superpowers/plans/2026-10-13-multi-channel-step2.md
+git commit -m "docs(plan): 2b in detail
+
+Refs #75"
+```
+
+### Task 1：按渠道领取
+
+**Files:** `internal/store/messages_channel.go`、`internal/store/messages_channel_test.go`
+
+- [ ] **Step 1：写失败的测试**
+
+`internal/store/messages_channel_test.go`：
 
 ```go
-// internal/mailer/lane.go
+package store
+
+import (
+	"context"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// claimedEmails is the claimed messages' addresses, sorted, so a test can compare sets.
+func claimedEmails(t *testing.T, claimed []string) string {
+	t.Helper()
+	sort.Strings(claimed)
+	return strings.Join(claimed, ",")
+}
+
+// Each channel's lane claims only its own messages, so a channel that is slow or throttled never
+// holds another channel's mail.
+func TestClaimChannelMessagesTakesOnlyThatChannel(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	messages := campaignMessages(t, db, sendingCampaign(t, db), 4)
+	messages[1].Channel = "aws2"
+	messages[3].Channel = "aws2"
+	if _, err := db.InsertMessages(ctx, messages); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := db.ClaimChannelMessages(ctx, "aws2", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, message := range claimed {
+		if message.Channel != "aws2" {
+			t.Fatalf("claimed a %s message", message.Channel)
+		}
+		got = append(got, message.Email)
+	}
+	if emails := claimedEmails(t, got); emails != "reader1@example.com,reader3@example.com" {
+		t.Fatalf("claimed %s", emails)
+	}
+	// The default channel's two are still there for the default lane.
+	claimed, err = db.ClaimChannelMessages(ctx, "default", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 2 {
+		t.Fatalf("default claimed %d, want 2", len(claimed))
+	}
+}
+
+// Mail recorded on a channel this process has not loaded is claimed by nobody's lane; the engine
+// claims it separately, to fail it or to pause its campaign with a reason.
+func TestClaimMessagesOutsideTakesTheChannelsNobodyServes(t *testing.T) {
+	db := openTemp(t)
+	ctx := context.Background()
+	messages := campaignMessages(t, db, sendingCampaign(t, db), 4)
+	messages[1].Channel = "aws2"
+	messages[2].Channel = "gone"
+	messages[3].Channel = "off"
+	if _, err := db.InsertMessages(ctx, messages); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := db.ClaimMessagesOutside(ctx, []string{"default", "aws2"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, message := range claimed {
+		got = append(got, message.Channel)
+	}
+	if channels := claimedEmails(t, got); channels != "gone,off" {
+		t.Fatalf("claimed messages on %s, want gone and off", channels)
+	}
+	// With no channels named, every pending message is outside: nothing panics on an empty list.
+	rest, err := db.ClaimMessagesOutside(ctx, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != 2 {
+		t.Fatalf("claimed %d, want the 2 left", len(rest))
+	}
+}
+```
+
+- [ ] **Step 2：运行，确认失败**
+
+Run: `go test ./internal/store -run 'ClaimChannel|ClaimMessagesOutside' -count=1`
+Expected: FAIL，`db.ClaimChannelMessages undefined`
+
+- [ ] **Step 3：实现**
+
+`internal/store/messages_channel.go`：
+
+```go
+package store
+
+import (
+	"context"
+	"strings"
+
+	"nibwire/internal/core/model"
+)
+
+// The claims below split the queue by channel (multi-channel design §6). Step 2c moves the other
+// channel-specific message queries here as well (plan 2026-10-13-multi-channel-step2.md).
+
+// ClaimChannelMessages is ClaimMessages for one channel's messages. Each channel's lane claims its
+// own, so a channel that is throttled or slow never holds another channel's mail.
+func (db *DB) ClaimChannelMessages(ctx context.Context, channel string, n int) ([]model.Message, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	args := append([]any{string(model.MessagePending)}, claimableArgs()...)
+	args = append(args, channel, n)
+	return db.claim(ctx, "SELECT id FROM messages WHERE status = ? AND "+claimableCampaign+
+		" AND channel = ? ORDER BY created_at, id LIMIT ?", args...)
+}
+
+// ClaimMessagesOutside claims up to n pending messages whose channel is none of channels: mail
+// recorded on a channel this process has not loaded (disabled, broken, or not there at all). No
+// lane would ever claim it, so the engine claims it here to fail it or pause its campaign.
+func (db *DB) ClaimMessagesOutside(ctx context.Context, channels []string, n int) ([]model.Message, error) {
+	if n <= 0 {
+		return nil, nil
+	}
+	args := append([]any{string(model.MessagePending)}, claimableArgs()...)
+	selection := "SELECT id FROM messages WHERE status = ? AND " + claimableCampaign
+	if len(channels) > 0 {
+		placeholders := make([]string, len(channels))
+		for i, channel := range channels {
+			placeholders[i] = "?"
+			args = append(args, channel)
+		}
+		selection += " AND channel NOT IN (" + strings.Join(placeholders, ",") + ")"
+	}
+	args = append(args, n)
+	return db.claim(ctx, selection+" ORDER BY created_at, id LIMIT ?", args...)
+}
+```
+
+- [ ] **Step 4：运行，确认通过**
+
+Run: `go test ./internal/store -count=1`
+Expected: PASS
+
+- [ ] **Step 5：提交**
+
+```bash
+git add internal/store/messages_channel.go internal/store/messages_channel_test.go
+git commit -m "feat(store): claim one channel's messages, or the ones no lane serves
+
+Refs #75"
+```
+
+### Task 2：每个渠道一条通道
+
+**Files:** `internal/mailer/lane.go`、`internal/mailer/strays.go`、`internal/mailer/engine.go`、`internal/mailer/lanes_test.go`、构造方式改动的测试文件、`internal/app/app.go`（只改 `NewEngine` 调用）
+
+- [ ] **Step 1：写失败的测试**
+
+`internal/mailer/lanes_test.go`（#75 要求的五项：两个渠道各自从自己的 Fake 发出；aws2 被限速不影响 default 的速率，aws2 的桶堵住时 default 照常发完；引擎自身错误不经渠道分类、直接失败；未知渠道失败并给出原因；停用、构建失败或未加载的渠道暂停 campaign、指明渠道、不计失败。外加每条通道的封顶与并发）：
+
+```go
+package mailer
+
+import (
+	"context"
+	"errors"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"nibwire/internal/core/ids"
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/providers"
+	"nibwire/internal/core/ratectl"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/store"
+)
+
+// newLaneFixture is the fixture with a second channel, aws2, sending through a fake of its own. The
+// engine is rebuilt over the same database with both channels in its registry.
+func newLaneFixture(t *testing.T, contacts int, configure func(*Config)) (*fixture, *Fake) {
+	t.Helper()
+	f := newFixtureConfigured(t, contacts, configure)
+	second := NewFake()
+	registry, err := NewRegistry(
+		NewChannel(model.DefaultChannel, ChannelTypeSES, f.fake, StaticQuota{}, StaticIdentity{}, nil),
+		NewChannel("aws2", ChannelTypeSES, second, StaticQuota{}, StaticIdentity{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.engine = NewEngine(f.db, registry, f.signer, f.engine.cfg, f.engine.log)
+	t.Cleanup(f.engine.Close)
+	return f, second
+}
+
+// queueOn queues the fixture's campaign by hand, contact i on channelOf(i), and moves the campaign to
+// sending. It stands in for routing, which arrives with step 2c.
+func queueOn(t *testing.T, f *fixture, channelOf func(i int) string) []model.Message {
+	t.Helper()
+	ctx := context.Background()
+	messages := make([]model.Message, 0, len(f.contacts))
+	for i, contact := range f.contacts {
+		messages = append(messages, model.Message{
+			ID: ids.New(), Kind: model.KindCampaign, CampaignID: f.campaign.ID,
+			NewsletterID: f.newsletter.ID, ContactID: contact.ID, Email: contact.Email,
+			Provider: providers.Mailbox(contact.Email), Status: model.MessagePending,
+			CreatedAt: time.Now().UTC(), Channel: channelOf(i),
+		})
+	}
+	if _, err := f.db.InsertMessages(ctx, messages); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := f.db.SetCampaignStatus(ctx, f.campaign.ID,
+		[]model.CampaignStatus{model.CampaignDraft}, model.CampaignSending)
+	if err != nil || !moved {
+		t.Fatalf("move to sending: %v %v", moved, err)
+	}
+	return messages
+}
+
+// evenOnDefault puts even contacts on default and odd ones on aws2.
+func evenOnDefault(i int) string {
+	if i%2 == 0 {
+		return model.DefaultChannel
+	}
+	return "aws2"
+}
+
+func recipients(fake *Fake) string {
+	var to []string
+	for _, sent := range fake.Sent() {
+		to = append(to, sent.Email.To)
+	}
+	sort.Strings(to)
+	return strings.Join(to, ",")
+}
+
+// 记在哪个渠道的邮件就从哪个渠道发出：批量领取与按 id 发送都一样。
+func TestEachMessageGoesOutThroughItsOwnChannel(t *testing.T) {
+	f, second := newLaneFixture(t, 4, nil)
+	ctx := context.Background()
+	messages := queueOn(t, f, evenOnDefault)
+
+	// The explicit-ids path (a welcome or confirmation email) goes through the message's channel too.
+	result, err := f.engine.SendBatch(ctx, []string{messages[1].ID})
+	if err != nil || result.Sent != 1 {
+		t.Fatalf("send by id = %+v, %v", result, err)
+	}
+	if second.SentCount() != 1 || f.fake.SentCount() != 0 {
+		t.Fatalf("aws2 sent %d, default %d, want 1 and 0", second.SentCount(), f.fake.SentCount())
+	}
+
+	result, err = f.engine.SendBatch(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Sent != 3 || result.Failed != 0 {
+		t.Fatalf("result = %+v, want 3 sent", result)
+	}
+	if got := recipients(f.fake); got != "reader0@example.com,reader2@example.com" {
+		t.Fatalf("default sent to %s", got)
+	}
+	if got := recipients(second); got != "reader1@example.com,reader3@example.com" {
+		t.Fatalf("aws2 sent to %s", got)
+	}
+	campaign, err := f.db.Campaign(ctx, f.campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if campaign.Status != model.CampaignSent {
+		t.Fatalf("status = %s, want sent", campaign.Status)
+	}
+}
+
+// 每个渠道各有一套限速：aws2 被限速只把 aws2 的速率减半，default 的速率与发送不受影响。
+func TestAThrottledChannelSlowsOnlyItself(t *testing.T) {
+	control := ratectl.New(ratectl.Config{Headroom: 0.9})
+	f, second := newLaneFixture(t, 6, func(cfg *Config) {
+		cfg.RateControl = control
+		cfg.Limits.SendRateHeadroom = 0.9
+	})
+	ctx := context.Background()
+	queueOn(t, f, evenOnDefault)
+	now := time.Now().UTC()
+	reading := ratectl.Quota{MaxSendRate: 500, Max24HourSend: -1}
+	f.engine.SetQuota(model.DefaultChannel, reading, now)
+	f.engine.SetQuota("aws2", reading, now)
+	aws2, _ := f.engine.laneFor("aws2")
+	if aws2.control == control || aws2.bucket == f.engine.defaultLane().bucket {
+		t.Fatal("aws2 shares the default channel's controller or bucket")
+	}
+	if got := aws2.control.Rate(now); got != 450 {
+		t.Fatalf("aws2 rate before the throttle = %v, want 450", got)
+	}
+
+	for i := 1; i < len(f.contacts); i += 2 {
+		second.FailWith(f.contacts[i].Email, "ThrottlingException", "Maximum sending rate exceeded")
+	}
+	result, err := f.engine.SendBatch(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Retry || result.Failed != 0 {
+		t.Fatalf("result = %+v, want a retry and nothing failed", result)
+	}
+	if got := aws2.control.Rate(time.Now()); got != 225 {
+		t.Fatalf("aws2 rate after its throttle = %v, want 225", got)
+	}
+	if got := aws2.bucket.Rate(); got != 225 {
+		t.Fatalf("aws2 bucket = %v, want 225", got)
+	}
+	if got := control.Rate(time.Now()); got != 450 {
+		t.Fatalf("default rate = %v, want 450: another channel's throttle slowed it", got)
+	}
+	if got := f.engine.defaultLane().bucket.Rate(); got != 450 {
+		t.Fatalf("default bucket = %v, want 450", got)
+	}
+	if got := recipients(f.fake); got != "reader0@example.com,reader2@example.com,reader4@example.com" {
+		t.Fatalf("default sent to %s, want all of its own", got)
+	}
+}
+
+// 一个渠道的限速桶堵住时，只占用它自己的工作协程：default 照常发完，aws2 的邮件在停止时退回队列。
+func TestABlockedChannelDoesNotHoldTheOthers(t *testing.T) {
+	f, second := newLaneFixture(t, 8, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	messages := queueOn(t, f, evenOnDefault)
+
+	// A rate of zero, and the one free slot spent: every Take on aws2 now waits an hour.
+	aws2, _ := f.engine.laneFor("aws2")
+	aws2.bucket.SetRate(0)
+	if err := aws2.bucket.Take(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	type outcome struct {
+		result BatchResult
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := f.engine.SendBatch(ctx, nil)
+		done <- outcome{result, err}
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for f.fake.SentCount() < 4 {
+		if time.Now().After(deadline) {
+			t.Fatalf("default sent %d of 4 while aws2 was blocked", f.fake.SentCount())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case got := <-done:
+		t.Fatalf("the batch finished (%+v, %v) while aws2 was still waiting", got.result, got.err)
+	default:
+	}
+	if second.SentCount() != 0 {
+		t.Fatalf("aws2 sent %d through a blocked bucket", second.SentCount())
+	}
+
+	cancel()
+	select {
+	case got := <-done:
+		if got.err != nil || !got.result.Retry {
+			t.Fatalf("after the stop = %+v, %v, want a retry and no error", got.result, got.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the batch did not stop")
+	}
+	// What aws2 never sent is back in the queue, not claimed and not unknown.
+	for i := 1; i < len(messages); i += 2 {
+		message, err := f.db.Message(context.Background(), messages[i].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if message.Status != model.MessagePending {
+			t.Fatalf("aws2 message %d is %s, want pending", i, message.Status)
+		}
+	}
+}
+
+// 引擎自己的错误（这里是已关闭的限速桶）不交给渠道分类：渠道说什么都要暂停，邮件仍按失败记，campaign 不暂停。
+func TestAnEngineErrorIsNotTheChannelsToClassify(t *testing.T) {
+	f := newFixture(t, 2)
+	ctx := context.Background()
+	alwaysPause := func(error) rules.ErrorAction { return rules.ErrorPause }
+	engine := NewEngine(f.db, defaultOnly(t, f.fake, alwaysPause), f.signer, f.engine.cfg, f.engine.log)
+	t.Cleanup(engine.Close)
+	messages := queueOn(t, f, func(int) string { return model.DefaultChannel })
+	engine.defaultLane().bucket.Close()
+
+	result, err := engine.SendBatch(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Failed != 2 || result.Sent != 0 {
+		t.Fatalf("result = %+v, want both failed", result)
+	}
+	campaign, err := f.db.Campaign(ctx, f.campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if campaign.Status == model.CampaignPaused {
+		t.Fatal("the campaign paused: the engine's own error was read with the channel's rules")
+	}
+	for _, queued := range messages {
+		message, err := f.db.Message(ctx, queued.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if message.Status != model.MessageFailed || !strings.Contains(message.Error, "closed") {
+			t.Fatalf("message = %s %q, want failed by the closed limiter", message.Status, message.Error)
+		}
+	}
+}
+
+// 记在不存在的渠道上的邮件发不出去：直接失败，错误写明渠道。
+func TestAMessageOnAnUnknownChannelFails(t *testing.T) {
+	f, _ := newLaneFixture(t, 2, nil)
+	ctx := context.Background()
+	messages := queueOn(t, f, func(i int) string {
+		if i == 0 {
+			return model.DefaultChannel
+		}
+		return "nowhere"
+	})
+
+	result, err := f.engine.SendBatch(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Sent != 1 || result.Failed != 1 {
+		t.Fatalf("result = %+v, want 1 sent and 1 failed", result)
+	}
+	message, err := f.db.Message(ctx, messages[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Status != model.MessageFailed || !strings.Contains(message.Error, "channel nowhere does not exist") {
+		t.Fatalf("message = %s %q", message.Status, message.Error)
+	}
+	counters, _, err := f.db.CampaignCountersOf(ctx, f.campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counters.Failed != 1 {
+		t.Fatalf("failed counter = %d, want 1", counters.Failed)
+	}
+	campaign, err := f.db.Campaign(ctx, f.campaign.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if campaign.Status != model.CampaignSent {
+		t.Fatalf("status = %s, want sent: nothing is left to send", campaign.Status)
+	}
+}
+
+// 记在已停用或构建失败的渠道上的邮件：退回队列、不计失败，campaign 暂停，原因指明渠道。
+func TestAMessageOnAnUnavailableChannelPausesItsCampaign(t *testing.T) {
+	cases := []struct {
+		name    string
+		row     store.ChannelRow
+		problem error
+		want    []string
+	}{
+		{"disabled", store.ChannelRow{Name: "off", Type: "ses", SecretEnv: "OFF", Enabled: false}, nil,
+			[]string{"channel off is disabled"}},
+		{"broken", store.ChannelRow{Name: "broke", Type: "ses", SecretEnv: "BROKE", Enabled: true},
+			errors.New("set both BROKE_ACCESS_KEY_ID and BROKE_SECRET_ACCESS_KEY"),
+			[]string{"channel broke could not be loaded", "BROKE_SECRET_ACCESS_KEY"}},
+		{"enabled after start", store.ChannelRow{Name: "late", Type: "ses", SecretEnv: "LATE", Enabled: true},
+			nil, []string{"channel late is not loaded"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, _ := newLaneFixture(t, 2, func(cfg *Config) {
+				if c.problem != nil {
+					cfg.ChannelProblems = map[string]error{c.row.Name: c.problem}
+				}
+			})
+			ctx := context.Background()
+			if err := f.db.CreateChannel(ctx, c.row); err != nil {
+				t.Fatal(err)
+			}
+			messages := queueOn(t, f, func(int) string { return c.row.Name })
+
+			result, err := f.engine.SendBatch(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Failed != 0 || result.Sent != 0 {
+				t.Fatalf("result = %+v, want nothing sent and nothing failed", result)
+			}
+			campaign, err := f.db.Campaign(ctx, f.campaign.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if campaign.Status != model.CampaignPaused {
+				t.Fatalf("status = %s, want paused", campaign.Status)
+			}
+			for _, want := range c.want {
+				if !f.logs.says(want) {
+					t.Errorf("the pause reason does not say %q", want)
+				}
+			}
+			for _, sent := range messages {
+				message, err := f.db.Message(ctx, sent.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if message.Status != model.MessagePending {
+					t.Fatalf("message is %s, want pending", message.Status)
+				}
+			}
+		})
+	}
+}
+
+// default 用 SEND_RATE_PER_SECOND 与 SEND_CONCURRENCY；其他渠道用自己的 max_per_second 与 ChannelConcurrency，
+// 并沿用同一个 headroom（设计第 6 节）。
+func TestEachLaneHasItsOwnCapAndConcurrency(t *testing.T) {
+	control := ratectl.New(ratectl.Config{Headroom: 0.9, Cap: 100})
+	f, _ := newLaneFixture(t, 1, func(cfg *Config) {
+		cfg.RateControl = control
+		cfg.Limits.SendRateHeadroom = 0.5
+		cfg.SendConcurrency = 3
+		cfg.ChannelConcurrency = 7
+		cfg.ChannelLimits = map[string]ChannelLimit{"aws2": {MaxPerSecond: 20}}
+	})
+	now := time.Now().UTC()
+	f.engine.SetQuota(model.DefaultChannel, ratectl.Quota{MaxSendRate: 500, Max24HourSend: -1}, now)
+	f.engine.SetQuota("aws2", ratectl.Quota{MaxSendRate: 500, Max24HourSend: -1}, now)
+	f.engine.SetQuota("aws2-unknown", ratectl.Quota{MaxSendRate: 1}, now) // ignored
+
+	lanes := f.engine.Lanes()
+	if len(lanes) != 2 || lanes[0].Channel.Name() != model.DefaultChannel || lanes[1].Channel.Name() != "aws2" {
+		t.Fatalf("lanes = %v", lanes)
+	}
+	if lanes[0].Control != control || lanes[0].Bucket.Rate() != 100 {
+		t.Fatalf("default lane: control %p, bucket %v, want the configured controller at 100",
+			lanes[0].Control, lanes[0].Bucket.Rate())
+	}
+	if got := lanes[1].Control.Rate(now); got != 20 {
+		t.Fatalf("aws2 rate = %v, want its max_per_second, 20", got)
+	}
+	// Without a cap of its own the same headroom applies: 500 × 0.5.
+	f.engine.cfg.ChannelLimits = nil
+	uncapped := newLanesFor(t, f.engine.cfg, f.fake)
+	uncapped.SetQuota("aws2", ratectl.Quota{MaxSendRate: 500, Max24HourSend: -1}, now)
+	if got := uncapped.Lanes()[1].Control.Rate(now); got != 250 {
+		t.Fatalf("uncapped aws2 rate = %v, want 250", got)
+	}
+
+	aws2, _ := f.engine.laneFor("aws2")
+	if got := f.engine.laneConcurrency(f.engine.defaultLane()); got != 3 {
+		t.Fatalf("default concurrency = %d, want SEND_CONCURRENCY, 3", got)
+	}
+	if got := f.engine.laneConcurrency(aws2); got != 7 {
+		t.Fatalf("aws2 concurrency = %d, want 7", got)
+	}
+}
+
+// newLanesFor is an engine over a fresh registry of default and aws2, both sending through sender.
+func newLanesFor(t *testing.T, cfg Config, sender Sender) *Engine {
+	t.Helper()
+	registry, err := NewRegistry(
+		NewChannel(model.DefaultChannel, ChannelTypeSES, sender, StaticQuota{}, StaticIdentity{}, nil),
+		NewChannel("aws2", ChannelTypeSES, sender, StaticQuota{}, StaticIdentity{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine(nil, registry, nil, cfg, nil)
+	t.Cleanup(engine.Close)
+	return engine
+}
+```
+
+「引擎自身错误」用已关闭的限速桶触发：渲染对 campaign 邮件不会失败（`BuildRecipientEmail` 只在签名失败时报错），而限速桶正是第 1 步审查列出的引擎错误之一。分类函数一律返回 `ErrorPause`，旧代码会把它读成暂停，新代码记为失败。
+
+- [ ] **Step 2：运行，确认失败**
+
+Run: `go test ./internal/mailer -run 'OwnChannel|SlowsOnlyItself|BlockedChannel|EngineError|UnknownChannel|UnavailableChannel|OwnCapAnd' -count=1`
+Expected: FAIL，`cannot use … as *Registry value in argument to NewEngine`、`undefined: ChannelLimit`
+
+- [ ] **Step 3：`lane.go`**
+
+```go
+package mailer
+
+import (
+	"time"
+
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/ratectl"
+)
+
+// lane is one channel's way out of the engine: the channel, the bucket that paces it and the
+// controller that decides the bucket's rate (multi-channel design §6). Each lane claims its own
+// messages and has its own dispatcher and workers (SendBatch), so a lane that is throttled, or
+// waiting on a slow rate, holds only its own workers and never another channel's mail.
 type lane struct {
 	channel Channel
 	bucket  *Bucket
+	// control is nil when the engine was built without one (Config.RateControl): the bucket then keeps
+	// the rate it was built with.
 	control *ratectl.Controller
 }
 
-// NewEngine 改为显式接收 Registry；测试夹具用 NewRegistry(NewChannel(model.DefaultChannel, ..., f.fake, ...)) 包一层。
-func NewEngine(db *store.DB, channels *Registry, signer *sign.Signer, cfg Config, log *slog.Logger) *Engine
-func (e *Engine) laneFor(message model.Message) (*lane, error) // 未知渠道 → ErrorFail，不发
-func (e *Engine) Lanes() []LaneInfo                             // 给 serve 建每渠道 QuotaPoller
+// name is the channel's name, which is what messages.channel holds.
+func (l *lane) name() string { return l.channel.Name() }
 
-// Send 错误的包装：只有它会被渠道分类
+// onThrottle is the channel saying "too fast": the rate halves, and the bucket — the only thing that
+// enforces a rate — is told at once. Only this lane slows down: another channel's account said
+// nothing.
+func (l *lane) onThrottle() {
+	if l.control == nil {
+		return
+	}
+	now := time.Now().UTC()
+	l.control.OnThrottle(now)
+	FollowControl(l.control, l.bucket, now)
+}
+
+// onSuccess is a send the channel accepted. Enough of those and the rate creeps back toward the
+// account's limit — one step per IncreaseEvery, and never past it — which is what keeps a backoff
+// from being permanent.
+func (l *lane) onSuccess() {
+	if l.control == nil {
+		return
+	}
+	now := time.Now().UTC()
+	l.control.OnSuccess(now)
+	FollowControl(l.control, l.bucket, now)
+}
+
+// ChannelLimit is a configured channel's own ceiling: channels.max_per_second, 0 for none. The
+// default channel's is SEND_RATE_PER_SECOND, which is already in Config.RateControl.
+type ChannelLimit struct {
+	MaxPerSecond int
+}
+
+// Lane is one lane as the app sees it: what serve needs to keep the lane's rate in step with its
+// account (one QuotaPoller per lane) and what a command reads the quota through.
+type Lane struct {
+	Channel Channel
+	// Control is nil when the engine follows no quota; there is nothing to poll for then.
+	Control *ratectl.Controller
+	Bucket  *Bucket
+}
+
+// newLanes builds one lane per channel in the registry, the default channel's first.
+//
+// The default lane is what the engine was before channels: Config.RateControl and SendRatePerSec.
+// Every other lane follows its own account with the same headroom and its own max_per_second as the
+// cap (design §6) — but only in an engine that follows quotas at all (RateControl set). Without one,
+// each lane keeps a fixed rate: its max_per_second, or SendRatePerSec.
+func newLanes(channels *Registry, cfg Config) (map[string]*lane, []*lane) {
+	byName := map[string]*lane{}
+	order := make([]*lane, 0, len(channels.All()))
+	now := time.Now().UTC()
+	for _, channel := range channels.All() {
+		l := &lane{channel: channel}
+		if channel.Name() == model.DefaultChannel {
+			l.control = cfg.RateControl
+			l.bucket = NewBucket(float64(cfg.SendRatePerSec))
+		} else {
+			limit := cfg.ChannelLimits[channel.Name()]
+			rate := float64(cfg.SendRatePerSec)
+			if limit.MaxPerSecond > 0 {
+				rate = float64(limit.MaxPerSecond)
+			}
+			if cfg.RateControl != nil {
+				l.control = ratectl.New(ratectl.Config{
+					Headroom: cfg.Limits.SendRateHeadroom, Cap: limit.MaxPerSecond, Floor: 1,
+				})
+				rate = l.control.Rate(now)
+			}
+			l.bucket = NewBucket(rate)
+		}
+		byName[channel.Name()] = l
+		order = append(order, l)
+	}
+	return byName, order
+}
+
+// laneFor is the lane of a channel name. An empty name is the default channel, as it is when a
+// message is written (model.Message.Channel).
+func (e *Engine) laneFor(channel string) (*lane, bool) {
+	if channel == "" {
+		channel = model.DefaultChannel
+	}
+	l, ok := e.lanes[channel]
+	return l, ok
+}
+
+// defaultLane is the lane of the channel the SES_* settings describe.
+func (e *Engine) defaultLane() *lane { return e.order[0] }
+
+// Lanes lists every lane, the default channel's first.
+func (e *Engine) Lanes() []Lane {
+	out := make([]Lane, 0, len(e.order))
+	for _, l := range e.order {
+		out = append(out, Lane{Channel: l.channel, Control: l.control, Bucket: l.bucket})
+	}
+	return out
+}
+
+// SetQuota applies a reading of one channel's account to that channel's rate.
+//
+// It is what a poller does on each tick, and what a command does once before it drains its own
+// queue: a CLI process has no poller, and a rate it never read is one email a second (D8-2). An
+// unknown channel, or a lane with no controller, is left alone.
+func (e *Engine) SetQuota(channel string, quota ratectl.Quota, now time.Time) {
+	l, ok := e.laneFor(channel)
+	if !ok || l.control == nil {
+		return
+	}
+	l.control.SetQuota(quota, now)
+	FollowControl(l.control, l.bucket, now)
+}
+
+// channelNames are the channels this engine has a lane for.
+func (e *Engine) channelNames() []string {
+	names := make([]string, 0, len(e.order))
+	for _, l := range e.order {
+		names = append(names, l.name())
+	}
+	return names
+}
+
+// laneConcurrency is how many of a lane's sends may be in flight at once: SEND_CONCURRENCY for the
+// default channel, Config.ChannelConcurrency for the others. It is read when a batch starts, not
+// when the engine is built, so a test that changes the configuration is heard.
+func (e *Engine) laneConcurrency(l *lane) int {
+	concurrency := e.cfg.SendConcurrency
+	if l.name() != model.DefaultChannel && e.cfg.ChannelConcurrency > 0 {
+		concurrency = e.cfg.ChannelConcurrency
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	return concurrency
+}
+
+// sendError is an error the channel returned from Send. It is the only kind the channel classifies:
+// an error the engine raised itself — rendering, signing, the rate limiter — says nothing about the
+// channel's account, and reading it with the provider's rules could pause a campaign or halve a rate
+// for a reason that is not the provider's.
 type sendError struct{ err error }
+
+func (e *sendError) Error() string { return e.err.Error() }
+func (e *sendError) Unwrap() error { return e.err }
 ```
 
-**任务**
+- [ ] **Step 4：`engine.go`**
 
-1. `lane` 与 `NewEngine(…, *Registry, …)`；每个 lane 一个 `ratectl.Controller`：Headroom 共用 `SEND_RATE_HEADROOM`；Cap 按设计第 6 节——`default` 用 `SEND_RATE_PER_SECOND`，其他渠道用各自的 `max_per_second`（0 表示不设）。夹具与所有 `NewEngine` 调用点改为传 Registry（只改构造方式，不改断言）。
-1b. **按渠道分派**：`SendBatch` 按渠道领取（`ClaimMessages` 加渠道条件，或领取后按渠道分组），每个 lane 有自己的分派循环与工作协程，协程数 `default` 用 `SEND_CONCURRENCY`、其他渠道用 `config.DefaultSendConcurrency`；限速桶在各自 lane 的协程里 `Take`，因此一个被限速的 lane 只占自己的协程，不占其他渠道的。`ClaimMessagesByID`（单封发送）按该消息的渠道走对应 lane。
-2. `deliver` 按 `message.Channel` 取 lane：`lane.bucket.Take`、`lane.channel.Send`；`Send` 的错误包成 `sendError`。
-3. `handleSendError`：`errors.As(cause, &sendError{})` 时用该 lane 的 `channel.Classify`，否则 `ErrorFail`；删除 `Engine.classify`；`onThrottle`/`onSuccess` 作用于该 lane。
-4. `App`：每个渠道一个 `QuotaPoller`（`serve` 中每个 lane 一个 goroutine）；`App.Poller` 改为 `App.Pollers []*mailer.QuotaPoller`；`ReadQuota` 读全部渠道。`sesQuotaRefusal` 与 `SendingRate` 暂按 default 渠道（2c 改为按渠道）。
-5. 测试：两条消息分别记在 `default` 与 `aws2`，各自从对应 Fake 发出；`aws2` 被限速时 `default` 速率不变；渲染失败（模板错误）不经渠道分类、直接失败；未知渠道的消息直接失败并给出原因。
+1. `Config` 末尾加：
 
-**验收**：现有 mailer 测试只改构造方式全部通过；新增测试覆盖上述五点；compose 冒烟通过。
+```go
+	// ChannelLimits are the configured channels' own ceilings, by name (channels.max_per_second). The
+	// default channel's are SendRatePerSec and RateControl above.
+	ChannelLimits map[string]ChannelLimit
+	// ChannelConcurrency is how many sends each configured channel may have in flight at once; the
+	// default channel's is SendConcurrency. Zero means SendConcurrency.
+	ChannelConcurrency int
+	// ChannelProblems are the enabled channels that could not be built, by name (App.ChannelProblems).
+	// A campaign message on one of them is held and its campaign paused, with the problem as reason.
+	ChannelProblems map[string]error
+```
+
+2. `Engine` 去掉 `sender`、`classify`、`bucket`、`control`，换成 `lanes map[string]*lane` 与 `order []*lane`；`NewEngine(db *store.DB, channels *Registry, …)` 末尾为 `lanes, order := newLanes(channels, cfg)`；`Close` 关闭每条通道的桶；删除 `Bucket()` 与旧的 `SetQuota`。
+
+3. `SendingRate` 与 `sesQuotaRefusal` 改读 `e.defaultLane()` 的 `control`/`bucket`，注释写明 2c 改为按渠道。
+
+4. `SendBatch`：前两项检查（已取消的 ctx、发送关闭）不变，其后：
+
+```go
+	if len(messageIDs) == 0 {
+		return e.sendAll(ctx)
+	}
+	claimed, err := e.store.ClaimMessagesByID(ctx, messageIDs)
+	if err != nil {
+		return result, err
+	}
+	// Each message goes out through its own channel's lane. One on a channel this engine has no
+	// lane for is a stray: it is failed, or held with its campaign paused (sendStrays).
+	byChannel := map[string][]model.Message{}
+	for _, message := range claimed {
+		byChannel[messageChannel(message)] = append(byChannel[messageChannel(message)], message)
+	}
+	var parts []batchPart
+	for _, l := range e.order {
+		mine := byChannel[l.name()]
+		delete(byChannel, l.name())
+		if len(mine) > 0 {
+			parts = append(parts, func(ctx context.Context) (BatchResult, error) {
+				return e.runLane(ctx, l, mine, nil)
+			})
+		}
+	}
+	var strays []model.Message
+	for _, message := range claimed {
+		if _, stray := byChannel[messageChannel(message)]; stray {
+			strays = append(strays, message)
+		}
+	}
+	if len(strays) > 0 {
+		parts = append(parts, func(ctx context.Context) (BatchResult, error) {
+			return e.sendStrays(ctx, strays)
+		})
+	}
+	result, err = together(ctx, parts)
+	result.Skipped += len(messageIDs) - len(claimed)
+	return result, err
+}
+
+// batchPart is one lane's share of a batch, or the strays'.
+type batchPart func(context.Context) (BatchResult, error)
+
+// together runs every part at once and adds up what they did. The parts are independent — one
+// channel's lane neither waits for nor stops another's — so each finishes on its own, and the first
+// error (in lane order) is the batch's.
+func together(ctx context.Context, parts []batchPart) (BatchResult, error) {
+	if len(parts) == 1 {
+		return parts[0](ctx)
+	}
+	results := make([]BatchResult, len(parts))
+	errs := make([]error, len(parts))
+	var wg sync.WaitGroup
+	for i, part := range parts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = part(ctx)
+		}()
+	}
+	wg.Wait()
+	total := BatchResult{}
+	var firstErr error
+	for i := range parts {
+		total.add(results[i])
+		if firstErr == nil {
+			firstErr = errs[i]
+		}
+	}
+	return total, firstErr
+}
+
+// sendAll is a batch with no ids: every lane claims and sends its own channel's messages, at once,
+// and the strays are dealt with alongside.
+func (e *Engine) sendAll(ctx context.Context) (BatchResult, error) {
+	parts := make([]batchPart, 0, len(e.order)+1)
+	for _, l := range e.order {
+		parts = append(parts, func(ctx context.Context) (BatchResult, error) { return e.sendLane(ctx, l) })
+	}
+	parts = append(parts, e.sendStrayBatch)
+	return together(ctx, parts)
+}
+
+// sendLane claims and sends one lane's messages until its channel has none left or the lane has to
+// stop.
+func (e *Engine) sendLane(ctx context.Context, l *lane) (BatchResult, error) {
+	claim := func(ctx context.Context) ([]model.Message, error) {
+		return e.store.ClaimChannelMessages(ctx, l.name(), rules.SendBatchSize)
+	}
+	first, err := claim(ctx)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return BatchResult{Retry: true}, nil
+	case err != nil:
+		return BatchResult{}, err
+	case len(first) == 0:
+		return BatchResult{}, nil
+	}
+	return e.runLane(ctx, l, first, claim)
+}
+```
+
+原 `SendBatch` 从读取禁发名单开始的部分整体变为 `runLane(ctx, l *lane, messages []model.Message, claimMore func(context.Context) ([]model.Message, error)) (BatchResult, error)`：并发数取 `e.laneConcurrency(l)`，工作协程调用 `e.sendOne(ctx, l, message, suppressedSet)`，其余（`prepare`、`apply`、分派循环、释放未分出的邮件、`settle`）一字不改。`BatchResult` 加 `add` 方法。
+
+5. `sendOne` 多一个 `l *lane` 参数，调用 `e.deliver(ctx, l, …)`、`e.handleSendError(ctx, l, …)`，成功后 `l.onSuccess()`。删除 `Engine.onThrottle`/`onSuccess`。
+
+6. `handleSendError`：
+
+```go
+func (e *Engine) handleSendError(ctx context.Context, l *lane, message model.Message,
+	loaded store.MessageContext, cause error) (outcome errorOutcome, stop bool) {
+	action := rules.ErrorFail
+	var refused *sendError
+	if message.CampaignID != "" && errors.As(cause, &refused) {
+		action = l.channel.Classify(refused.err)
+	}
+```
+
+`ErrorThrottle` 分支调用 `l.onThrottle()`。其余分支不变。
+
+7. `deliver(ctx, l *lane, …)`：`l.bucket.Take(ctx)`；`l.channel.Send(…)` 出错时 `return delivery{}, &sendError{err: err}`。`sendError.Error()` 与被包的错误相同，因此写进 `messages.error` 的文本不变。`Test` 用 `e.laneFor(message.Channel)` 取通道（测试信的 `Channel` 为空，即 `default`）。
+
+8. `Run`：为每条通道（`sendLane`）与 strays（`sendStrayBatch`）各起一个 `poll` 循环；`poll` 就是原来 `Run` 的循环体，把 `e.SendBatch(ctx, nil)` 换成该部分，并在内层循环检查 `ctx.Err()`（原来由 `SendBatch` 的入口检查）。任一循环返回错误即取消其余循环，`Run` 返回该错误。
+
+- [ ] **Step 5：`strays.go`**
+
+```go
+package mailer
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/rules"
+	"nibwire/internal/store"
+)
+
+// Strays are messages on a channel this engine has no lane for. No lane claims them, so the engine
+// claims them on their own and decides what they are:
+//
+//   - a channel that does not exist at all is a message that can never go out: it fails, with the
+//     channel named in its error;
+//   - a channel that exists but is not loaded here — disabled, broken (App.ChannelProblems), or
+//     enabled after this process started — is the operator's to fix. A campaign message goes back
+//     to the queue and its campaign pauses with a reason naming the channel; nothing is counted as
+//     failed, and resuming after the fix sends it. A message outside a campaign has no campaign to
+//     pause and would be claimed again on every tick, so it fails with the same reason.
+
+// sendStrayBatch claims and disposes of strays until there are none left.
+func (e *Engine) sendStrayBatch(ctx context.Context) (BatchResult, error) {
+	total := BatchResult{}
+	for {
+		strays, err := e.store.ClaimMessagesOutside(ctx, e.channelNames(), rules.SendBatchSize)
+		switch {
+		case err != nil && ctx.Err() != nil:
+			total.Retry = true
+			return total, nil
+		case err != nil:
+			return total, err
+		case len(strays) == 0:
+			return total, nil
+		}
+		// Every stray leaves the claimable set: failed, or held under a paused campaign. So this
+		// loop ends.
+		result, err := e.sendStrays(ctx, strays)
+		total.add(result)
+		if err != nil {
+			return total, err
+		}
+	}
+}
+
+// sendStrays disposes of claimed strays (see above). Every write runs on the detached context, as the
+// rest of the bookkeeping does.
+func (e *Engine) sendStrays(ctx context.Context, strays []model.Message) (BatchResult, error) {
+	result := BatchResult{}
+	reasons := map[string]string{} // channel → why it cannot send, read once per batch
+	exists := map[string]bool{}
+	paused := map[string]bool{}
+	touched := map[string]bool{}
+	for i, message := range strays {
+		channel := messageChannel(message)
+		if _, read := reasons[channel]; !read {
+			reason, found, err := e.channelUnavailable(ctx, channel)
+			if err != nil {
+				e.releaseAll(ctx, strays[i:])
+				return result, err
+			}
+			reasons[channel], exists[channel] = reason, found
+		}
+		reason := reasons[channel]
+		if exists[channel] && rules.IsCampaignKind(message.Kind) && message.CampaignID != "" {
+			if err := e.releaseMessage(ctx, message.ID); err != nil {
+				e.releaseAll(ctx, strays[i+1:])
+				return result, err
+			}
+			if !paused[message.CampaignID] {
+				paused[message.CampaignID] = true
+				if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+					return e.pause(writeCtx, message.CampaignID, reason)
+				}); err != nil {
+					e.releaseAll(ctx, strays[i+1:])
+					return result, err
+				}
+			}
+			continue
+		}
+		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+			if err := e.store.MarkMessageFailed(writeCtx, message.ID, reason); err != nil {
+				return err
+			}
+			return e.addStrayFailedStats(writeCtx, message)
+		}); err != nil {
+			e.releaseAll(ctx, strays[i+1:])
+			return result, err
+		}
+		e.log.Warn("message failed: its channel cannot send", "message", message.ID, "reason", reason)
+		result.Failed++
+		if message.CampaignID != "" {
+			touched[message.CampaignID] = true
+		}
+	}
+	// A campaign whose last messages just failed here is finished, the same as one whose last
+	// messages failed in a lane.
+	for campaignID := range touched {
+		if paused[campaignID] {
+			continue
+		}
+		if err := e.writeBack(ctx, func(writeCtx context.Context) error {
+			return e.settle(writeCtx, campaignID)
+		}); err != nil {
+			return result, err
+		}
+	}
+	return result, nil
+}
+
+// channelUnavailable says why a channel with no lane cannot send, and whether it exists at all (a
+// row in channels; the default channel always has a lane).
+func (e *Engine) channelUnavailable(ctx context.Context, channel string) (reason string, exists bool,
+	err error) {
+	row, err := e.store.Channel(ctx, channel)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Sprintf("channel %s does not exist", channel), false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	switch problem := e.cfg.ChannelProblems[channel]; {
+	case !row.Enabled:
+		return fmt.Sprintf("channel %s is disabled: enable it, then resume the campaign", channel), true, nil
+	case problem != nil:
+		return fmt.Sprintf("channel %s could not be loaded (%v): fix it, restart, then resume the "+
+			"campaign", channel, problem), true, nil
+	default:
+		return fmt.Sprintf("channel %s is not loaded in this process: restart it, then resume the "+
+			"campaign", channel), true, nil
+	}
+}
+
+// addStrayFailedStats counts a failed stray against its campaign, the way addFailedStats does for a
+// message a lane sent.
+func (e *Engine) addStrayFailedStats(ctx context.Context, message model.Message) error {
+	if !rules.IsCampaignKind(message.Kind) || message.CampaignID == "" {
+		return nil
+	}
+	if message.Kind == model.KindLastChance {
+		return e.store.AddLastChanceStats(ctx, message.CampaignID, store.LastChanceCounters{Failed: 1})
+	}
+	return e.store.AddCampaignStats(ctx, message.CampaignID, store.CampaignCounters{Failed: 1})
+}
+```
+
+- [ ] **Step 6：调用点只改构造方式**
+
+`engine_test.go` 加：
+
+```go
+func defaultOnly(t testing.TB, sender Sender, classify func(error) rules.ErrorAction) *Registry {
+	t.Helper()
+	registry, err := NewRegistry(NewChannel(model.DefaultChannel, ChannelTypeSES, sender, StaticQuota{},
+		StaticIdentity{}, classify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry
+}
+```
+
+- `newFixtureConfigured`、`engine_test.go` 中重建引擎处：`NewEngine(db, defaultOnly(t, fake, nil), …)`
+- `classify_test.go`：`NewEngine(f.db, defaultOnly(t, pausingSender{f.fake}, pausingSender{}.Classify), …)`（原来靠类型断言取 `Classify`，现在显式传入）
+- `errors_test.go:134`：`f.engine.bucket.Rate()` → `f.engine.defaultLane().bucket.Rate()`（同一个值）
+- `throughput_test.go`、`internal/httpsrv/testhelpers_test.go`、`internal/mcpsrv/mcp_test.go`：用 `mailer.NewRegistry(mailer.NewChannel(model.DefaultChannel, mailer.ChannelTypeSES, fake, …))` 包一层
+- `internal/app/app.go`：`mailer.NewEngine(db, channels, …)`，并传 `ChannelLimits`、`ChannelConcurrency: config.DefaultSendConcurrency`、`ChannelProblems`；`loadChannels` 同时返回 `map[string]mailer.ChannelLimit`（每个已构建渠道的 `max_per_second`）
+
+- [ ] **Step 7：运行**
+
+Run: `go test -race -count=1 ./internal/mailer/ ./internal/httpsrv/ ./internal/mcpsrv/ ./internal/app/`
+Expected: PASS（现有断言一条不改）
+
+- [ ] **Step 8：提交**
+
+```bash
+git add internal/mailer internal/httpsrv/testhelpers_test.go internal/mcpsrv/mcp_test.go internal/app
+git commit -m "feat(mailer): one lane per channel
+
+Each channel gets its own bucket, controller, dispatcher and workers, and
+claims only its own messages, so a throttled or slow channel holds nothing but
+itself. deliver sends through the message's channel; only what Send returned
+is classified, by that channel. A message on a channel with no lane fails when
+the channel does not exist, and is held with its campaign paused, naming the
+channel, when it is disabled or could not be loaded.
+
+Refs #75"
+```
+
+### Task 3：每个渠道一个配额轮询器
+
+**Files:** `internal/mailer/quota.go`、`internal/mailer/quota_test.go`、`internal/app/app.go`、`internal/app/app_channels_test.go`、`cmd/nibwire/serve.go`
+
+- [ ] **Step 1：写失败的测试**
+
+`internal/mailer/quota_test.go` 加：
+
+```go
+// 其他渠道的配额读不到时，告警带上渠道名，不与 default 的告警共用冷却。
+func TestAChannelsUnreadableQuotaAlertsUnderItsOwnName(t *testing.T) {
+	ctx := context.Background()
+	db := newQuotaTestStore(t)
+	notifier := &alerts.Notifier{
+		Store: db, Sender: NewFake(), From: "alerts@example.net", To: "admin@example.net",
+		AppURL: "https://mail.example.com", SendingOn: true, Log: testLoggerForQuota(),
+	}
+	for _, channel := range []string{"", "aws2"} {
+		bucket := NewBucket(1)
+		t.Cleanup(bucket.Close)
+		poller := &QuotaPoller{
+			Channel: channel, Reader: &flakyQuota{broken: true},
+			Control: ratectl.New(ratectl.Config{Headroom: 0.9}), Bucket: bucket, Alerts: notifier,
+		}
+		poller.pollOnce(ctx, testLoggerForQuota())
+	}
+	rows, err := db.Alerts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for _, row := range rows {
+		keys[row.Key] = true
+	}
+	if len(rows) != 2 || !keys["ses-quota-unreadable"] || !keys["ses-quota-unreadable-aws2"] {
+		t.Fatalf("alert rows = %+v", rows)
+	}
+}
+```
+
+`internal/app/app_channels_test.go` 加：
+
+```go
+// Every loaded channel has a lane with a poller of its own, and ReadQuota sets each lane's rate from
+// its own account, capped by the channel's max_per_second (multi-channel design §6).
+func TestEachChannelIsPolledAndCappedOnItsOwn(t *testing.T) {
+	cfg := testConfig(t, nil)
+	seed(t, cfg, store.ChannelRow{Name: "aws2", Type: "ses", SecretEnv: "AWS2",
+		Params: map[string]string{"region": "us-east-1"}, MaxPerSecond: 20, Enabled: true})
+	a, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	if len(a.Pollers) != 2 || a.Pollers[0].Channel != model.DefaultChannel || a.Pollers[1].Channel != "aws2" {
+		t.Fatalf("pollers = %+v", a.Pollers)
+	}
+	if _, err := a.ReadQuota(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lanes := a.Mailer.Lanes()
+	if len(lanes) != 2 || lanes[1].Channel.Name() != "aws2" {
+		t.Fatalf("lanes = %+v", lanes)
+	}
+	if got := lanes[1].Bucket.Rate(); got != 20 {
+		t.Fatalf("aws2 rate = %v, want its max_per_second, 20", got)
+	}
+	if lanes[0].Control == lanes[1].Control || lanes[0].Bucket == lanes[1].Bucket {
+		t.Fatal("aws2 shares the default channel's controller or bucket")
+	}
+	if got := lanes[0].Bucket.Rate(); got <= 20 {
+		t.Fatalf("default rate = %v: the stand-in account is fast, and aws2's cap is not its own", got)
+	}
+}
+```
+
+- [ ] **Step 2：运行，确认失败**
+
+Run: `go test -count=1 ./internal/mailer -run UnreadableQuota && go test -count=1 ./internal/app -run PolledAndCapped`
+Expected: FAIL，`unknown field Channel in struct literal`、`a.Pollers undefined`
+
+- [ ] **Step 3：实现**
+
+1. `QuotaPoller` 加 `Channel string`；`channel()` 空串即 `default`；读失败的告警：`default` 保持 `ses-quota-unreadable` / `SES quota could not be read`，其他渠道为 `ses-quota-unreadable-<name>` / `SES quota of channel <name> could not be read`；日志带 `channel`。
+2. `App.Poller` → `App.Pollers []*mailer.QuotaPoller`，`New` 中：
+
+```go
+	pollers := make([]*mailer.QuotaPoller, 0, len(channels.All()))
+	for _, lane := range engine.Lanes() {
+		if lane.Control == nil {
+			continue // nothing follows this lane's quota, so there is nothing to poll for
+		}
+		pollers = append(pollers, &mailer.QuotaPoller{
+			Channel: lane.Channel.Name(), Reader: lane.Channel, Control: lane.Control, Bucket: lane.Bucket,
+			Alerts: notifier, Log: log,
+		})
+	}
+```
+
+3. `ReadQuota`：遍历 `a.Mailer.Lanes()`，逐个 `lane.Channel.Quota(ctx)`，`ReadAt` 为零时补当前时间，`a.Mailer.SetQuota(name, quota, quota.ReadAt)`；返回 `default` 的读数与错误；其他渠道读不到时 `a.Log.Warn(…, "channel", name, "error", err)`。
+4. `serve.go`：组件表先放 `sender`/`scheduler`/`http`/`mcp`，再为每个轮询器加 `"quota "+poller.Channel`；`errs` 的容量取组件数。
+
+- [ ] **Step 4：运行**
+
+Run: `go test -race -count=1 ./internal/mailer/ ./internal/app/ ./cmd/nibwire/`
+Expected: PASS
+
+- [ ] **Step 5：提交**
+
+```bash
+git add internal/mailer/quota.go internal/mailer/quota_test.go internal/app cmd/nibwire/serve.go
+git commit -m "feat(app): poll every channel's quota
+
+serve runs one quota poller per channel and ReadQuota reads them all, so each
+channel's rate follows its own account. A channel whose quota cannot be read
+alerts under its own name.
+
+Refs #75"
+```
+
+### Task 4：设计第 3.1 节的表
+
+`docs/superpowers/specs/2026-10-12-multi-channel-sending-design.md` 第 3.1 节类型参数表中 `ses` 一行改为：
+
+```
+| `ses` | `--region` 或 `--endpoint`（至少其一）、`--configuration-set`、`--tenant` |
+```
+
+```bash
+git add docs/superpowers/specs/2026-10-12-multi-channel-sending-design.md
+git commit -m "docs(design): an ses channel needs --region or --endpoint
+
+Refs #75"
+```
+
+### Task 5：验证与 PR
+
+```bash
+make lint
+make test
+scripts/compose-smoke.sh
+```
+
+Expected: lint 0 issues；测试全部通过（`TestRenderingMarkdownIsLinearOnSlowInputs`、`TestHTMLToTextIsLinearOnSlowInputs` 已知偶发，单独重跑一次）；冒烟全部 `ok`。
+
+```bash
+git push -u origin impl/engine-lanes
+gh pr create --base main --title "feat: engine sends per channel, multi-channel 2b" --body-file <PR 描述>
+gh issue edit 75 --remove-label status:claimed --add-label status:in-review
+```
+
+PR 描述第一行 `[impl] …`、第二行 `<!-- agent: impl-local -->`，写 `Fixes #75`、对现有部署的行为、升级说明（本步无迁移）、与计划的偏离、测试证据。
+
+**验收**：现有 mailer、app、cmd 测试只改构造方式全部通过；`lanes_test.go` 覆盖 #75 的五项；compose 冒烟通过。
 
 ---
 
