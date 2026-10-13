@@ -103,3 +103,11 @@ stdout -count=4 'route\.add'
 stdout $OTHER_ID
 nibwire audit list --action route.remove
 stdout -count=1 'route\.remove'
+
+# --to 和 --split 一样去掉首尾空格：手抄渠道名时多一个空格不算错。
+nibwire route add --match domain:space.org --to ' aws2'
+stdout '^added [0-9a-f]{24}: domain:space.org -> aws2$'
+nibwire route list
+stdout 'domain:space.org\taws2\tok'
+! nibwire route add --match domain:blank.org --to '   '
+stderr 'give --to <channel>'

@@ -221,8 +221,11 @@ func routeMatch(text string, isDefault bool) (route.Match, error) {
 	return route.ParseMatch(text)
 }
 
-// routeTargets reads the two ways of saying where a rule sends, which are mutually exclusive.
+// routeTargets reads the two ways of saying where a rule sends, which are mutually exclusive. Both
+// are trimmed first, so that a channel name copied with a space around it is the channel name and
+// not a channel nobody registered.
 func routeTargets(to, split string) ([]route.Target, error) {
+	to, split = strings.TrimSpace(to), strings.TrimSpace(split)
 	switch {
 	case to != "" && split != "":
 		return nil, errors.New("give either --to or --split, not both")
