@@ -34,9 +34,9 @@
 
 - 只把 `Send` 返回的错误交给渠道分类；渲染、模板、限速桶等引擎自身错误直接 `ErrorFail`（2b）
 - 分类按 `message.Channel` 取对应渠道的 `Classify`，去掉引擎级的 `classify` 字段；`NewEngine` 显式接收 `Channel`/`Registry`，不靠类型断言（2b）
-- 邮件的 `channel` 在入队时定下；`provider_message_id` 非空后不得再改渠道；改派只作用于未发送邮件（2c、2d）
+- 邮件的 `channel` 在入队时定下；`provider_message_id` 非空后不得再改渠道；改派只作用于未发送邮件（2c-2、2d）
 - `events.findMessage` 回退路径：按标签找到的邮件若 `message.Channel` 与事件渠道不同则拒绝；`AdoptProviderMessageID` 加 `AND channel = ?`（2d；第 3 步按渠道路由 webhook 时传入渠道）
-- `messages.go` 已 664 行：2c 改动按渠道查找与改派时，把 `MessageByProviderID`、`AdoptProviderMessageID`、`MarkMessageSent` 及新增的改派函数拆到 `messages_channel.go`
+- `messages.go` 已 664 行：2c-2 改动按渠道查找与改派时，把 `MessageByProviderID`、`AdoptProviderMessageID`、`MarkMessageSent` 及新增的改派函数拆到 `messages_channel.go`
 
 ### 留给第 3、4 步
 
@@ -1651,7 +1651,7 @@ Fixes #N
 - CLI：channel add/list/show/test/enable/disable
 
 ## 行为
-未登记渠道时与之前完全相同；登记的渠道可单独测试发信，但 campaign 发信仍全部走 default（路由在 2c）。
+未登记渠道时与之前完全相同；登记的渠道可单独测试发信，但 campaign 发信仍全部走 default（路由在 2c-1/2c-2）。
 0006 是纯增量迁移，可直接升级。
 
 ## 测试证据
@@ -1690,7 +1690,7 @@ type sendError struct{ err error }
 1b. **按渠道分派**：`SendBatch` 按渠道领取（`ClaimMessages` 加渠道条件，或领取后按渠道分组），每个 lane 有自己的分派循环与工作协程，协程数 `default` 用 `SEND_CONCURRENCY`、其他渠道用 `config.DefaultSendConcurrency`；限速桶在各自 lane 的协程里 `Take`，因此一个被限速的 lane 只占自己的协程，不占其他渠道的。`ClaimMessagesByID`（单封发送）按该消息的渠道走对应 lane。
 2. `deliver` 按 `message.Channel` 取 lane：`lane.bucket.Take`、`lane.channel.Send`；`Send` 的错误包成 `sendError`。
 3. `handleSendError`：`errors.As(cause, &sendError{})` 时用该 lane 的 `channel.Classify`，否则 `ErrorFail`；删除 `Engine.classify`；`onThrottle`/`onSuccess` 作用于该 lane。
-4. `App`：每个渠道一个 `QuotaPoller`（`serve` 中每个 lane 一个 goroutine）；`App.Poller` 改为 `App.Pollers []*mailer.QuotaPoller`；`ReadQuota` 读全部渠道。`sesQuotaRefusal` 与 `SendingRate` 暂按 default 渠道（2c 改为按渠道）。
+4. `App`：每个渠道一个 `QuotaPoller`（`serve` 中每个 lane 一个 goroutine）；`App.Poller` 改为 `App.Pollers []*mailer.QuotaPoller`；`ReadQuota` 读全部渠道。`sesQuotaRefusal` 与 `SendingRate` 暂按 default 渠道（2c-2 改为按渠道）。
 5. 测试：两条消息分别记在 `default` 与 `aws2`，各自从对应 Fake 发出；`aws2` 被限速时 `default` 速率不变；渲染失败（模板错误）不经渠道分类、直接失败；未知渠道的消息直接失败并给出原因。
 
 **验收**：现有 mailer 测试只改构造方式全部通过；新增测试覆盖上述五点；compose 冒烟通过。
@@ -1977,10 +1977,10 @@ Refs #79"
 
 - [ ] **Step 1：`routeid` 测试命令**
 
-脚本能断言输出，但不能把输出绑成变量；id 是随机生成的，而 `route remove`/`route move` 要它。因此在 `cli_test.go` 的 `Cmds` 里加一个 `routeid`：读 `route list --json` 写出的文件，把某条规则的 id 放进环境变量。
+脚本能断言输出，但不能把输出绑成变量；id 是随机生成的，而 `route remove`/`route move` 要它。因此在 `cli_test.go` 的 `Cmds` 里加一个 `routeid`：打开脚本正在写的那个数据库，按 match 找到那条规则，把它的 id 放进环境变量。（这个版本的 testscript 既没有 `>` 重定向，也没有从输出取值的手段。）
 
 ```
-routeid routes.json DOMAIN_ID domain:example.org
+routeid DOMAIN_ID domain:example.org
 ```
 
 - [ ] **Step 2：写脚本**
