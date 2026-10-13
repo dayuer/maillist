@@ -150,10 +150,13 @@ type QueueResult struct {
 }
 
 // TestResult is one test email.
+//
+// `nibwire campaign test --json` prints it as is, so the keys are pinned: ProviderMessageID keeps
+// its pre-channel key, SESMessageID, for CLI compatibility.
 type TestResult struct {
-	MessageID    string
-	SESMessageID string
-	SentAt       time.Time
+	MessageID         string    `json:"MessageID"`
+	ProviderMessageID string    `json:"SESMessageID"`
+	SentAt            time.Time `json:"SentAt"`
 }
 
 // Charge says whose daily budget a step spends (design §11, layer 2). The zero value is the system
@@ -172,13 +175,16 @@ func (c Charge) system() bool { return c.CredentialID == "" }
 
 // Engine sends queued messages through a Sender.
 type Engine struct {
-	store   *store.DB
-	sender  Sender
-	signer  *sign.Signer
-	bucket  *Bucket
-	control *ratectl.Controller
-	cfg     Config
-	log     *slog.Logger
+	store  *store.DB
+	sender Sender
+	// classify reads a failed send. It is the channel's own reading when the sender is a Channel
+	// (or any Classifier), and SES's otherwise — which is what every sender was before channels.
+	classify func(error) rules.ErrorAction
+	signer   *sign.Signer
+	bucket   *Bucket
+	control  *ratectl.Controller
+	cfg      Config
+	log      *slog.Logger
 }
 
 // NewEngine builds an engine. The bucket is shared by every caller, so the rate is a process-wide
@@ -195,8 +201,12 @@ func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log
 	if log == nil {
 		log = slog.Default()
 	}
+	classify := ClassifySES
+	if classifier, ok := sender.(Classifier); ok {
+		classify = classifier.Classify
+	}
 	return &Engine{
-		store: db, sender: sender, signer: signer, control: cfg.RateControl,
+		store: db, sender: sender, classify: classify, signer: signer, control: cfg.RateControl,
 		bucket: NewBucket(float64(cfg.SendRatePerSec)), cfg: cfg, log: log,
 	}
 }
@@ -615,13 +625,14 @@ type errorOutcome struct {
 	retry  bool
 }
 
-// handleSendError classifies a failed send the way upstream does, from both the error code and the
-// message (rules.SendErrorAction needs both).
+// handleSendError classifies a failed send through the channel's own reading (ClassifySES for SES).
+// Only campaign messages are classified: a message outside a campaign (welcome, confirmation, test)
+// always fails, since there is no campaign to pause.
 func (e *Engine) handleSendError(ctx context.Context, message model.Message, loaded store.MessageContext,
 	cause error) (outcome errorOutcome, stop bool) {
 	action := rules.ErrorFail
 	if message.CampaignID != "" {
-		action = rules.SendErrorAction(errorCode(cause), cause.Error())
+		action = e.classify(cause)
 	}
 	// Every write below runs on the detached context. We know what became of this message, so the
 	// record of it must not be lost to a shutdown that arrived while it was being written: a message
@@ -686,8 +697,8 @@ func (e *Engine) handleSendError(ctx context.Context, message model.Message, loa
 
 // delivery is what a successful send produced.
 type delivery struct {
-	sesMessageID string
-	sentAt       time.Time
+	providerMessageID string
+	sentAt            time.Time
 }
 
 // deliver renders and sends one message. content overrides the campaign body for test sends.
@@ -751,11 +762,11 @@ func (e *Engine) deliver(ctx context.Context, message model.Message, loaded stor
 	// RecoverClaimed turns that into unknown, which is "we do not know" and never "send it again".
 	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
 	defer cancel()
-	sesMessageID, err := e.sender.Send(sendCtx, email, tags)
+	providerMessageID, err := e.sender.Send(sendCtx, email, tags)
 	if err != nil {
 		return delivery{}, err
 	}
-	return delivery{sesMessageID: sesMessageID, sentAt: now}, nil
+	return delivery{providerMessageID: providerMessageID, sentAt: now}, nil
 }
 
 // contentFor picks the body of a message: the campaign, or the newsletter's welcome or confirmation
@@ -801,7 +812,7 @@ func (e *Engine) contentFor(message model.Message, loaded store.MessageContext,
 func (e *Engine) recordSent(ctx context.Context, message model.Message, loaded store.MessageContext,
 	sent delivery) error {
 	return e.writeBack(ctx, func(writeCtx context.Context) error {
-		if err := e.store.MarkMessageSent(writeCtx, message.ID, sent.sesMessageID, sent.sentAt); err != nil {
+		if err := e.store.MarkMessageSent(writeCtx, message.ID, sent.providerMessageID, sent.sentAt); err != nil {
 			return err
 		}
 		if loaded.Campaign != nil {
@@ -1323,13 +1334,13 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 		}
 		return TestResult{}, err
 	}
-	if err := e.store.MarkMessageSent(ctx, message.ID, sent.sesMessageID, sent.sentAt); err != nil {
+	if err := e.store.MarkMessageSent(ctx, message.ID, sent.providerMessageID, sent.sentAt); err != nil {
 		return TestResult{}, err
 	}
 	if err := e.store.SetCampaignTestSentAt(ctx, campaignID, sent.sentAt); err != nil {
 		return TestResult{}, err
 	}
-	return TestResult{MessageID: message.ID, SESMessageID: sent.sesMessageID, SentAt: sent.sentAt}, nil
+	return TestResult{MessageID: message.ID, ProviderMessageID: sent.providerMessageID, SentAt: sent.sentAt}, nil
 }
 
 // sendTimeout bounds one call to SES. The request runs detached from the batch's context (see

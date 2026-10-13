@@ -674,7 +674,7 @@ func TestTestEmailUsesTheSentinelContact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SESMessageID == "" {
+	if result.ProviderMessageID == "" {
 		t.Fatal("no SES message id")
 	}
 	sent := f.fake.Sent()

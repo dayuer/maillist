@@ -182,16 +182,23 @@ type Contact struct {
 	CreatedAt      time.Time
 }
 
+// DefaultChannel is the channel the SES_* settings describe, and the one every message used before
+// there were others.
+const DefaultChannel = "default"
+
 type Message struct {
-	ID           string
-	Kind         MessageKind
-	CampaignID   string // "" for welcome/confirmation
-	NewsletterID string
-	ContactID    string
-	Email        string
-	Provider     string
-	Status       MessageStatus
-	SESMessageID string
+	ID                string
+	Kind              MessageKind
+	CampaignID        string // "" for welcome/confirmation
+	NewsletterID      string
+	ContactID         string
+	Email             string
+	Provider          string // the recipient's mailbox provider (gmail, outlook, …), from core/providers
+	Status            MessageStatus
+	ProviderMessageID string // the id the sending channel returned; "" until sent
+	// Channel is the sending channel that carries this message; DefaultChannel is the SES account the
+	// SES_* settings describe. Empty when written means DefaultChannel.
+	Channel      string
 	Error        string
 	ClaimedAt    *time.Time
 	SentAt       *time.Time

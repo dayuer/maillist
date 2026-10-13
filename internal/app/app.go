@@ -10,6 +10,7 @@ import (
 
 	"nibwire/internal/alerts"
 	"nibwire/internal/config"
+	"nibwire/internal/core/model"
 	"nibwire/internal/core/ratectl"
 	"nibwire/internal/core/sign"
 	"nibwire/internal/core/sns"
@@ -27,9 +28,13 @@ type App struct {
 	Signer *sign.Signer
 	Events *events.Handler
 	Jobs   *jobs.Queue
-	Sender mailer.Sender
-	Mailer *mailer.Engine
-	HTTP   *httpsrv.Server
+	// Channel is the default channel: the SES account the SES_* settings describe (or the fake that
+	// stands in for it). Sender, Identities and Quota below are its parts, kept as fields so the code
+	// that reads them does not change.
+	Channel mailer.Channel
+	Sender  mailer.Sender
+	Mailer  *mailer.Engine
+	HTTP    *httpsrv.Server
 	// Identities answers "which sending domains does SES consider verified?" — the pre-send check
 	// and `nibwire domains` both read it.
 	Identities mailer.IdentityReader
@@ -95,6 +100,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		_ = db.Close()
 		return nil, err
 	}
+	channel := mailer.NewChannel(model.DefaultChannel, mailer.ChannelTypeSES, sender, quota, identities, mailer.ClassifySES)
 	// The rate follows the account (D17): the controller decides it, the bucket enforces it, and
 	// SEND_RATE_PER_SECOND can only lower what the account gave.
 	control := ratectl.New(ratectl.Config{
@@ -102,7 +108,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Cap:      cfg.Limits.SendRatePerSecond,
 		Floor:    1,
 	})
-	engine := mailer.NewEngine(db, sender, signer, mailer.Config{
+	engine := mailer.NewEngine(db, channel, signer, mailer.Config{
 		AppURL:          cfg.AppURL,
 		ArchiveHosts:    cfg.ArchiveHosts,
 		SendingOn:       cfg.SendingOn,
@@ -127,6 +133,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Signer:     signer,
 		Events:     handler,
 		Jobs:       jobs.New(db),
+		Channel:    channel,
 		Sender:     sender,
 		Mailer:     engine,
 		Identities: identities,

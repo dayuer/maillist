@@ -81,7 +81,7 @@ func (h *Handler) ApplyEvent(ctx context.Context, raw json.RawMessage, now time.
 		if email == "" && found {
 			email = message.Email
 		}
-		event := store.Event{Type: string(plan.Type), SESMessageID: plan.SESMessageID, Email: email,
+		event := store.Event{Type: string(plan.Type), ProviderMessageID: plan.ProviderMessageID, Email: email,
 			OccurredAt: plan.OccurredAt, CreatedAt: now, Data: plan.Store}
 		if found {
 			event.MessageID, event.CampaignID = message.ID, message.CampaignID
@@ -123,11 +123,13 @@ func (h *Handler) ApplyTracking(ctx context.Context, messageID string, eventType
 	return true, nil
 }
 
-// findMessage resolves the message an event names: by SES's own id first, then by the message_id
+// findMessage resolves the message an event names: by the channel's own id first, then by the message_id
 // tag, which covers an event that arrives before the send was written back.
 func (h *Handler) findMessage(ctx context.Context, plan sesmap.Plan) (model.Message, bool, error) {
-	if plan.SESMessageID != "" {
-		message, err := h.store.MessageBySESID(ctx, plan.SESMessageID)
+	if plan.ProviderMessageID != "" {
+		// Every event comes from SES on the default channel today; once webhooks are routed per
+		// channel, the caller passes the channel the event arrived on.
+		message, err := h.store.MessageByProviderID(ctx, model.DefaultChannel, plan.ProviderMessageID)
 		if err == nil {
 			return message, true, nil
 		}
@@ -145,12 +147,12 @@ func (h *Handler) findMessage(ctx context.Context, plan sesmap.Plan) (model.Mess
 	if err != nil {
 		return model.Message{}, false, err
 	}
-	// A message id and an SES id that disagree mean the event belongs to another message.
-	if message.SESMessageID != "" && plan.SESMessageID != "" && message.SESMessageID != plan.SESMessageID {
+	// A message id and a provider id that disagree mean the event belongs to another message.
+	if message.ProviderMessageID != "" && plan.ProviderMessageID != "" && message.ProviderMessageID != plan.ProviderMessageID {
 		return model.Message{}, false, nil
 	}
-	if message.SESMessageID == "" && plan.SESMessageID != "" {
-		if err := h.store.AdoptSESMessageID(ctx, message.ID, plan.SESMessageID); err != nil {
+	if message.ProviderMessageID == "" && plan.ProviderMessageID != "" {
+		if err := h.store.AdoptProviderMessageID(ctx, message.ID, plan.ProviderMessageID); err != nil {
 			return model.Message{}, false, err
 		}
 	}

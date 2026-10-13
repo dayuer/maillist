@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,7 +163,7 @@ func TestMessageLifecycleWritesBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != model.MessageSent || got.SESMessageID != "0100abc" ||
+	if got.Status != model.MessageSent || got.ProviderMessageID != "0100abc" ||
 		got.SentAt == nil || !got.SentAt.Equal(sentAt) {
 		t.Fatalf("sent message = %+v", got)
 	}
@@ -317,4 +319,101 @@ func TestContainsContactMessageCount(t *testing.T) {
 	if err != nil || count != 2 {
 		t.Fatalf("count = %d %v", count, err)
 	}
+}
+
+// A message written without a channel is on the default channel; one written with a channel keeps it.
+func TestMessageChannelRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+	newsletterID := ids.New()
+	plain := model.Message{ID: ids.New(), Kind: model.KindCampaign, CampaignID: ids.New(),
+		NewsletterID: newsletterID, ContactID: ids.New(), Email: "a@example.com",
+		Status: model.MessagePending, CreatedAt: time.Now().UTC()}
+	routed := plain
+	routed.ID, routed.ContactID, routed.Email, routed.Channel = ids.New(), ids.New(), "b@example.com", "resend"
+
+	if _, err := db.InsertMessages(ctx, []model.Message{plain, routed}); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{plain.ID: "default", routed.ID: "resend"} {
+		got, err := db.Message(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Channel != want {
+			t.Errorf("message %s: channel = %q, want %q", id, got.Channel, want)
+		}
+	}
+}
+
+// Two channels can hand out the same id; a lookup names the channel, so it finds that channel's message
+// and no other.
+func TestMessageByProviderIDIsScopedToItsChannel(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+	const providerID = "0100018f-shared-id"
+	base := model.Message{Kind: model.KindCampaign, CampaignID: ids.New(), NewsletterID: ids.New(),
+		Status: model.MessageSent, ProviderMessageID: providerID, CreatedAt: time.Now().UTC()}
+	onDefault := base
+	onDefault.ID, onDefault.ContactID, onDefault.Email = ids.New(), ids.New(), "a@example.com"
+	onDefault.Channel = model.DefaultChannel
+	onResend := base
+	onResend.ID, onResend.ContactID, onResend.Email, onResend.Channel = ids.New(), ids.New(), "b@example.com", "resend"
+	if _, err := db.InsertMessages(ctx, []model.Message{onDefault, onResend}); err != nil {
+		t.Fatal(err)
+	}
+
+	for channel, want := range map[string]string{model.DefaultChannel: onDefault.ID, "resend": onResend.ID} {
+		got, err := db.MessageByProviderID(ctx, channel, providerID)
+		if err != nil {
+			t.Fatalf("channel %s: %v", channel, err)
+		}
+		if got.ID != want {
+			t.Errorf("channel %s: found message %s, want %s", channel, got.ID, want)
+		}
+	}
+	if _, err := db.MessageByProviderID(ctx, "sendgrid", providerID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("channel sendgrid: err = %v, want ErrNotFound", err)
+	}
+	// An unsent message has no provider id, and the empty id never matches it.
+	pending := base
+	pending.ID, pending.ContactID, pending.Email = ids.New(), ids.New(), "c@example.com"
+	pending.Status, pending.ProviderMessageID = model.MessagePending, ""
+	if _, err := db.InsertMessages(ctx, []model.Message{pending}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.MessageByProviderID(ctx, model.DefaultChannel, ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("empty provider id: err = %v, want ErrNotFound", err)
+	}
+}
+
+// The lookup by a channel's id is answered from the (channel, provider_message_id) index, not by
+// scanning every message.
+func TestMessageByProviderIDUsesTheChannelIndex(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+	rows, err := db.sql.QueryContext(ctx, "EXPLAIN QUERY PLAN SELECT "+messageColumns+
+		" FROM messages WHERE "+messageByProviderIDWhere, model.DefaultChannel, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var details []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, detail := range details {
+		if strings.Contains(detail, "messages_channel_provider_message_id") {
+			return
+		}
+	}
+	t.Errorf("query plan does not use messages_channel_provider_message_id: %q", details)
 }

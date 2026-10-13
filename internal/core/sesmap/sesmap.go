@@ -61,11 +61,11 @@ type Engagement struct{ LastOpenAt, LastClickAt *time.Time }
 
 // Plan is everything one SES event asks for.
 type Plan struct {
-	Type         EventType
-	SESMessageID string // mail.messageId (SES's own id); "" when absent
-	MessageID    string // from the "message_id" tag; "" when not ours
-	Email        string // normalized mail.destination[0]; "" when absent
-	OccurredAt   time.Time
+	Type              EventType
+	ProviderMessageID string // mail.messageId (the channel's own id); "" when absent
+	MessageID         string // from the "message_id" tag; "" when not ours
+	Email             string // normalized mail.destination[0]; "" when absent
+	OccurredAt        time.Time
 	// Kind comes from the Nibwire-written "kind" tag; "" when the tag is absent or unknown.
 	// Upstream instead loads it from the stored message.
 	Kind   model.MessageKind
@@ -142,13 +142,13 @@ func EventPlan(raw json.RawMessage, now time.Time) (Plan, bool) {
 	tags := mail["tags"]
 
 	plan := Plan{
-		Type:         eventType,
-		SESMessageID: stringField(mail, "messageId"),
-		MessageID:    readObjectIDTag(tags, "message_id"),
-		Email:        email,
-		OccurredAt:   firstDate(stringField(detail, "timestamp"), stringField(mail, "timestamp"), now),
-		Kind:         readKindTag(tags),
-		Store:        withoutMailHeaders(raw),
+		Type:              eventType,
+		ProviderMessageID: stringField(mail, "messageId"),
+		MessageID:         readObjectIDTag(tags, "message_id"),
+		Email:             email,
+		OccurredAt:        firstDate(stringField(detail, "timestamp"), stringField(mail, "timestamp"), now),
+		Kind:              readKindTag(tags),
+		Store:             withoutMailHeaders(raw),
 	}
 
 	switch eventType {
