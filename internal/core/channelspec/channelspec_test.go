@@ -72,7 +72,7 @@ func TestValidateReportsEveryProblem(t *testing.T) {
 
 func TestSESKeys(t *testing.T) {
 	id, secret := SESKeys("AWS2")
-	if id != "AWS2_ACCESS_KEY_ID" || secret != "AWS2_SECRET_ACCESS_KEY" {
+	if id != "AWS2_ACCESS_KEY_ID" || secret != "AWS2_SECRET_ACCESS_KEY" { //nolint:gosec // G101: variable names, not credentials
 		t.Fatalf("SESKeys = %q, %q", id, secret)
 	}
 }
