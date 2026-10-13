@@ -54,6 +54,17 @@ var tools = []*tool{
 	{name: "list_audit", scope: creds.ScopeRead,
 		about: "The audit log: every write and every send, whoever made it.",
 		add:   func(sf *surface, t *tool) { addTool(sf, t, listAudit) }},
+	{name: "list_channels", scope: creds.ScopeRead,
+		about: "The channels mail can go out through, default first: state (enabled, disabled, broken, " +
+			"down), settings, which secret variables are set, and each one's fallback chain.",
+		add: func(sf *surface, t *tool) { addTool(sf, t, listChannels) }},
+	{name: "get_channel", scope: creds.ScopeRead,
+		about: "One channel, by name. Secrets appear as variable names and whether each is set.",
+		add:   func(sf *surface, t *tool) { addTool(sf, t, getChannel) }},
+	{name: "list_routes", scope: creds.ScopeRead,
+		about: "The routing rules in the order they are tried, and every channel's fallback chain, " +
+			"with any channel they name that is gone or disabled.",
+		add: func(sf *surface, t *tool) { addTool(sf, t, listRoutes) }},
 
 	// --- write (design §9, second list) ---
 	{name: "create_newsletter", scope: creds.ScopeWrite,
@@ -103,6 +114,16 @@ var tools = []*tool{
 		about: "Store an image and answer with its URL, which is what goes in a campaign body. Only " +
 			"PNG, JPEG, GIF and WebP are accepted, decided by the bytes rather than the name.",
 		add: func(sf *surface, t *tool) { addTool(sf, t, uploadImage) }},
+
+	// --- channels (multi-channel design §3.4): adding one and changing rules stay with the CLI ---
+	{name: "test_channel", scope: creds.ScopeSend,
+		about: "Send one email through one channel, now, outside any campaign. It counts toward this " +
+			"credential's day like send_test.",
+		add: func(sf *surface, t *tool) { addTool(sf, t, testChannel) }},
+	{name: "set_channel_enabled", scope: creds.ScopeWrite,
+		about: "Put a channel in service (which also clears a down state) or take it out. A change " +
+			"takes effect when the server restarts; default can only be put back in service.",
+		add: func(sf *surface, t *tool) { addTool(sf, t, setChannelEnabled) }},
 }
 
 // registerTools walks the table. Registering and listing are the same act, which is why the tests can

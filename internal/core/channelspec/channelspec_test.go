@@ -76,3 +76,52 @@ func TestSESKeys(t *testing.T) {
 		t.Fatalf("SESKeys = %q, %q", id, secret)
 	}
 }
+
+func TestSecretVarsNamesTheVariablesOfAType(t *testing.T) {
+	got := SecretVars(TypeSES, "AWS2")
+	if len(got) != 2 || got[0] != "AWS2_ACCESS_KEY_ID" || got[1] != "AWS2_SECRET_ACCESS_KEY" {
+		t.Fatalf("SecretVars(ses) = %v", got)
+	}
+	if got := SecretVars("resend", "R"); got != nil {
+		t.Fatalf("SecretVars(resend) = %v, want none until the type exists", got)
+	}
+}
+
+func TestValidateFallbacks(t *testing.T) {
+	if err := ValidateFallbacks("aws2", []string{"default", "resend"}); err != nil {
+		t.Fatalf("a good chain: %v", err)
+	}
+	if err := ValidateFallbacks("default", []string{"aws2"}); err != nil {
+		t.Fatalf("default as the source: %v", err)
+	}
+	for _, c := range []struct {
+		chain []string
+		want  string
+	}{
+		{nil, "empty"},
+		{[]string{"default", ""}, "empty name"},
+		{[]string{"default", "aws2"}, "aws2 cannot fall back to itself"},
+		{[]string{"default", "back", "default"}, "default appears twice"},
+	} {
+		err := ValidateFallbacks("aws2", c.chain)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("ValidateFallbacks(aws2, %v) = %v, want %q", c.chain, err, c.want)
+		}
+	}
+}
+
+func TestWarningsNameTheMissingSecrets(t *testing.T) {
+	both := env(map[string]string{"AWS2_ACCESS_KEY_ID": "AKIA", "AWS2_SECRET_ACCESS_KEY": "s"})
+	if got := Warnings(valid(), both); len(got) != 0 {
+		t.Fatalf("a channel with both keys warned: %v", got)
+	}
+	half := Warnings(valid(), env(map[string]string{"AWS2_ACCESS_KEY_ID": "AKIA"}))
+	if len(half) != 1 || !strings.Contains(half[0], "AWS2_SECRET_ACCESS_KEY") {
+		t.Fatalf("half the keys: %v", half)
+	}
+	none := Warnings(valid(), env(nil))
+	if len(none) != 1 || !strings.Contains(none[0], "AWS2_ACCESS_KEY_ID and AWS2_SECRET_ACCESS_KEY are not set") ||
+		!strings.Contains(none[0], "instance role") {
+		t.Fatalf("no keys: %v", none)
+	}
+}

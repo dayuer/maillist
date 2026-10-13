@@ -56,7 +56,8 @@ func runServe(cmd *cobra.Command, _ []string) error {
 		}
 		mcpServer := mcpsrv.New(mcpsrv.Deps{
 			Config: a.Config, Store: a.Store, Mailer: a.Mailer, Jobs: a.Jobs,
-			Identities: a.Identities, Log: a.Log, Version: version,
+			Identities: a.Identities, Channels: a.Channels, ChannelProblems: a.ChannelProblems,
+			Log: a.Log, Version: version,
 		})
 
 		// A crash between the SES call and the write-back leaves claimed rows. They become unknown

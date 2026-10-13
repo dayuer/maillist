@@ -23,6 +23,7 @@ func newRouteCmd() *cobra.Command {
 			"--default rule matches everything and is always last. Nothing sends by these rules yet: " +
 			"this release stores them, and assigning a channel at send time follows.",
 	}
+	cmd.AddCommand(newRouteFallbackCmd()) // route_fallback.go
 
 	add := &cobra.Command{
 		Use:   "add",
@@ -144,7 +145,7 @@ func runRouteList(cmd *cobra.Command, _ []string) error {
 		if len(views) == 0 {
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(),
 				"no rules: every message goes through the default channel")
-			return nil
+			return printFallbacks(ctx, cmd, a)
 		}
 		for _, view := range views {
 			state := "ok"
@@ -154,7 +155,7 @@ func runRouteList(cmd *cobra.Command, _ []string) error {
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\t%s\n",
 				view.ID, view.Match, targetsText(view.Targets), state)
 		}
-		return nil
+		return printFallbacks(ctx, cmd, a)
 	})
 }
 

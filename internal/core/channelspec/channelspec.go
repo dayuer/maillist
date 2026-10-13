@@ -104,3 +104,63 @@ func sesProblems(s Spec, lookup func(string) string, secretOK bool) []string {
 	}
 	return problems
 }
+
+// SecretVars are the environment variables a channel of this type reads its secrets from, in a fixed
+// order. Only their names ever leave the process; their values never do.
+func SecretVars(kind, prefix string) []string {
+	if kind == TypeSES {
+		id, secret := SESKeys(prefix)
+		return []string{id, secret}
+	}
+	return nil
+}
+
+// ValidateFallbacks checks a fallback chain on its own terms: no empty names, not the channel itself,
+// no channel twice. Whether each name exists is the caller's to check, against the database. A chain
+// is one hop (a channel's mail goes to the first usable channel of its own chain, never on to that
+// channel's chain), so a→b and b→a is not a loop and is allowed.
+func ValidateFallbacks(channel string, chain []string) error {
+	if len(chain) == 0 {
+		return errors.New("the fallback chain is empty")
+	}
+	seen := map[string]bool{}
+	for _, fallback := range chain {
+		switch {
+		case fallback == "":
+			return errors.New("the fallback chain has an empty name in it")
+		case fallback == channel:
+			return fmt.Errorf("%s cannot fall back to itself", channel)
+		case seen[fallback]:
+			return fmt.Errorf("%s appears twice in the fallback chain", fallback)
+		}
+		seen[fallback] = true
+	}
+	return nil
+}
+
+// Warnings is what to tell an operator who puts a stored channel back in service: every Validate
+// problem, and secret variables none of which are set (an ses channel then uses the instance role,
+// which is legitimate but worth saying). Enabling goes ahead regardless; serve still refuses to
+// start with a channel it cannot build.
+func Warnings(s Spec, lookup func(string) string) []string {
+	var warnings []string
+	if err := Validate(s, lookup); err != nil {
+		warnings = append(warnings, fmt.Sprintf("%s cannot be built as it stands: %v", s.Name, err))
+	}
+	vars := SecretVars(s.Type, s.SecretEnv)
+	var missing []string
+	for _, name := range vars {
+		if lookup(name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(vars) > 0 && len(missing) == len(vars) {
+		verb := "is"
+		if len(missing) > 1 {
+			verb = "are"
+		}
+		warnings = append(warnings, fmt.Sprintf("%s %s not set; %s will use the instance role",
+			strings.Join(missing, " and "), verb, s.Name))
+	}
+	return warnings
+}

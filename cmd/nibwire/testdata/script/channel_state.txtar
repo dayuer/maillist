@@ -1,0 +1,73 @@
+# 渠道的不可用状态：引擎遇到 ErrorPause/ErrorQuota 时标记（2d 第二段），这里用 channeldown 代替。
+# channel list/show 显示 down 与原因；channel enable 清除；down_until 过后自动恢复。
+
+nibwire init
+
+env AWS2_ACCESS_KEY_ID=AKIAEXAMPLE
+env AWS2_SECRET_ACCESS_KEY=topsecretvalue
+nibwire channel add aws2 --type ses --secret-env AWS2 --region us-east-1
+
+# 账户被暂停：一直不可用，直到运维 channel enable。
+channeldown aws2 - account paused
+nibwire channel list
+stdout '^aws2\tses\tdown\tAWS2'
+nibwire channel show aws2
+stdout 'state\s+down'
+stdout 'down\s+account paused'
+stdout 'down since\s+\d{4}-'
+stdout 'down until\s+channel enable'
+nibwire channel show aws2 --json
+stdout '"reason": "account paused"'
+
+nibwire channel enable aws2
+stdout 'enabled aws2'
+stdout 'cleared its down state \(account paused\)'
+! stderr 'warning'
+nibwire channel list
+stdout '^aws2\tses\tenabled\tAWS2'
+nibwire channel show aws2
+! stdout 'down'
+
+# 额度用完：有恢复时间。时间已过的视为已恢复。
+channeldown aws2 1h daily quota used up
+nibwire channel show aws2
+stdout 'down\s+daily quota used up'
+stdout 'down until\s+\d{4}-'
+channeldown aws2 -1s daily quota used up
+nibwire channel list
+stdout '^aws2\tses\tenabled'
+
+# 停用的渠道显示 disabled，不显示 down。
+channeldown aws2 - account paused
+nibwire channel disable aws2 --yes
+nibwire channel list
+stdout '^aws2\tses\tdisabled'
+
+# 启用时重新校验：只剩一半密钥，照常启用，但警告并点名变量。
+env AWS2_SECRET_ACCESS_KEY=
+nibwire channel enable aws2
+stdout 'enabled aws2'
+stderr 'warning: aws2 cannot be built as it stands: .*AWS2_SECRET_ACCESS_KEY'
+
+# 两个密钥都没设：会用实例角色，也警告。
+env AWS2_ACCESS_KEY_ID=
+nibwire channel enable aws2
+stderr 'warning: AWS2_ACCESS_KEY_ID and AWS2_SECRET_ACCESS_KEY are not set; aws2 will use the instance role'
+
+# default 也有不可用状态；channel enable default 清除它，disable default 照旧拒绝。
+channeldown default - account paused
+nibwire channel list
+stdout '^default\tses\tdown\tSES_\* settings'
+nibwire channel show default
+stdout 'down\s+account paused'
+nibwire channel enable default
+stdout 'default is back in service; cleared its down state \(account paused\)'
+nibwire channel list
+stdout '^default\tses\tenabled'
+nibwire channel enable default
+stdout 'default is in service'
+! nibwire channel disable default --yes
+stderr 'SES_\* settings'
+
+nibwire audit list --action channel.enable
+stdout 'default'

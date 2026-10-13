@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -103,31 +104,56 @@ type channelView struct {
 	Secrets      map[string]bool   `json:"secrets,omitempty"` // variable name → set
 	MaxPerSecond int               `json:"maxPerSecond"`
 	MaxPerDay    int               `json:"maxPerDay"`
+	Down         *downView         `json:"down,omitempty"`      // only while it is out of service
+	Fallbacks    []string          `json:"fallbacks,omitempty"` // where its unsent mail goes when it is down
+}
+
+// downView is why a channel is out of service and until when (design §4.4).
+type downView struct {
+	Reason string     `json:"reason"`
+	Since  *time.Time `json:"since,omitempty"`
+	Until  *time.Time `json:"until,omitempty"` // absent: until `channel enable`
 }
 
 const defaultSource = "SES_* settings"
 
-func defaultView() channelView {
-	return channelView{Name: model.DefaultChannel, Type: channelspec.TypeSES, Enabled: true, Source: defaultSource}
+func defaultView(down store.ChannelDownState, fallbacks []string) channelView {
+	return channelView{Name: model.DefaultChannel, Type: channelspec.TypeSES, Enabled: true, Source: defaultSource,
+		Down: downViewOf(down), Fallbacks: fallbacks}
 }
 
-func viewOf(a *app.App, row store.ChannelRow) channelView {
-	id, secret := channelspec.SESKeys(row.SecretEnv)
+func viewOf(a *app.App, row store.ChannelRow, fallbacks []string) channelView {
 	problem := ""
 	if err := a.ChannelProblems[row.Name]; err != nil {
 		problem = err.Error()
 	}
+	secrets := map[string]bool{}
+	for _, name := range channelspec.SecretVars(row.Type, row.SecretEnv) {
+		secrets[name] = a.Config.Secret(name) != ""
+	}
 	return channelView{
 		Name: row.Name, Type: row.Type, Enabled: row.Enabled, Problem: problem, Source: row.SecretEnv, Params: row.Params,
-		Secrets:      map[string]bool{id: a.Config.Secret(id) != "", secret: a.Config.Secret(secret) != ""},
-		MaxPerSecond: row.MaxPerSecond, MaxPerDay: row.MaxPerDay,
+		Secrets: secrets, MaxPerSecond: row.MaxPerSecond, MaxPerDay: row.MaxPerDay,
+		Down: downViewOf(row.Down), Fallbacks: fallbacks,
 	}
 }
 
-// stateOf is enabled, disabled, or broken (enabled but not buildable).
+// downViewOf is nil for a channel in service, including one whose down_until has passed.
+func downViewOf(state store.ChannelDownState) *downView {
+	if !state.DownAt(time.Now()) {
+		return nil
+	}
+	return &downView{Reason: state.Reason, Since: state.Since, Until: state.Until}
+}
+
+// stateOf is enabled, disabled, broken (enabled but not buildable) or down (out of service after
+// the provider refused to send).
 func stateOf(view channelView) string {
-	if view.Problem != "" {
+	switch {
+	case view.Problem != "":
 		return "broken"
+	case view.Enabled && view.Down != nil:
+		return "down"
 	}
 	return enabledWord(view.Enabled)
 }
@@ -164,7 +190,7 @@ func runChannelAdd(cmd *cobra.Command, args []string) error {
 		note(cmd, a, "channel.add", row.Name, map[string]any{"name": row.Name, "type": row.Type,
 			"secretEnv": row.SecretEnv, "params": row.Params})
 		if jsonOutput(cmd) {
-			return printJSON(cmd, viewOf(a, row))
+			return printJSON(cmd, viewOf(a, row, nil))
 		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "added %s; restart serve to load it\n", row.Name)
 		return nil
@@ -177,9 +203,17 @@ func runChannelList(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return err
 		}
-		views := []channelView{defaultView()}
+		fallbacks, err := a.Store.AllChannelFallbacks(ctx)
+		if err != nil {
+			return err
+		}
+		defaultDown, err := a.Store.ChannelDown(ctx, model.DefaultChannel)
+		if err != nil {
+			return err
+		}
+		views := []channelView{defaultView(defaultDown, fallbacks[model.DefaultChannel])}
 		for _, row := range rows {
-			views = append(views, viewOf(a, row))
+			views = append(views, viewOf(a, row, fallbacks[row.Name]))
 		}
 		if jsonOutput(cmd) {
 			return printJSON(cmd, views)
@@ -194,8 +228,18 @@ func runChannelList(cmd *cobra.Command, _ []string) error {
 
 func runChannelShow(cmd *cobra.Command, args []string) error {
 	return withApp(cmd, func(ctx context.Context, a *app.App) error {
-		view := defaultView()
-		if args[0] != model.DefaultChannel {
+		fallbacks, err := a.Store.ChannelFallbacks(ctx, args[0])
+		if err != nil {
+			return err
+		}
+		var view channelView
+		if args[0] == model.DefaultChannel {
+			down, err := a.Store.ChannelDown(ctx, model.DefaultChannel)
+			if err != nil {
+				return err
+			}
+			view = defaultView(down, fallbacks)
+		} else {
 			row, err := a.Store.Channel(ctx, args[0])
 			if errors.Is(err, store.ErrNotFound) {
 				return fmt.Errorf("no channel named %s", args[0])
@@ -203,7 +247,7 @@ func runChannelShow(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return err
 			}
-			view = viewOf(a, row)
+			view = viewOf(a, row, fallbacks)
 		}
 		if jsonOutput(cmd) {
 			return printJSON(cmd, view)
@@ -213,6 +257,20 @@ func runChannelShow(cmd *cobra.Command, args []string) error {
 			view.Name, view.Type, stateOf(view), view.Source)
 		if view.Problem != "" {
 			_, _ = fmt.Fprintf(out, "problem         %s\n", view.Problem)
+		}
+		if view.Down != nil {
+			_, _ = fmt.Fprintf(out, "down            %s\n", view.Down.Reason)
+			if view.Down.Since != nil {
+				_, _ = fmt.Fprintf(out, "down since      %s\n", view.Down.Since.UTC().Format(time.RFC3339))
+			}
+			until := "channel enable"
+			if view.Down.Until != nil {
+				until = view.Down.Until.UTC().Format(time.RFC3339)
+			}
+			_, _ = fmt.Fprintf(out, "down until      %s\n", until)
+		}
+		if len(view.Fallbacks) > 0 {
+			_, _ = fmt.Fprintf(out, "fallbacks       %s\n", strings.Join(view.Fallbacks, ","))
 		}
 		for _, key := range sortedKeys(view.Params) {
 			_, _ = fmt.Fprintf(out, "%-15s %s\n", key, view.Params[key])
@@ -260,6 +318,9 @@ func runChannelTest(cmd *cobra.Command, args []string) error {
 
 func setChannelEnabled(cmd *cobra.Command, name string, enabled bool) error {
 	if name == model.DefaultChannel {
+		if enabled {
+			return enableDefaultChannel(cmd)
+		}
 		return errors.New("the default channel is the SES_* settings; it is turned on and off with SENDING_ENABLED")
 	}
 	if !enabled {
@@ -269,19 +330,60 @@ func setChannelEnabled(cmd *cobra.Command, name string, enabled bool) error {
 		}
 	}
 	return withApp(cmd, func(ctx context.Context, a *app.App) error {
-		err := a.Store.SetChannelEnabled(ctx, name, enabled)
+		row, err := a.Store.Channel(ctx, name)
 		if errors.Is(err, store.ErrNotFound) {
 			return fmt.Errorf("no channel named %s", name)
 		}
 		if err != nil {
 			return err
 		}
+		if err := a.Store.SetChannelEnabled(ctx, name, enabled); err != nil {
+			return err
+		}
 		action := "channel." + strings.TrimSuffix(enabledWord(enabled), "d")
 		note(cmd, a, action, name, map[string]any{"name": name})
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s; restart serve for it to take effect\n",
-			enabledWord(enabled), name)
+		out := cmd.OutOrStdout()
+		_, _ = fmt.Fprintf(out, "%s %s; restart serve for it to take effect\n", enabledWord(enabled), name)
+		if !enabled {
+			return nil
+		}
+		if row.Down.Reason != "" {
+			_, _ = fmt.Fprintf(out, "cleared its down state (%s)\n", row.Down.Reason)
+		}
+		// Enabling is the operator's call and goes ahead; what serve would refuse to build is said now
+		// rather than at the next start (#78 review).
+		for _, warning := range channelWarnings(a, row) {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
+		}
 		return nil
 	})
+}
+
+// enableDefaultChannel puts the default channel back in service after it went down. It is the only
+// sense in which the default channel is enabled: SENDING_ENABLED is what turns it on and off.
+func enableDefaultChannel(cmd *cobra.Command) error {
+	return withApp(cmd, func(ctx context.Context, a *app.App) error {
+		down, err := a.Store.ChannelDown(ctx, model.DefaultChannel)
+		if err != nil {
+			return err
+		}
+		if _, err := a.Store.ClearChannelDown(ctx, model.DefaultChannel); err != nil {
+			return err
+		}
+		note(cmd, a, "channel.enable", model.DefaultChannel, map[string]any{"name": model.DefaultChannel})
+		out := cmd.OutOrStdout()
+		if down.Reason == "" {
+			_, _ = fmt.Fprintln(out, "default is in service; it is turned on and off with SENDING_ENABLED")
+			return nil
+		}
+		_, _ = fmt.Fprintf(out, "default is back in service; cleared its down state (%s)\n", down.Reason)
+		return nil
+	})
+}
+
+// channelWarnings is what is wrong with a stored channel as this environment would build it.
+func channelWarnings(a *app.App, row store.ChannelRow) []string {
+	return channelspec.Warnings(app.SpecOf(row), a.Config.Secret)
 }
 
 func sortedSecretNames(secrets map[string]bool) []string {

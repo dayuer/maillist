@@ -73,6 +73,7 @@ func TestScripts(t *testing.T) {
 		// two is exactly that they are large: one is a shape the parser cannot finish, the other is
 		// prose of the same size.
 		Cmds: map[string]func(*testscript.TestScript, bool, []string){
+			"channeldown": channelDownCmd, // channel_state_test.go
 			// routeid <variable> <match> reads the routes out of the database the script has been
 			// writing and exports the id of one of them, so that `route remove` and `route move`
 			// can be named. A script asserts on output; it cannot bind it to a name, and a route's

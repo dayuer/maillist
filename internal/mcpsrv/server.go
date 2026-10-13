@@ -39,7 +39,11 @@ type Deps struct {
 	Mailer     *mailer.Engine
 	Jobs       *jobs.Queue
 	Identities mailer.IdentityReader
-	Log        *slog.Logger
+	// Channels and ChannelProblems are the app's (app.App): the channels test_channel can send
+	// through, and the enabled ones that could not be built, by name.
+	Channels        *mailer.Registry
+	ChannelProblems map[string]error
+	Log             *slog.Logger
 	// Version is what the server reports to the client as its implementation version.
 	Version string
 }

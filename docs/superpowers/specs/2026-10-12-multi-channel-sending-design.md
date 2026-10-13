@@ -254,7 +254,7 @@ Resend 与 SendGrid 的具体错误码、字段名和签名算法，在实现时
 | `0006_channels.sql` | 2a | `channels` |
 | `0007_routes.sql` | 2c-1 | `routes` |
 | `0008_send_ledger_channel.sql` | 2c-2 | `send_ledger` 重建（主键加 `channel`） |
-| `0009_channel_state.sql` | 2d | `channel_fallbacks`；`channels.down_reason`、`channels.down_until` |
+| `0009_channel_state.sql` | 2d | `channel_fallbacks`；`channels.down_reason`、`channels.down_since`、`channels.down_until`；`default_channel_state`（default 渠道不是 `channels` 的一行，它的不可用状态存在这张单行表里） |
 | `0010_webhook_events.sql` | 3 | `webhook_events` |
 
 0005 是第一个改列名（非纯增量）的迁移：新版二进制打开数据库即迁移，迁移后旧版 `serve` 与回滚到旧版都会因找不到 `ses_message_id` 而失败。升级顺序必须是：停 `serve` → `nibwire db backup` → 换二进制 → 启动。
