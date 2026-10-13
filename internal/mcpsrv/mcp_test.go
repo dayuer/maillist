@@ -115,6 +115,7 @@ func newFixtureFull(t *testing.T, scopes []creds.Scope, budget int) *fixture {
 			},
 			Store: db, Mailer: engine, Jobs: jobs.New(db),
 			Identities: mailer.StaticIdentity{Domains: []string{"example.net"}},
+			Channels:   channels,
 			Log:        slog.Default(), Version: "test",
 		},
 		store: db, fake: fake, engine: engine, token: token, control: control,

@@ -109,3 +109,19 @@ func TestValidateFallbacks(t *testing.T) {
 		}
 	}
 }
+
+func TestWarningsNameTheMissingSecrets(t *testing.T) {
+	both := env(map[string]string{"AWS2_ACCESS_KEY_ID": "AKIA", "AWS2_SECRET_ACCESS_KEY": "s"})
+	if got := Warnings(valid(), both); len(got) != 0 {
+		t.Fatalf("a channel with both keys warned: %v", got)
+	}
+	half := Warnings(valid(), env(map[string]string{"AWS2_ACCESS_KEY_ID": "AKIA"}))
+	if len(half) != 1 || !strings.Contains(half[0], "AWS2_SECRET_ACCESS_KEY") {
+		t.Fatalf("half the keys: %v", half)
+	}
+	none := Warnings(valid(), env(nil))
+	if len(none) != 1 || !strings.Contains(none[0], "AWS2_ACCESS_KEY_ID and AWS2_SECRET_ACCESS_KEY are not set") ||
+		!strings.Contains(none[0], "instance role") {
+		t.Fatalf("no keys: %v", none)
+	}
+}

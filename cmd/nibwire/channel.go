@@ -381,29 +381,9 @@ func enableDefaultChannel(cmd *cobra.Command) error {
 	})
 }
 
-// channelWarnings is what is wrong with a stored channel as this environment would build it: the
-// channelspec problems, and secret variables that are not set at all.
+// channelWarnings is what is wrong with a stored channel as this environment would build it.
 func channelWarnings(a *app.App, row store.ChannelRow) []string {
-	var warnings []string
-	if err := channelspec.Validate(app.SpecOf(row), a.Config.Secret); err != nil {
-		warnings = append(warnings, fmt.Sprintf("%s cannot be built as it stands: %v", row.Name, err))
-	}
-	var missing []string
-	vars := channelspec.SecretVars(row.Type, row.SecretEnv)
-	for _, name := range vars {
-		if a.Config.Secret(name) == "" {
-			missing = append(missing, name)
-		}
-	}
-	if len(vars) > 0 && len(missing) == len(vars) {
-		verb := "is"
-		if len(missing) > 1 {
-			verb = "are"
-		}
-		warnings = append(warnings, fmt.Sprintf("%s %s not set; %s will use the instance role",
-			strings.Join(missing, " and "), verb, row.Name))
-	}
-	return warnings
+	return channelspec.Warnings(app.SpecOf(row), a.Config.Secret)
 }
 
 func sortedSecretNames(secrets map[string]bool) []string {

@@ -76,7 +76,8 @@ func runMCP(cmd *cobra.Command, _ []string) error {
 
 		server := mcpsrv.New(mcpsrv.Deps{
 			Config: a.Config, Store: a.Store, Mailer: a.Mailer, Jobs: a.Jobs,
-			Identities: a.Identities, Log: a.Log, Version: version,
+			Identities: a.Identities, Channels: a.Channels, ChannelProblems: a.ChannelProblems,
+			Log: a.Log, Version: version,
 		})
 
 		if httpMode {

@@ -51,10 +51,14 @@ func TestTheSurfaceIsTheDesignsToolList(t *testing.T) {
 		"list_newsletters", "get_newsletter", "list_campaigns", "get_campaign",
 		"get_campaign_report", "get_stats", "list_contacts", "count_audience",
 		"check_campaign", "list_domains", "list_suppressions", "get_job", "list_audit",
+		// 读：渠道与路由（多渠道设计第 3.4 节）
+		"list_channels", "get_channel", "list_routes",
 		// 写
 		"create_newsletter", "update_newsletter", "create_campaign", "update_campaign",
 		"send_test", "send_campaign", "schedule_campaign", "pause_campaign", "resume_campaign",
 		"import_contacts", "add_suppression", "remove_suppression", "upload_image", "run_cleanup",
+		// 写：渠道（新增渠道与改规则只走 CLI）
+		"test_channel", "set_channel_enabled",
 	}
 	session := connect(t, Deps{}, "unused-hash")
 	tools := listed(t, session)
@@ -95,18 +99,20 @@ func TestEveryToolDeclaresItsScope(t *testing.T) {
 		"list_newsletters", "get_newsletter", "list_campaigns", "get_campaign",
 		"get_campaign_report", "get_stats", "list_contacts", "count_audience",
 		"check_campaign", "list_domains", "list_suppressions", "get_job", "list_audit",
+		"list_channels", "get_channel", "list_routes",
 	} {
 		want[name] = "read"
 	}
 	for _, name := range []string{
 		"create_newsletter", "update_newsletter", "create_campaign", "update_campaign",
 		"add_suppression", "remove_suppression", "upload_image", "run_cleanup",
+		"set_channel_enabled",
 	} {
 		want[name] = "write"
 	}
 	for _, name := range []string{
 		"send_test", "send_campaign", "schedule_campaign", "pause_campaign", "resume_campaign",
-		"import_contacts",
+		"import_contacts", "test_channel",
 	} {
 		want[name] = "send"
 	}

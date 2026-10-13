@@ -137,3 +137,30 @@ func ValidateFallbacks(channel string, chain []string) error {
 	}
 	return nil
 }
+
+// Warnings is what to tell an operator who puts a stored channel back in service: every Validate
+// problem, and secret variables none of which are set (an ses channel then uses the instance role,
+// which is legitimate but worth saying). Enabling goes ahead regardless; serve still refuses to
+// start with a channel it cannot build.
+func Warnings(s Spec, lookup func(string) string) []string {
+	var warnings []string
+	if err := Validate(s, lookup); err != nil {
+		warnings = append(warnings, fmt.Sprintf("%s cannot be built as it stands: %v", s.Name, err))
+	}
+	vars := SecretVars(s.Type, s.SecretEnv)
+	var missing []string
+	for _, name := range vars {
+		if lookup(name) == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(vars) > 0 && len(missing) == len(vars) {
+		verb := "is"
+		if len(missing) > 1 {
+			verb = "are"
+		}
+		warnings = append(warnings, fmt.Sprintf("%s %s not set; %s will use the instance role",
+			strings.Join(missing, " and "), verb, s.Name))
+	}
+	return warnings
+}
