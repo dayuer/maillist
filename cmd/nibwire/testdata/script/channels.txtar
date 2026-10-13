@@ -1,0 +1,83 @@
+# channel add|list|show|test|enable|disable：渠道存进数据库，密钥只认环境变量名，从不显示值。
+
+nibwire init
+
+# default 是 SES_* 设置，不能再登记一个同名渠道。
+! nibwire channel add default --type ses --secret-env AWS2 --region us-east-1
+stderr 'SES_\* settings'
+
+# 只设了一半密钥：拒绝，并说出两个变量名。
+env AWS2_ACCESS_KEY_ID=AKIAEXAMPLE
+! nibwire channel add aws2 --type ses --secret-env AWS2 --region us-east-1
+stderr 'AWS2_SECRET_ACCESS_KEY'
+
+env AWS2_SECRET_ACCESS_KEY=topsecretvalue
+nibwire channel add aws2 --type ses --secret-env AWS2 --region us-east-1 --max-per-day 1000
+stdout 'added aws2'
+stdout 'restart'
+
+! nibwire channel add aws2 --type ses --secret-env AWS2 --region us-east-1
+stderr 'already exists'
+
+! nibwire channel add r1 --type resend --secret-env RESEND
+stderr 'not available'
+
+nibwire channel list
+stdout '^default\tses\tenabled\tSES_\* settings'
+stdout '^aws2\tses\tenabled\tAWS2'
+
+nibwire channel show aws2
+stdout 'region\s+us-east-1'
+stdout 'AWS2_ACCESS_KEY_ID\s+set'
+stdout 'AWS2_SECRET_ACCESS_KEY\s+set'
+stdout 'max per day\s+1000'
+! stdout 'AKIAEXAMPLE'
+! stdout 'topsecretvalue'
+
+nibwire channel show aws2 --json
+stdout '"name": "aws2"'
+! stdout 'topsecretvalue'
+
+# 测试信走 aws2 自己的假发件日志。
+nibwire channel test aws2 --from news@example.net --to reader@example.com
+stdout 'sent through aws2'
+exists sent.jsonl.aws2
+grep 'reader@example.com' sent.jsonl.aws2
+
+nibwire channel test default --from news@example.net --to reader@example.com
+stdout 'sent through default'
+
+! nibwire channel test missing --from news@example.net --to reader@example.com
+stderr 'no channel named missing'
+
+nibwire channel disable aws2 --yes
+stdout 'disabled aws2'
+stdout 'restart'
+nibwire channel list
+stdout '^aws2\tses\tdisabled'
+! nibwire channel test aws2 --from news@example.net --to reader@example.com
+stderr 'aws2 is disabled'
+nibwire channel enable aws2
+stdout 'enabled aws2'
+stdout 'restart'
+
+# 密钥被删掉之后：渠道标为 broken，管理命令照常可用，测试信与 serve 报出原因。
+env AWS2_SECRET_ACCESS_KEY=
+nibwire channel list
+stdout '^aws2\tses\tbroken\tAWS2'
+nibwire channel show aws2
+stdout 'problem\s+.*AWS2_SECRET_ACCESS_KEY'
+! nibwire channel test aws2 --from news@example.net --to reader@example.com
+stderr 'AWS2_SECRET_ACCESS_KEY'
+! nibwire serve --addr 127.0.0.1:0
+stderr 'channel aws2'
+nibwire channel disable aws2 --yes
+stdout 'disabled aws2'
+nibwire channel list
+stdout '^aws2\tses\tdisabled'
+
+! nibwire channel disable default --yes
+stderr 'SES_\* settings'
+
+nibwire audit list --action channel.add
+stdout 'aws2'

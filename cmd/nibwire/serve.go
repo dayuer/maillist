@@ -45,6 +45,9 @@ func runServe(cmd *cobra.Command, _ []string) error {
 	mcpAddr, _ := cmd.Flags().GetString("mcp-addr")
 
 	return withApp(cmd, func(ctx context.Context, a *app.App) error {
+		if err := a.CheckChannels(); err != nil {
+			return err
+		}
 		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
 

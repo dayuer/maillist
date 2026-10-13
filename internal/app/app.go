@@ -32,9 +32,15 @@ type App struct {
 	// stands in for it). Sender, Identities and Quota below are its parts, kept as fields so the code
 	// that reads them does not change.
 	Channel mailer.Channel
-	Sender  mailer.Sender
-	Mailer  *mailer.Engine
-	HTTP    *httpsrv.Server
+	// Channels is every channel this deployment can send through: Channel (the default) and the
+	// configured ones. Until routing exists every message still goes through Channel.
+	Channels *mailer.Registry
+	// ChannelProblems are the enabled channels that could not be built, by name. They are left out
+	// of Channels; serve refuses to start while there are any (CheckChannels).
+	ChannelProblems map[string]error
+	Sender          mailer.Sender
+	Mailer          *mailer.Engine
+	HTTP            *httpsrv.Server
 	// Identities answers "which sending domains does SES consider verified?" — the pre-send check
 	// and `nibwire domains` both read it.
 	Identities mailer.IdentityReader
@@ -101,6 +107,11 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		return nil, err
 	}
 	channel := mailer.NewChannel(model.DefaultChannel, mailer.ChannelTypeSES, sender, quota, identities, mailer.ClassifySES)
+	channels, channelProblems, err := loadChannels(ctx, cfg, db, channel)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	// The rate follows the account (D17): the controller decides it, the bucket enforces it, and
 	// SEND_RATE_PER_SECOND can only lower what the account gave.
 	control := ratectl.New(ratectl.Config{
@@ -128,16 +139,18 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 	http.Alerts = notifier
 
 	return &App{
-		Config:     cfg,
-		Store:      db,
-		Signer:     signer,
-		Events:     handler,
-		Jobs:       jobs.New(db),
-		Channel:    channel,
-		Sender:     sender,
-		Mailer:     engine,
-		Identities: identities,
-		Quota:      quota,
+		Config:          cfg,
+		Store:           db,
+		Signer:          signer,
+		Events:          handler,
+		Jobs:            jobs.New(db),
+		Channel:         channel,
+		Channels:        channels,
+		ChannelProblems: channelProblems,
+		Sender:          sender,
+		Mailer:          engine,
+		Identities:      identities,
+		Quota:           quota,
 		Poller: &mailer.QuotaPoller{
 			Reader: quota, Control: control, Bucket: engine.Bucket(), Alerts: notifier, Log: log,
 		},

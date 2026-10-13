@@ -72,7 +72,14 @@ type Config struct {
 	// pre-send check and `nibwire domains` see. Production reads SES.
 	FakeSESDomains []string
 	Limits         model.Limits
+	// env is a copy of the environment Load read. Secret is the only way to it: a configured
+	// channel's keys are in variables whose names the database holds, so they cannot be fields.
+	env map[string]string
 }
+
+// Secret is the value of one variable from the environment the configuration was loaded from, or
+// "" when it was not set. It exists for channel secrets; settings with a fixed name are fields.
+func (c Config) Secret(key string) string { return c.env[key] }
 
 // LoadFile reads a KEY=VALUE file, which is how `--config` works: the file is the deployment's
 // settings and the environment still wins, so a one-off `MAX_SENDS_PER_DAY=10 nibwire campaign
@@ -197,6 +204,7 @@ func Load(env map[string]string) (Config, error) {
 			WelcomeEmailsPer10Minute: 100,
 			MaxSendsPerDay:           intIn(env["MAX_SENDS_PER_DAY"], 1, 10_000_000, DefaultMaxSendsPerDay),
 		},
+		env: copyEnv(env),
 	}, nil
 }
 
@@ -255,4 +263,12 @@ func environ() map[string]string {
 		}
 	}
 	return env
+}
+
+func copyEnv(env map[string]string) map[string]string {
+	out := make(map[string]string, len(env))
+	for key, value := range env {
+		out[key] = value
+	}
+	return out
 }

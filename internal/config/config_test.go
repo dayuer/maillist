@@ -197,3 +197,30 @@ func TestFakeSESDomains(t *testing.T) {
 		t.Fatalf("FakeSESDomains = %#v, want nil", empty.FakeSESDomains)
 	}
 }
+
+// Secret reads the environment Load was given, so a channel's keys can live in variables whose
+// names only the database knows.
+func TestSecretReadsTheLoadedEnvironment(t *testing.T) {
+	env := map[string]string{"SESSION_SECRET": strings.Repeat("s", 32), "AWS2_ACCESS_KEY_ID": "AKIA"}
+	cfg, err := Load(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Secret("AWS2_ACCESS_KEY_ID"); got != "AKIA" {
+		t.Fatalf("Secret = %q", got)
+	}
+	if got := cfg.Secret("MISSING"); got != "" {
+		t.Fatalf("Secret(MISSING) = %q", got)
+	}
+	// Changing the caller's map afterwards does not reach the config.
+	env["AWS2_ACCESS_KEY_ID"] = "changed"
+	if got := cfg.Secret("AWS2_ACCESS_KEY_ID"); got != "AKIA" {
+		t.Fatalf("Secret after the caller's change = %q", got)
+	}
+}
+
+func TestTheZeroConfigHasNoSecrets(t *testing.T) {
+	if got := (Config{}).Secret("ANY"); got != "" {
+		t.Fatalf("Secret on a zero Config = %q", got)
+	}
+}
