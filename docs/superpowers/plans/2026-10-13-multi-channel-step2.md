@@ -4,7 +4,7 @@
 
 **Goal:** 让一个部署配置多个渠道、按规则把每封邮件分给渠道、每个渠道各自限速和计额度、渠道故障时改派（设计 `docs/superpowers/specs/2026-10-12-multi-channel-sending-design.md` 第 3、4、6 节）。
 
-**Architecture:** 第 1 步已把现有 SES 包成 `default` 渠道（`mailer.Channel`）。本步分四个子步依次合并：2a 渠道登记（表、命令、启动时加载）；2b 引擎按 `messages.channel` 选渠道发信，每渠道一套限速与分类；2c 路由规则与按渠道额度；2d 故障切换与 MCP。
+**Architecture:** 第 1 步已把现有 SES 包成 `default` 渠道（`mailer.Channel`）。本步分四个子步依次合并：2a 渠道登记（表、命令、启动时加载）；2b 引擎按 `messages.channel` 选渠道发信，每渠道一套限速与分类；2c 路由规则与按渠道额度（再拆成 2c-1 规则、2c-2 入队分配与按渠道额度，各一个 issue）；2d 故障切换与 MCP。
 
 **Tech Stack:** Go 1.26、SQLite（modernc.org/sqlite）、aws-sdk-go-v2/sesv2、cobra、testscript、modelcontextprotocol go-sdk。
 
@@ -16,14 +16,15 @@
 |---|---|---|---|
 | **2a** | 迁移 0006 `channels`；`channelspec` 校验；`store` 渠道读写；`Config.Secret`；`mailer.Registry`；启动时加载；`channel add/list/show/test/enable/disable` | 可登记多个 SES 渠道并单独测试发信；实际发信仍全部走 `default` | — |
 | **2b** | 引擎持有 `Registry`；每渠道一套 `Bucket`/`ratectl.Controller`/`QuotaPoller`；`deliver` 按 `message.Channel` 选渠道；只分类 `Send` 返回的错误；`NewEngine` 显式接收渠道 | 邮件记在哪个渠道就从哪个渠道发出；一个渠道限速不拖慢其他渠道 | 2a |
-| **2c** | 迁移 0007 `routes` 与 `send_ledger` 按渠道重建；`core/route` 匹配与稳定比例分流；入队时分配渠道（含确认信、欢迎信、测试信）；按渠道预留额度；`route add/remove/move/list/test`；发送前检查加入"所用渠道都已验证发件域名" | 按规则分流；额度按渠道预留，任一渠道不足则整体入队失败 | 2b |
-| **2d** | 迁移 0008 `channel_fallbacks` 与渠道不可用状态；`ErrorPause`/`ErrorQuota` 触发改派（仅改派 `provider_message_id = ''` 的邮件，同事务转移额度）；告警；`events.findMessage` 回退路径与 `AdoptProviderMessageID` 校验渠道；MCP `list_channels`、`get_channel`、`test_channel`、`set_channel_enabled`、`list_routes`、`test_routes` | 设计第 4 节全部落地 | 2c |
+| **2c-1** | 迁移 0007 `routes`；`core/route` 匹配与稳定比例分流；`store` 的规则读写；`route add/remove/move/list` | 规则可以登记、查看、调整顺序并拒绝指向不存在或已停用渠道的规则；实际分配仍是 2c-2 | 2b（实际只依赖 2a，可并行） |
+| **2c-2** | 迁移 0008 `send_ledger` 按渠道重建；入队时用 `route.Pick` 分配渠道（含确认信、欢迎信、测试信）；按渠道预留额度；`route test`；发送前检查加入"所用渠道都已验证发件域名" | 按规则分流；额度按渠道预留，任一渠道不足则整体入队失败 | 2c-1 |
+| **2d** | 迁移 0009 `channel_fallbacks` 与渠道不可用状态；`ErrorPause`/`ErrorQuota` 触发改派（仅改派 `provider_message_id = ''` 的邮件，同事务转移额度）；告警；`events.findMessage` 回退路径与 `AdoptProviderMessageID` 校验渠道；MCP `list_channels`、`get_channel`、`test_channel`、`set_channel_enabled`、`list_routes`、`test_routes` | 设计第 4 节全部落地 | 2c-2 |
 
 每个子步一个 issue、一个 `impl/` 分支、一个 PR。**本文件把 2a 写到可直接执行的粒度**；2b–2d 写出任务、接口与验收，前一个子步合并后按同样粒度补写（追加到本文件），因为它们的代码建立在前一子步的实际结构上。
 
 ### 与设计的偏离
 
-1. **迁移编号**：设计第 7 节写的是 `0006_channels_routes.sql`（第 2 步一次建齐）与 `0007_webhook_events.sql`（第 3 步）。按子步拆分后为：`0006_channels.sql`（2a）、`0007_routes_ledger.sql`（2c）、`0008_channel_state.sql`（2d）、`0009_webhook_events.sql`（第 3 步）。本计划提交时同步更新设计第 7 节的表。
+1. **迁移编号**：设计第 7 节写的是 `0006_channels_routes.sql`（第 2 步一次建齐）与 `0007_webhook_events.sql`（第 3 步）。按子步拆分后为：`0006_channels.sql`（2a）、`0007_routes.sql`（2c-1）、`0008_send_ledger_channel.sql`（2c-2）、`0009_channel_state.sql`（2d）、`0010_webhook_events.sql`（第 3 步）。本计划提交时同步更新设计第 7 节的表。
 2. **`channel test` 需要 `--from`**：设计写的是 `channel test <name> --to <address>`。发件地址必须是该渠道已验证的域名，命令无法替运维选，因此加必填的 `--from`。
 3. **渠道名规则**：设计未定。定为小写字母开头，小写字母、数字、连字符，最长 32；`default` 保留。密钥前缀：大写字母开头，大写字母、数字、下划线，最长 64。
 5. **构建失败的渠道不拦管理命令**：设计第 3.2 节要求缺密钥时 `serve` 拒绝启动。若在 `app.New` 里直接失败，所有 CLI 命令（包括用来修复它的 `channel disable`）都会被拦住。因此：启动时只加载已启用的渠道；构建失败记入 `App.ChannelProblems`，`serve` 发现有问题时拒绝启动，`channel test` 该渠道时报出原因，`channel list/show` 标出 `broken`；其余命令照常运行。
@@ -1696,47 +1697,374 @@ type sendError struct{ err error }
 
 ---
 
-## 2c：路由与按渠道额度（概要）
+## 2c-1：路由规则
 
-**目标**：入队时按规则给每封邮件定渠道；额度按渠道预留。
+**目标**：把规则存进数据库，能查看、能调顺序；规则本身是纯函数。**本期不改变任何邮件的去向** —— 入队时分配渠道、按渠道预留额度、`route test`、发送前检查都在 2c-2。
 
-**迁移 0007**
+### 文件
+
+| 文件 | 动作 | 职责 |
+|---|---|---|
+| `internal/core/route/route.go` | 新建 | `Match`、`Target`、`Rule` 与 `ParseMatch`、`ParseSplit`、`Validate`、`Pick`（纯函数） |
+| `internal/core/route/route_test.go` | 新建 | 解析、顺序、匹配、稳定比例分流 |
+| `internal/store/migrations/0007_routes.sql` | 新建 | `routes` 表 |
+| `internal/store/db_test.go` | 改 | 迁移计数 6→7 |
+| `internal/store/routes.go` | 新建 | `RouteRow` 与规则的增、删、移动、按顺序列出 |
+| `internal/store/routes_test.go` | 新建 | 读写与顺序测试 |
+| `cmd/nibwire/route.go` | 新建 | `route` 命令组 |
+| `cmd/nibwire/root.go` | 改 | 注册 `newRouteCmd()` |
+| `cmd/nibwire/cli_test.go` | 改 | 注册 `routeid`：把 id 从 `route list --json` 里取出来给脚本用 |
+| `cmd/nibwire/testdata/script/routes.txtar` | 新建 | 命令端到端 |
+| `docs/superpowers/plans/2026-10-13-multi-channel-step2.md` | 改 | 本节；子步表与迁移编号 |
+| `docs/superpowers/specs/2026-10-12-multi-channel-sending-design.md` | 改 | 第 7 节迁移表 |
+
+### 决策（设计第 4.1 节留给实现的部分）
+
+1. **存规范形式**：`Match.String()` 给出 `default` / `domain:a.b` / `mailbox:gmail`（域名与 mailbox 名一律小写，去重），`targets` 存 `[{"channel":"aws2","weight":80}]`。`route list` 打印的就是它，同一个条件只有一种写法，读写精确往返。
+2. **单目标规则的 weight 存 1**，打印成渠道名：只有一个目标时权重不是任何东西的份额。
+3. **`route add` 拒绝**：`--match` 与 `--default` 同时给或都不给；`--to` 与 `--split` 同时给或都不给；域名含空格/`@`/`*`；mailbox 不在 `core/providers` 的分类里；权重不是 1..1000000 的整数（上限保证求和不溢出）；同一个 `--split` 里同一渠道出现两次；目标渠道不存在或已停用。
+4. **顺序**：`position` 连续，每次增删移都在一个事务里重排。`--default` 最多一条且永远最后：新增非 default 规则插在它前面（没有 default 时追加在末尾），`route move` 拒绝移动 default 规则本身，也拒绝 `--before` 指向自己。
+5. **只认完整 id**（24 位十六进制，`ids.New()`），与设计第 4.1 节的 `route remove <id>` 一致；id 从 `route list` 取。
+6. **`default` 与已登记渠道的区别**：`default` 永远算存在且启用（它就是 `SES_*` 设置）；其他名字必须已登记且 `enabled`。已启用但密钥缺失（`broken`）的渠道可以被规则引用 —— 它的问题由 `serve` 与 `channel test` 报出，不在这里重复。
+7. **域名匹配用第一个 `@`**，与 `providers.Mailbox` 读地址的方式一致（`a@b@c` 的域名是 `b@c`）。
+
+### Task 0：issue 与分支
+
+- [ ] **Step 1：issue**
+
+已由 coord 开好：#79。下文写作 `#79`。
+
+- [ ] **Step 2：worktree 与分支**
+
+```bash
+git fetch origin
+git worktree add ../nibwire-nib1a -b impl/routes origin/main
+```
+
+2b（#75）正在改 `internal/mailer/engine.go`，本分支不碰它，也不碰 `internal/store/ledger.go`。
+
+### Task 1：`core/route` 的解析
+
+**Files:** `internal/core/route/route.go`、`internal/core/route/route_test.go`
+
+- [ ] **Step 1：写失败的测试**
+
+`internal/core/route/route_test.go`：
+
+```go
+package route
+
+import (
+	"strings"
+	"testing"
+)
+
+// The three stored forms, and what each one reads back as.
+func TestParseMatch(t *testing.T) {
+	for text, want := range map[string]Match{
+		"default":                    {Default: true},
+		"  default  ":                {Default: true},
+		"domain:example.org":         {Domains: []string{"example.org"}},
+		"domain:EXAMPLE.org":         {Domains: []string{"example.org"}},
+		"domain: example.org , a.co": {Domains: []string{"example.org", "a.co"}},
+		"domain:example.org,example.org": {Domains: []string{"example.org"}},
+		"mailbox:gmail":              {Mailboxes: []string{"gmail"}},
+		"mailbox:Gmail,other":        {Mailboxes: []string{"gmail", "other"}},
+	} {
+		got, err := ParseMatch(text)
+		if err != nil {
+			t.Errorf("ParseMatch(%q): %v", text, err)
+			continue
+		}
+		if !equalMatch(got, want) {
+			t.Errorf("ParseMatch(%q) = %+v, want %+v", text, got, want)
+		}
+		if back, err := ParseMatch(got.String()); err != nil || !equalMatch(back, got) {
+			t.Errorf("ParseMatch(%q).String() = %q does not read back (%v)", text, got.String(), err)
+		}
+	}
+}
+
+func TestParseMatchRefusesWhatItCannotRead(t *testing.T) {
+	for text, want := range map[string]string{
+		"":                    "write default, domain:a.b or mailbox:gmail",
+		"example.org":         "write default, domain:a.b or mailbox:gmail",
+		"domain:":             "the list is empty",
+		"domain:exam ple.org": "is not a domain name",
+		"domain:*.example.org": "is not a domain name",
+		"domain:a@b":          "is not a domain name",
+		"mailbox:fastmail":    "use gmail",
+		"kind:x":              `"kind" is not domain or mailbox`,
+	} {
+		_, err := ParseMatch(text)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ParseMatch(%q) = %v, want %q", text, err, want)
+		}
+	}
+}
+```
+
+- [ ] **Step 2：运行，确认失败**
+
+Run: `go test ./internal/core/route -count=1`
+Expected: FAIL，`undefined: Match` / `undefined: ParseMatch`
+
+- [ ] **Step 3：实现**
+
+`internal/core/route/route.go`：
+
+```go
+// Package route decides which channel a message goes out through. Rules are tried in order and the
+// first one that matches wins; a rule with several targets splits traffic between them by weight.
+// Everything here is a function of its arguments — no database, no clock — so the same contact
+// lands in the same share of a split every time.
+package route
+
+import (
+	"errors"
+	"fmt"
+	"hash/fnv"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+
+	"nibwire/internal/core/model"
+	"nibwire/internal/core/providers"
+)
+
+// maxWeight bounds a target's weight, so that adding up a rule's weights cannot overflow.
+const maxWeight = 1_000_000
+
+// domainPattern is what a domain in a rule may look like. It is deliberately not DNS: the point is
+// to catch a wildcard or a stray space, not to decide whether a domain exists.
+var domainPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+```
+
+- [ ] **Step 4：运行，确认通过**
+
+Run: `go test ./internal/core/route -count=1`
+Expected: PASS
+
+- [ ] **Step 5：提交**
+
+```bash
+git add internal/core/route
+git commit -m "feat(route): read the match and split expressions of a routing rule
+
+Refs #79"
+```
+
+### Task 2：匹配、顺序与稳定比例分流
+
+**Files:** `internal/core/route/route.go`、`internal/core/route/route_test.go`
+
+- [ ] **Step 1：写失败的测试**
+
+```go
+// 顺序即优先：第一条命中的生效；没有规则或都不命中时走 default。
+func TestPickTakesTheFirstRuleThatMatches(t *testing.T) { ... }
+
+// 域名大小写不敏感、精确匹配：mail.example.org 不是 example.org。
+func TestDomainMatchIsExactAndCaseInsensitive(t *testing.T) { ... }
+
+// 10 万样本上 80/20 的误差 < 1%，同一个联系人多算几次结果一样，空 contactID 用收件地址。
+func TestSplitIsStableAndProportional(t *testing.T) { ... }
+
+// --default 最多一条且排最后。
+func TestValidateKeepsTheDefaultRuleLast(t *testing.T) { ... }
+```
+
+- [ ] **Step 2：运行，确认失败**
+
+Run: `go test ./internal/core/route -run 'Pick|Split|Validate' -count=1`
+Expected: FAIL，`undefined: Pick`
+
+- [ ] **Step 3：实现**
+
+```go
+// Pick returns the channel a message goes out through: the first rule that matches, or the default
+// channel when none does — the same place a missing default rule would send it.
+//
+// contactID may be empty for one-off mail (a test message has no contact). The address stands in for
+// it, so the same recipient lands in the same share of a split each time.
+func Pick(rules []Rule, contactID, email string) string {
+	for _, rule := range rules {
+		if !rule.Match.matches(email) {
+			continue
+		}
+		return pickTarget(rule, splitKey(contactID, email))
+	}
+	return model.DefaultChannel
+}
+```
+
+- [ ] **Step 4：运行，确认通过**
+
+Run: `go test ./internal/core/route -count=1`
+Expected: PASS（含 10 万样本）
+
+- [ ] **Step 5：提交**
+
+```bash
+git commit -am "feat(route): pick a channel by rule order and stable weighted split
+
+Refs #79"
+```
+
+### Task 3：迁移 0007 与 store 读写
+
+**Files:** `internal/store/migrations/0007_routes.sql`、`internal/store/db_test.go`、`internal/store/routes.go`、`internal/store/routes_test.go`
+
+- [ ] **Step 1：写失败的测试**
+
+`internal/store/routes_test.go`：一轮往返、id 唯一、`--default` 只有一条、新增规则插在 default 前面、删除后位置连续、移动按 `--before`、移动 default 与移到自身被拒绝、未知 id 是 `ErrNotFound`。
+
+- [ ] **Step 2：运行，确认失败**
+
+Run: `go test ./internal/store -run 'Route' -count=1`
+Expected: FAIL，`undefined: RouteRow`
+
+- [ ] **Step 3：迁移**
+
+`internal/store/migrations/0007_routes.sql`：
 
 ```sql
+-- Multi-channel sending, step 2c-1 (plan 2026-10-13-multi-channel-step2.md).
+--
+-- One routing rule, in the order it is tried. match is the stored form of core/route.Match
+-- ('default' | 'domain:a.b,c.d' | 'mailbox:gmail'), targets is a JSON array
+-- ([{"channel":"aws2","weight":80}]); a rule with one target carries weight 1. position is kept
+-- contiguous from 0, and the single default rule, when there is one, is last.
 CREATE TABLE routes (
     id         TEXT PRIMARY KEY,
     position   INTEGER NOT NULL,
-    match      TEXT NOT NULL,   -- 'default' | 'domain:a,b' | 'mailbox:gmail,outlook'
-    targets    TEXT NOT NULL,   -- JSON: [{"channel":"aws2","weight":80}, ...]
+    match      TEXT NOT NULL,
+    targets    TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
--- send_ledger 主键加入 channel（重建并拷贝，旧行记为 default），见设计第 7 节
 ```
 
-**接口**
+`internal/store/db_test.go`：
 
 ```go
-// internal/core/route（纯函数）
-type Target struct{ Channel string; Weight int }
-type Rule struct{ ID string; Match Match; Targets []Target }
-type Match struct{ Default bool; Domains []string; Mailboxes []string }
-func ParseMatch(s string) (Match, error)
-func ParseSplit(s string) ([]Target, error)          // "aws2:80,resend:20"
-func Pick(rules []Rule, contactID, email string) string // 稳定哈希：fnv64a(contactID + "/" + rule.ID)
+const migrationsAtThisRevision = 7
 ```
+
+- [ ] **Step 4：store 代码**
+
+`internal/store/routes.go`：`RouteRow`；`CreateRoute`（拒绝重复 id 与第二条 default，把新规则插在 default 前）；`Route`/`Routes`；`DeleteRoute`；`MoveRoute`；`renumberRoutes` 在一个事务里写连续位置。
+
+- [ ] **Step 5：运行，确认通过**
+
+Run: `go test ./internal/store -run 'Route|Migrate' -count=1`
+Expected: PASS
+
+- [ ] **Step 6：提交**
+
+```bash
+git add internal/store
+git commit -m "feat(store): keep routing rules in a routes table
+
+Refs #79"
+```
+
+### Task 4：`route` 命令组
+
+**Files:** `cmd/nibwire/route.go`、`cmd/nibwire/root.go`
+
+- [ ] **Step 1：命令与实现**
+
+```
+route add (--match <m> | --default) (--to <channel> | --split <a:80,b:20>)
+route remove <id>
+route move <id> --before <id>
+route list
+```
+
+`route add` 先解析（`route.ParseMatch` / `route.ParseSplit`），再在一个 `withApp` 里核对目标渠道（`default` 之外必须已登记且启用），最后一件事才是写库；`route list` 每行 `id\tmatch\ttargets\tstate`，`state` 为 `ok` 或该规则指向的问题（`no channel named x`、`channel x is disabled`）；没有规则时打印一行说明"一切走 default"。
+
+- [ ] **Step 2：跑一遍**
+
+Run: `go build ./... && go test ./cmd/nibwire -run 'Route' -count=1`
+Expected: 现有测试仍通过
+
+- [ ] **Step 3：提交**
+
+```bash
+git add cmd/nibwire/route.go cmd/nibwire/root.go
+git commit -m "feat(cli): add, remove, move and list routing rules
+
+Refs #79"
+```
+
+### Task 5：txtar 端到端
+
+**Files:** `cmd/nibwire/cli_test.go`、`cmd/nibwire/testdata/script/routes.txtar`
+
+- [ ] **Step 1：`routeid` 测试命令**
+
+脚本能断言输出，但不能把输出绑成变量；id 是随机生成的，`route remove`/`route move` 又要它。因此在 `cli_test.go` 的 `Cmds` 里加一个 `routeid`：读 `route list --json` 写出的文件，把某条规则的 id 放进环境变量。
+
+```
+routeid routes.json DOMAIN_ID domain:example.org
+```
+
+- [ ] **Step 2：写脚本**
+
+`cmd/nibwire/testdata/script/routes.txtar`：没有规则时的输出；`--match`/`--default`、`--to`/`--split` 的互斥；各类参数把关；加入顺序与 `--default` 最后；`--default` 只能有一条；`move` 换顺序、`move` default 被拒绝；`remove` 与未知 id；渠道停用后 `route list` 标出、`route add` 拒绝；`default` 永远可用；`audit list --action route.add`。
+
+- [ ] **Step 3：跑脚本**
+
+Run: `go test ./cmd/nibwire -run 'Scripts/routes' -count=1`
+Expected: PASS
+
+- [ ] **Step 4：提交**
+
+```bash
+git add cmd/nibwire/cli_test.go cmd/nibwire/testdata/script/routes.txtar
+git commit -m "test(cli): routes.txtar covers add, list, move and remove
+
+Refs #79"
+```
+
+### Task 6：验证与 PR
+
+- [ ] **Step 1：全量验证**
+
+```bash
+make lint
+make test
+scripts/compose-smoke.sh
+```
+
+Expected: lint 0 issues；测试全部通过（`TestRenderingMarkdownIsLinearOnSlowInputs`、`TestHTMLToTextIsLinearOnSlowInputs` 是已知的、与本次改动无关的偶发失败）；冒烟全部 `ok`（没有规则时行为不变）。
+
+- [ ] **Step 2：推送并开 PR**
+
+PR 描述写明：`Fixes #79`；改动（`core/route`、`0007_routes.sql`、store、`route` CLI）；行为（**规则只存不生效**，入队分配在 2c-2）；`0007` 是纯增量迁移，可直接升级；测试证据。
+
+---
+
+## 2c-2：入队分配与按渠道额度（概要）
+
+**目标**：入队时按规则给每封邮件定渠道；额度按渠道预留。
+
+**迁移 0008**
+
+`send_ledger` 主键加入 `channel`（重建并拷贝，旧行记为 default），见设计第 7 节。
 
 **任务**
 
-1. `core/route`：解析、匹配顺序、`--default` 最多一条且排最后、稳定比例分流（10 万样本误差 < 1%，同一联系人多次结果一致）。
-2. 迁移 0007 与 `store` 的 routes 读写；`send_ledger` 重建；`reserveTx`/`refundTx`/`Reserved`/`ReserveAndInsert`/`ReserveForResume` 加 `channel` 维度：按渠道分组预留，任一渠道不足则整体失败且不留半截预留；全局 `MAX_SENDS_PER_DAY` 与按凭据上限仍按 `day` 汇总所有渠道。
-3. `Engine.Queue`/`QueueStep`/续发/`Test`/`queueSignup`：用 `route.Pick` 给每封邮件定 `Channel`（顺带给 `queueSignup` 补上 `Provider`）；`budgetReason` 指明是哪个渠道不足；`sesQuotaRefusal` 按渠道。
-4. `messages_channel.go`：把 `MessageByProviderID`、`AdoptProviderMessageID`、`MarkMessageSent` 移入；约束"`provider_message_id` 非空后渠道不可改"写成存储层不变量（UPDATE 带 `provider_message_id = ''` 条件）。
-5. `route add/remove/move/list/test` CLI（`fallback` 在 2d）：`route add` 拒绝引用不存在或已停用的渠道；`route list` 标出指向已停用渠道的规则；`route test --newsletter <slug>` 按真实受众输出每条规则、每个渠道的人数，并列出缺验证或额度不足的渠道。
-6. 发送前检查：`core/checks` 的 `domain` 检查改为"所用渠道都已验证该发件域名"，消息列出缺验证的渠道；`TestRunReturnsTenChecksInOrder` 的 ID 与顺序不变，只改消息文本与输入（`Input` 加 `UnverifiedChannels []string`）。
+1. 迁移 0008 与 `send_ledger` 重建；`reserveTx`/`refundTx`/`Reserved`/`ReserveAndInsert`/`ReserveForResume` 加 `channel` 维度：按渠道分组预留，任一渠道不足则整体失败且不留半截预留；全局 `MAX_SENDS_PER_DAY` 与按凭据上限仍按 `day` 汇总所有渠道。
+2. `Engine.Queue`/`QueueStep`/续发/`Test`/`queueSignup`：用 `route.Pick`（2c-1）给每封邮件定 `Channel`（顺带给 `queueSignup` 补上 `Provider`）；`budgetReason` 指明是哪个渠道不足；`sesQuotaRefusal` 按渠道。
+3. `messages_channel.go`：把 `MessageByProviderID`、`AdoptProviderMessageID`、`MarkMessageSent` 移入；约束"`provider_message_id` 非空后渠道不可改"写成存储层不变量（UPDATE 带 `provider_message_id = ''` 条件）。
+4. `route test --newsletter <slug>`：按真实受众输出每条规则、每个渠道的人数，并列出缺验证或额度不足的渠道。
+5. 发送前检查：`core/checks` 的 `domain` 检查改为"所用渠道都已验证该发件域名"，消息列出缺验证的渠道；`TestRunReturnsTenChecksInOrder` 的 ID 与顺序不变，只改消息文本与输入（`Input` 加 `UnverifiedChannels []string`）。
 
 **停用渠道的运行时含义**：入队时若某封邮件命中的规则指向已停用的渠道（单一目标，或比例分流中被选中的目标），入队整体失败并指明规则与渠道，不静默改道；改道是 2d 故障切换的职责。
 
-**升级**：0007 重建 `send_ledger` 后主键变为 `(day, credential_id, channel)`，旧版二进制的 `ON CONFLICT(day, credential_id)` 会失败。升级顺序与 0005 相同：停 `serve` → `nibwire db backup` → 换二进制 → 启动；回滚需要恢复备份。PR 描述必须写明。
+**升级**：0008 重建 `send_ledger` 后主键变为 `(day, credential_id, channel)`，旧版二进制的 `ON CONFLICT(day, credential_id)` 会失败。升级顺序与 0005 相同：停 `serve` → `nibwire db backup` → 换二进制 → 启动；回滚需要恢复备份。PR 描述必须写明。
 
 **验收**：设计第 8 节"路由""额度"两行；现有预算与配额测试通过（无规则时全部归 default，行为不变）。
 
@@ -1744,7 +2072,7 @@ func Pick(rules []Rule, contactID, email string) string // 稳定哈希：fnv64a
 
 ## 2d：故障切换与 MCP（概要）
 
-**迁移 0008**：`channel_fallbacks(channel, position, fallback)`；`channels` 加 `down_reason TEXT NOT NULL DEFAULT ''`、`down_until TEXT`。
+**迁移 0009**：`channel_fallbacks(channel, position, fallback)`；`channels` 加 `down_reason TEXT NOT NULL DEFAULT ''`、`down_until TEXT`。
 
 **任务**
 
