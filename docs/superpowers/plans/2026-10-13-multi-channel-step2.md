@@ -26,6 +26,7 @@
 1. **迁移编号**：设计第 7 节写的是 `0006_channels_routes.sql`（第 2 步一次建齐）与 `0007_webhook_events.sql`（第 3 步）。按子步拆分后为：`0006_channels.sql`（2a）、`0007_routes_ledger.sql`（2c）、`0008_channel_state.sql`（2d）、`0009_webhook_events.sql`（第 3 步）。本计划提交时同步更新设计第 7 节的表。
 2. **`channel test` 需要 `--from`**：设计写的是 `channel test <name> --to <address>`。发件地址必须是该渠道已验证的域名，命令无法替运维选，因此加必填的 `--from`。
 3. **渠道名规则**：设计未定。定为小写字母开头，小写字母、数字、连字符，最长 32；`default` 保留。密钥前缀：大写字母开头，大写字母、数字、下划线，最长 64。
+5. **构建失败的渠道不拦管理命令**：设计第 3.2 节要求缺密钥时 `serve` 拒绝启动。若在 `app.New` 里直接失败，所有 CLI 命令（包括用来修复它的 `channel disable`）都会被拦住。因此：启动时只加载已启用的渠道；构建失败记入 `App.ChannelProblems`，`serve` 发现有问题时拒绝启动，`channel test` 该渠道时报出原因，`channel list/show` 标出 `broken`；其余命令照常运行。
 4. **假发件模式下的渠道**：设置了 `NIBWIRE_FAKE_SES_LOG` 时，每个登记的渠道也用 `Fake`，日志写到 `<NIBWIRE_FAKE_SES_LOG>.<渠道名>`，端到端测试据此确认邮件走了哪个渠道。
 
 ### 第 1 步审查留下、本步必须落实的要求
@@ -35,7 +36,10 @@
 - 邮件的 `channel` 在入队时定下；`provider_message_id` 非空后不得再改渠道；改派只作用于未发送邮件（2c、2d）
 - `events.findMessage` 回退路径：按标签找到的邮件若 `message.Channel` 与事件渠道不同则拒绝；`AdoptProviderMessageID` 加 `AND channel = ?`（2d；第 3 步按渠道路由 webhook 时传入渠道）
 - `messages.go` 已 664 行：2c 改动按渠道查找与改派时，把 `MessageByProviderID`、`AdoptProviderMessageID`、`MarkMessageSent` 及新增的改派函数拆到 `messages_channel.go`
-- 接 Resend/SendGrid 前（第 3、4 步），在 `QuotaReader`/`ratectl.Quota` 文档写明 `Max24HourSend = -1` 表示不限；`Identity` 的 SES 词汇按需泛化
+
+### 留给第 3、4 步
+
+- 接 Resend/SendGrid 前，在 `QuotaReader`/`ratectl.Quota` 文档写明 `Max24HourSend = -1` 表示不限；`Identity` 的 SES 词汇按需泛化
 
 ---
 
@@ -840,7 +844,7 @@ Refs #N"
 
 ### Task 5：启动时加载渠道
 
-**Files:** `internal/app/channels.go`、`internal/app/app.go`、`internal/app/app_channels_test.go`
+**Files:** `internal/app/channels.go`、`internal/app/app.go`、`internal/app/app_channels_test.go`、`cmd/nibwire/serve.go`
 
 - [ ] **Step 1：写失败的测试**
 
@@ -929,20 +933,52 @@ func TestConfiguredChannelsAreLoaded(t *testing.T) {
 	}
 }
 
-// A stored channel this deployment cannot build stops the start, naming the channel and the problem.
-func TestABrokenChannelStopsTheStart(t *testing.T) {
+// A stored channel this deployment cannot build is reported, not fatal: every command still runs
+// (an operator must be able to disable or fix it), and serve refuses to start (CheckChannels).
+func TestABrokenChannelIsReportedNotFatal(t *testing.T) {
 	cfg := testConfig(t, map[string]string{"AWS2_ACCESS_KEY_ID": "AKIA"}) // the secret is missing
 	seed(t, cfg, store.ChannelRow{Name: "aws2", Type: "ses", SecretEnv: "AWS2",
 		Params: map[string]string{"region": "us-east-1"}, Enabled: true})
 
-	_, err := New(context.Background(), cfg, nil)
+	a, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatalf("New refused to open with a broken channel: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	if _, ok := a.Channels.Get("aws2"); ok {
+		t.Fatal("a broken channel is in the registry")
+	}
+	problem := a.ChannelProblems["aws2"]
+	if problem == nil || !strings.Contains(problem.Error(), "AWS2_SECRET_ACCESS_KEY") {
+		t.Fatalf("ChannelProblems[aws2] = %v", problem)
+	}
+	err = a.CheckChannels()
 	if err == nil {
-		t.Fatal("New started with a broken channel")
+		t.Fatal("CheckChannels passed with a broken channel")
 	}
 	for _, want := range []string{"aws2", "AWS2_SECRET_ACCESS_KEY"} {
 		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
+			t.Errorf("CheckChannels error %q does not mention %q", err, want)
 		}
+	}
+}
+
+// A disabled channel is not built at all, so a disabled channel with missing secrets is no problem.
+func TestDisabledChannelsAreNotLoaded(t *testing.T) {
+	cfg := testConfig(t, nil)
+	seed(t, cfg, store.ChannelRow{Name: "off", Type: "ses", SecretEnv: "OFF",
+		Params: map[string]string{"region": "us-east-1"}, Enabled: false})
+	a, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	if _, ok := a.Channels.Get("off"); ok {
+		t.Fatal("a disabled channel was loaded")
+	}
+	if len(a.ChannelProblems) != 0 || a.CheckChannels() != nil {
+		t.Fatalf("problems = %v", a.ChannelProblems)
 	}
 }
 
@@ -961,7 +997,7 @@ func TestNoConfiguredChannelsIsJustTheDefault(t *testing.T) {
 
 - [ ] **Step 2：运行，确认失败**
 
-Run: `go test ./internal/app -run 'Channels|BrokenChannel|JustTheDefault' -count=1`
+Run: `go test ./internal/app -run 'Channels|BrokenChannel|JustTheDefault|NotLoaded' -count=1`
 Expected: FAIL，`a.Channels undefined`
 
 - [ ] **Step 3：实现**
@@ -982,24 +1018,34 @@ import (
 	"nibwire/internal/store"
 )
 
-// loadChannels builds every configured channel next to the default one. A channel this deployment
-// cannot build stops the start: sending through half the configured channels is worse than not
-// starting and saying which one is wrong.
+// loadChannels builds every enabled configured channel next to the default one. A channel this
+// deployment cannot build is left out and reported in problems rather than failing: every command
+// opens the app, and the one that fixes a broken channel must still run. serve refuses to start while
+// there is a problem (App.CheckChannels).
 func loadChannels(ctx context.Context, cfg config.Config, db *store.DB,
-	defaultChannel mailer.Channel) (*mailer.Registry, error) {
+	defaultChannel mailer.Channel) (*mailer.Registry, map[string]error, error) {
 	rows, err := db.Channels(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read channels: %w", err)
+		return nil, nil, fmt.Errorf("read channels: %w", err)
 	}
+	problems := map[string]error{}
 	built := make([]mailer.Channel, 0, len(rows))
 	for _, row := range rows {
+		if !row.Enabled {
+			continue
+		}
 		channel, err := buildChannel(ctx, cfg, row)
 		if err != nil {
-			return nil, fmt.Errorf("channel %s: %w", row.Name, err)
+			problems[row.Name] = err
+			continue
 		}
 		built = append(built, channel)
 	}
-	return mailer.NewRegistry(defaultChannel, built...)
+	registry, err := mailer.NewRegistry(defaultChannel, built...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return registry, problems, nil
 }
 
 // SpecOf is the part of a stored channel that channelspec checks.
@@ -1052,19 +1098,61 @@ func buildChannel(ctx context.Context, cfg config.Config, row store.ChannelRow) 
 	Channels *mailer.Registry
 ```
 
-2. `New` 中 `channel := mailer.NewChannel(...)` 之后加：
+2. `App` 结构再加：
 
 ```go
-	channels, err := loadChannels(ctx, cfg, db, channel)
+	// ChannelProblems are the enabled channels that could not be built, by name. They are left out
+	// of Channels; serve refuses to start while there are any (CheckChannels).
+	ChannelProblems map[string]error
+```
+
+3. `New` 中 `channel := mailer.NewChannel(...)` 之后加：
+
+```go
+	channels, channelProblems, err := loadChannels(ctx, cfg, db, channel)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 ```
 
-3. 返回的 `&App{` 中加 `Channels: channels,`。
+4. 返回的 `&App{` 中加 `Channels: channels, ChannelProblems: channelProblems,`。
 
-注意：`localStandInRate` 是 `app.go` 里已有的常量（500）。若它是无类型常量，`ratectl.Quota{MaxSendRate: localStandInRate}` 可直接编译；若是 `int` 类型常量，改写为 `float64(localStandInRate)`。
+5. `internal/app/channels.go` 末尾加：
+
+```go
+// CheckChannels is nil when every enabled channel was built, and otherwise names each broken one
+// and why. serve calls it before starting: sending through some of the configured channels and
+// silently not others is worse than not starting.
+func (a *App) CheckChannels() error {
+	if len(a.ChannelProblems) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(a.ChannelProblems))
+	for name := range a.ChannelProblems {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	lines := make([]string, 0, len(names))
+	for _, name := range names {
+		lines = append(lines, fmt.Sprintf("channel %s: %v", name, a.ChannelProblems[name]))
+	}
+	return fmt.Errorf("nibwire can't start: %s (fix it, or `nibwire channel disable` it)",
+		strings.Join(lines, "; "))
+}
+```
+
+（import 加 `"sort"`、`"strings"`。）
+
+6. `cmd/nibwire/serve.go` 的 `runServe` 中，`withApp(cmd, func(ctx context.Context, a *app.App) error {` 之后第一句加：
+
+```go
+		if err := a.CheckChannels(); err != nil {
+			return err
+		}
+```
+
+`localStandInRate` 是 `app.go` 里已有的无类型常量（500），可直接用于 `float64` 字段。
 
 - [ ] **Step 4：运行 app 与相关测试**
 
@@ -1075,11 +1163,13 @@ Expected: PASS
 
 ```bash
 git add internal/app
+git add cmd/nibwire/serve.go
 git commit -m "feat(app): load the configured channels at start
 
-Every stored channel is built next to the default one; one this deployment
-cannot build stops the start and says which channel and why. Sending still
-goes through the default channel.
+Every enabled channel is built next to the default one. One this deployment
+cannot build is reported in ChannelProblems instead of failing every command,
+and serve refuses to start until it is fixed or disabled. Sending still goes
+through the default channel.
 
 Refs #N"
 ```
@@ -1147,10 +1237,29 @@ stderr 'no channel named missing'
 
 nibwire channel disable aws2 --yes
 stdout 'disabled aws2'
+stdout 'restart'
 nibwire channel list
 stdout '^aws2\tses\tdisabled'
+! nibwire channel test aws2 --from news@example.net --to reader@example.com
+stderr 'aws2 is disabled'
 nibwire channel enable aws2
 stdout 'enabled aws2'
+stdout 'restart'
+
+# 密钥被删掉之后：渠道标为 broken，管理命令照常可用，测试信与 serve 报出原因。
+env AWS2_SECRET_ACCESS_KEY=
+nibwire channel list
+stdout '^aws2\tses\tbroken\tAWS2'
+nibwire channel show aws2
+stdout 'problem\s+.*AWS2_SECRET_ACCESS_KEY'
+! nibwire channel test aws2 --from news@example.net --to reader@example.com
+stderr 'AWS2_SECRET_ACCESS_KEY'
+! nibwire serve --addr 127.0.0.1:0
+stderr 'channel aws2'
+nibwire channel disable aws2 --yes
+stdout 'disabled aws2'
+nibwire channel list
+stdout '^aws2\tses\tdisabled'
 
 ! nibwire channel disable default --yes
 stderr 'SES_\* settings'
@@ -1231,6 +1340,8 @@ func newChannelCmd() *cobra.Command {
 	test := &cobra.Command{
 		Use:   "test <name>",
 		Short: "Send one email through a channel, outside any campaign",
+		Long: "The email bypasses the suppression list and carries no message id, so delivery, bounce " +
+			"and complaint events for it are not recorded. Use an address you own.",
 		Args:  cobra.ExactArgs(1),
 		RunE:  runChannelTest,
 	}
@@ -1265,6 +1376,7 @@ type channelView struct {
 	Name         string            `json:"name"`
 	Type         string            `json:"type"`
 	Enabled      bool              `json:"enabled"`
+	Problem      string            `json:"problem,omitempty"` // why an enabled channel could not be built
 	Source       string            `json:"source"` // "SES_* settings" or the secret prefix
 	Params       map[string]string `json:"params,omitempty"`
 	Secrets      map[string]bool   `json:"secrets,omitempty"` // variable name → set
@@ -1280,11 +1392,23 @@ func defaultView() channelView {
 
 func viewOf(a *app.App, row store.ChannelRow) channelView {
 	id, secret := channelspec.SESKeys(row.SecretEnv)
+	problem := ""
+	if err := a.ChannelProblems[row.Name]; err != nil {
+		problem = err.Error()
+	}
 	return channelView{
-		Name: row.Name, Type: row.Type, Enabled: row.Enabled, Source: row.SecretEnv, Params: row.Params,
+		Name: row.Name, Type: row.Type, Enabled: row.Enabled, Problem: problem, Source: row.SecretEnv, Params: row.Params,
 		Secrets:      map[string]bool{id: a.Config.Secret(id) != "", secret: a.Config.Secret(secret) != ""},
 		MaxPerSecond: row.MaxPerSecond, MaxPerDay: row.MaxPerDay,
 	}
+}
+
+// stateOf is enabled, disabled, or broken (enabled but not buildable).
+func stateOf(view channelView) string {
+	if view.Problem != "" {
+		return "broken"
+	}
+	return enabledWord(view.Enabled)
 }
 
 func enabledWord(enabled bool) string {
@@ -1341,7 +1465,7 @@ func runChannelList(cmd *cobra.Command, _ []string) error {
 		}
 		for _, view := range views {
 			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\t%s\n",
-				view.Name, view.Type, enabledWord(view.Enabled), view.Source)
+				view.Name, view.Type, stateOf(view), view.Source)
 		}
 		return nil
 	})
@@ -1365,7 +1489,10 @@ func runChannelShow(cmd *cobra.Command, args []string) error {
 		}
 		out := cmd.OutOrStdout()
 		_, _ = fmt.Fprintf(out, "name            %s\ntype            %s\nstate           %s\nsource          %s\n",
-			view.Name, view.Type, enabledWord(view.Enabled), view.Source)
+			view.Name, view.Type, stateOf(view), view.Source)
+		if view.Problem != "" {
+			_, _ = fmt.Fprintf(out, "problem         %s\n", view.Problem)
+		}
 		for _, key := range sortedKeys(view.Params) {
 			_, _ = fmt.Fprintf(out, "%-15s %s\n", key, view.Params[key])
 		}
@@ -1387,6 +1514,12 @@ func runChannelTest(cmd *cobra.Command, args []string) error {
 	return withApp(cmd, func(ctx context.Context, a *app.App) error {
 		channel, ok := a.Channels.Get(args[0])
 		if !ok {
+			if problem := a.ChannelProblems[args[0]]; problem != nil {
+				return fmt.Errorf("%s cannot be built: %w", args[0], problem)
+			}
+			if row, err := a.Store.Channel(ctx, args[0]); err == nil && !row.Enabled {
+				return fmt.Errorf("%s is disabled", args[0])
+			}
 			return fmt.Errorf("no channel named %s", args[0])
 		}
 		subject := "Nibwire channel test: " + channel.Name()
@@ -1424,7 +1557,8 @@ func setChannelEnabled(cmd *cobra.Command, name string, enabled bool) error {
 		}
 		action := "channel." + strings.TrimSuffix(enabledWord(enabled), "d")
 		note(cmd, a, action, name, map[string]any{"name": name})
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", enabledWord(enabled), name)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s %s; restart serve for it to take effect\n",
+			enabledWord(enabled), name)
 		return nil
 	})
 }
@@ -1551,7 +1685,8 @@ type sendError struct{ err error }
 
 **任务**
 
-1. `lane` 与 `NewEngine(…, *Registry, …)`；`Config.RateControl` 改为按渠道创建（`ratectl.Config` 的 Headroom 共用，Cap 取 `min(SEND_RATE_PER_SECOND, channel.MaxPerSecond)`，0 表示不设）。夹具与所有 `NewEngine` 调用点改为传 Registry（只改构造方式，不改断言）。
+1. `lane` 与 `NewEngine(…, *Registry, …)`；每个 lane 一个 `ratectl.Controller`：Headroom 共用 `SEND_RATE_HEADROOM`；Cap 按设计第 6 节——`default` 用 `SEND_RATE_PER_SECOND`，其他渠道用各自的 `max_per_second`（0 表示不设）。夹具与所有 `NewEngine` 调用点改为传 Registry（只改构造方式，不改断言）。
+1b. **按渠道分派**：`SendBatch` 按渠道领取（`ClaimMessages` 加渠道条件，或领取后按渠道分组），每个 lane 有自己的分派循环与工作协程，协程数 `default` 用 `SEND_CONCURRENCY`、其他渠道用 `config.DefaultSendConcurrency`；限速桶在各自 lane 的协程里 `Take`，因此一个被限速的 lane 只占自己的协程，不占其他渠道的。`ClaimMessagesByID`（单封发送）按该消息的渠道走对应 lane。
 2. `deliver` 按 `message.Channel` 取 lane：`lane.bucket.Take`、`lane.channel.Send`；`Send` 的错误包成 `sendError`。
 3. `handleSendError`：`errors.As(cause, &sendError{})` 时用该 lane 的 `channel.Classify`，否则 `ErrorFail`；删除 `Engine.classify`；`onThrottle`/`onSuccess` 作用于该 lane。
 4. `App`：每个渠道一个 `QuotaPoller`（`serve` 中每个 lane 一个 goroutine）；`App.Poller` 改为 `App.Pollers []*mailer.QuotaPoller`；`ReadQuota` 读全部渠道。`sesQuotaRefusal` 与 `SendingRate` 暂按 default 渠道（2c 改为按渠道）。
@@ -1596,8 +1731,12 @@ func Pick(rules []Rule, contactID, email string) string // 稳定哈希：fnv64a
 2. 迁移 0007 与 `store` 的 routes 读写；`send_ledger` 重建；`reserveTx`/`refundTx`/`Reserved`/`ReserveAndInsert`/`ReserveForResume` 加 `channel` 维度：按渠道分组预留，任一渠道不足则整体失败且不留半截预留；全局 `MAX_SENDS_PER_DAY` 与按凭据上限仍按 `day` 汇总所有渠道。
 3. `Engine.Queue`/`QueueStep`/续发/`Test`/`queueSignup`：用 `route.Pick` 给每封邮件定 `Channel`（顺带给 `queueSignup` 补上 `Provider`）；`budgetReason` 指明是哪个渠道不足；`sesQuotaRefusal` 按渠道。
 4. `messages_channel.go`：把 `MessageByProviderID`、`AdoptProviderMessageID`、`MarkMessageSent` 移入；约束"`provider_message_id` 非空后渠道不可改"写成存储层不变量（UPDATE 带 `provider_message_id = ''` 条件）。
-5. `route add/remove/move/fallback(2d)/list/test` CLI；`route test --newsletter <slug>` 按真实受众输出每条规则、每个渠道的人数，并列出缺验证或额度不足的渠道。
+5. `route add/remove/move/list/test` CLI（`fallback` 在 2d）：`route add` 拒绝引用不存在或已停用的渠道；`route list` 标出指向已停用渠道的规则；`route test --newsletter <slug>` 按真实受众输出每条规则、每个渠道的人数，并列出缺验证或额度不足的渠道。
 6. 发送前检查：`core/checks` 的 `domain` 检查改为"所用渠道都已验证该发件域名"，消息列出缺验证的渠道；`TestRunReturnsTenChecksInOrder` 的 ID 与顺序不变，只改消息文本与输入（`Input` 加 `UnverifiedChannels []string`）。
+
+**停用渠道的运行时含义**：入队时若某封邮件命中的规则指向已停用的渠道（单一目标，或比例分流中被选中的目标），入队整体失败并指明规则与渠道，不静默改道；改道是 2d 故障切换的职责。
+
+**升级**：0007 重建 `send_ledger` 后主键变为 `(day, credential_id, channel)`，旧版二进制的 `ON CONFLICT(day, credential_id)` 会失败。升级顺序与 0005 相同：停 `serve` → `nibwire db backup` → 换二进制 → 启动；回滚需要恢复备份。PR 描述必须写明。
 
 **验收**：设计第 8 节"路由""额度"两行；现有预算与配额测试通过（无规则时全部归 default，行为不变）。
 
@@ -1610,7 +1749,8 @@ func Pick(rules []Rule, contactID, email string) string // 稳定哈希：fnv64a
 **任务**
 
 1. `route fallback <channel> --to a,b` 与 `channel enable` 清除不可用状态。
-2. `handleSendError`：`ErrorPause` 把渠道标为不可用（人工恢复）；`ErrorQuota` 标为不可用到额度重置（UTC 次日 0 点）；随后在一个事务里把该 campaign 中该渠道上 `status = pending AND provider_message_id = ''` 的邮件改派给第一个可用、已验证发件域名、额度足够的备用渠道，并把额度从原渠道释放、在新渠道预留；只改派能预留的部分；告警 `channel-down-<name>`；campaign 报告记录改派封数。找不到备用渠道时按现状暂停。
+2. `handleSendError`：`ErrorPause` 把渠道标为不可用（人工恢复）；`ErrorQuota` 标为不可用直到额度恢复——`ses` 渠道由配额轮询读到 `Remaining24h > 0` 时恢复（SES 按滚动 24 小时计），只按 `max_per_day` 计额度的渠道在 UTC 次日 0 点恢复（与 `send_ledger` 的按日记账一致），这是有意的区分；随后在一个事务里把该 campaign 中该渠道上 `status = pending AND provider_message_id = ''` 的邮件改派给第一个可用、已验证发件域名、额度足够的备用渠道，并把额度从原渠道释放、在新渠道预留；只改派能预留的部分；告警 `channel-down-<name>`；campaign 报告记录改派封数。找不到备用渠道时按现状暂停。
+2b. 发送前检查（2c 的 `domain` 检查）扩展到每个所用渠道的 `fallback` 链（设计第 4.6 节）：链上任一渠道未验证发件域名即阻断，并列出缺验证的渠道。
 3. `events.findMessage` 接收渠道；回退路径若 `message.Channel != channel` 则不认；`AdoptProviderMessageID` 的 WHERE 加 `AND channel = ?`。
 4. MCP：`list_channels`、`get_channel`（read）；`test_channel`（send）；`set_channel_enabled`（write）；`list_routes`、`test_routes`（read）；同步更新 `tools_test.go` 的两张清单；新增与修改渠道、路由仍只走 CLI。
 5. 测试：`Fake` 按错误码失败触发改派；备用渠道未验证域名被跳过；额度不足只改派一部分；全部不可用则暂停；`ErrorThrottle`/`ErrorFail` 不改派；已发送（有 `provider_message_id`）的邮件从不改派；`ErrorQuota` 的渠道在次日自动恢复。
