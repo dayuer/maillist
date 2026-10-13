@@ -388,18 +388,8 @@ func (db *DB) Message(ctx context.Context, id string) (model.Message, error) {
 	return m, err
 }
 
-// MarkMessageSent writes back a message the channel accepted.
-func (db *DB) MarkMessageSent(ctx context.Context, id, providerMessageID string, sentAt time.Time) error {
-	return db.Write(ctx, func(tx *sql.Tx) error {
-		result, err := tx.ExecContext(ctx,
-			"UPDATE messages SET status = ?, provider_message_id = ?, sent_at = ?, error = '' WHERE id = ?",
-			string(model.MessageSent), providerMessageID, formatTime(sentAt), id)
-		if err != nil {
-			return err
-		}
-		return requireOneRow(result, "message", id)
-	})
-}
+// MarkMessageSent and the channel-scoped lookups live in messages_channel.go with the claims: an id
+// a provider handed out is only unique within the channel that handed it out.
 
 // MarkMessageFailed records a send that will not be retried.
 func (db *DB) MarkMessageFailed(ctx context.Context, id, message string) error {
@@ -662,35 +652,8 @@ func (db *DB) SetMessageError(ctx context.Context, id, message string) error {
 	})
 }
 
-// messageByProviderIDWhere is MessageByProviderID's condition. Its last term, a non-empty
-// provider_message_id, repeats the partial index's own condition, which is what lets SQLite use it.
-const messageByProviderIDWhere = "channel = ? AND provider_message_id = ? AND provider_message_id <> ''"
-
-// MessageByProviderID loads the message a channel's own id names, which is how most events arrive.
-//
-// The id is only unique within its channel: two providers can hand out the same one, so the lookup
-// names the channel. Requiring a non-empty provider_message_id as well is what lets SQLite answer it
-// from the partial (channel, provider_message_id) index.
-func (db *DB) MessageByProviderID(ctx context.Context, channel, providerMessageID string) (model.Message, error) {
-	message, err := scanMessage(db.sql.QueryRowContext(ctx,
-		"SELECT "+messageColumns+" FROM messages WHERE "+messageByProviderIDWhere, channel, providerMessageID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return model.Message{}, fmt.Errorf("message with provider id %s on channel %s: %w", providerMessageID, channel,
-			ErrNotFound)
-	}
-	return message, err
-}
-
-// AdoptProviderMessageID writes the channel's id onto a message that got an event before the send
-// was written back, so later events find it by id.
-func (db *DB) AdoptProviderMessageID(ctx context.Context, id, providerMessageID string) error {
-	return db.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			"UPDATE messages SET provider_message_id = ? WHERE id = ? AND provider_message_id = ''",
-			providerMessageID, id)
-		return err
-	})
-}
+// messageByProviderIDWhere and the lookups that name a channel are in messages_channel.go, with the
+// claims: an id a provider handed out is only unique within the channel that handed it out.
 
 // HasMessageOfKind reports whether a contact already has a message of this kind.
 func (db *DB) HasMessageOfKind(ctx context.Context, contactID string, kind model.MessageKind) (bool, error) {
