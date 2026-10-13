@@ -75,7 +75,7 @@ func recipients(fake *Fake) string {
 	return strings.Join(to, ",")
 }
 
-// 记在哪个渠道的邮件就从哪个渠道发出：批量领取与按 id 发送都一样。
+// A message goes out through the channel it is on, whether the batch claims it or is handed its id.
 func TestEachMessageGoesOutThroughItsOwnChannel(t *testing.T) {
 	f, second := newLaneFixture(t, 4, nil)
 	ctx := context.Background()
@@ -112,7 +112,8 @@ func TestEachMessageGoesOutThroughItsOwnChannel(t *testing.T) {
 	}
 }
 
-// 每个渠道各有一套限速：aws2 被限速只把 aws2 的速率减半，default 的速率与发送不受影响。
+// Each channel has its own rate: a throttle on aws2 halves aws2's rate and leaves the default
+// channel's rate, and its sends, alone.
 func TestAThrottledChannelSlowsOnlyItself(t *testing.T) {
 	control := ratectl.New(ratectl.Config{Headroom: 0.9})
 	f, second := newLaneFixture(t, 6, func(cfg *Config) {
@@ -160,7 +161,8 @@ func TestAThrottledChannelSlowsOnlyItself(t *testing.T) {
 	}
 }
 
-// 一个渠道的限速桶堵住时，只占用它自己的工作协程：default 照常发完，aws2 的邮件在停止时退回队列。
+// A channel whose bucket is blocked holds only its own workers: the default channel sends all of its
+// mail meanwhile, and aws2's goes back to the queue when the batch stops.
 func TestABlockedChannelDoesNotHoldTheOthers(t *testing.T) {
 	f, second := newLaneFixture(t, 8, nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -221,7 +223,8 @@ func TestABlockedChannelDoesNotHoldTheOthers(t *testing.T) {
 	}
 }
 
-// 引擎自己的错误（这里是已关闭的限速桶）不交给渠道分类：渠道说什么都要暂停，邮件仍按失败记，campaign 不暂停。
+// An error of the engine's own (here a closed rate limiter) is not the channel's to classify: the
+// channel would pause on anything, yet the messages fail and the campaign does not pause.
 func TestAnEngineErrorIsNotTheChannelsToClassify(t *testing.T) {
 	f := newFixture(t, 2)
 	ctx := context.Background()
@@ -256,7 +259,7 @@ func TestAnEngineErrorIsNotTheChannelsToClassify(t *testing.T) {
 	}
 }
 
-// 记在不存在的渠道上的邮件发不出去：直接失败，错误写明渠道。
+// A message on a channel that does not exist can never go out: it fails, naming the channel.
 func TestAMessageOnAnUnknownChannelFails(t *testing.T) {
 	f, _ := newLaneFixture(t, 2, nil)
 	ctx := context.Background()
@@ -297,7 +300,8 @@ func TestAMessageOnAnUnknownChannelFails(t *testing.T) {
 	}
 }
 
-// 记在已停用或构建失败的渠道上的邮件：退回队列、不计失败，campaign 暂停，原因指明渠道。
+// A message on a channel that is disabled, broken or not loaded goes back to the queue without
+// counting as failed, and its campaign pauses with a reason that names the channel.
 func TestAMessageOnAnUnavailableChannelPausesItsCampaign(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -306,7 +310,7 @@ func TestAMessageOnAnUnavailableChannelPausesItsCampaign(t *testing.T) {
 		want    []string
 	}{
 		{"disabled", store.ChannelRow{Name: "off", Type: "ses", SecretEnv: "OFF", Enabled: false}, nil,
-			[]string{"channel off is disabled"}},
+			[]string{"channel off is disabled", "restart serve"}},
 		{"broken", store.ChannelRow{Name: "broke", Type: "ses", SecretEnv: "BROKE", Enabled: true},
 			errors.New("set both BROKE_ACCESS_KEY_ID and BROKE_SECRET_ACCESS_KEY"),
 			[]string{"channel broke could not be loaded", "BROKE_SECRET_ACCESS_KEY"}},
@@ -358,8 +362,8 @@ func TestAMessageOnAnUnavailableChannelPausesItsCampaign(t *testing.T) {
 	}
 }
 
-// default 用 SEND_RATE_PER_SECOND 与 SEND_CONCURRENCY；其他渠道用自己的 max_per_second 与 ChannelConcurrency，
-// 并沿用同一个 headroom（设计第 6 节）。
+// The default lane runs at SEND_RATE_PER_SECOND with SEND_CONCURRENCY; every other lane is capped by
+// its own max_per_second, runs ChannelConcurrency sends at once, and shares the headroom (design §6).
 func TestEachLaneHasItsOwnCapAndConcurrency(t *testing.T) {
 	control := ratectl.New(ratectl.Config{Headroom: 0.9, Cap: 100})
 	f, _ := newLaneFixture(t, 1, func(cfg *Config) {
@@ -399,6 +403,74 @@ func TestEachLaneHasItsOwnCapAndConcurrency(t *testing.T) {
 	}
 	if got := f.engine.laneConcurrency(aws2); got != 7 {
 		t.Fatalf("aws2 concurrency = %d, want 7", got)
+	}
+}
+
+// The stray claim scans the pending queue (no index covers messages.channel until step 2c), so Run
+// does not make it on every poll: by default forty poll intervals apart, and never under ten seconds.
+func TestStraysArePolledFarLessOftenThanLanes(t *testing.T) {
+	cases := []struct {
+		poll, stray, want time.Duration
+	}{
+		{250 * time.Millisecond, 0, 10 * time.Second},
+		{time.Second, 0, 40 * time.Second},
+		{10 * time.Millisecond, 0, 10 * time.Second},
+		{10 * time.Millisecond, 300 * time.Millisecond, 300 * time.Millisecond},
+	}
+	for _, c := range cases {
+		engine := &Engine{cfg: Config{PollInterval: c.poll, StrayInterval: c.stray}}
+		if got := engine.strayInterval(); got != c.want {
+			t.Errorf("poll %v, stray %v: interval = %v, want %v", c.poll, c.stray, got, c.want)
+		}
+	}
+}
+
+// In Run the default lane sends on its own short poll while a stray waits for the stray poll, and
+// the stray is still dealt with once that comes round.
+func TestRunPicksUpStraysOnTheirOwnLongerInterval(t *testing.T) {
+	f, _ := newLaneFixture(t, 2, func(cfg *Config) { cfg.StrayInterval = 600 * time.Millisecond })
+	messages := queueOn(t, f, func(i int) string {
+		if i == 0 {
+			return model.DefaultChannel
+		}
+		return "nowhere"
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() { done <- f.engine.Run(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Run = %v", err)
+		}
+	}()
+
+	status := func(id string) model.MessageStatus {
+		t.Helper()
+		message, err := f.db.Message(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return message.Status
+	}
+	for status(messages[0].ID) != model.MessageSent {
+		if time.Since(start) > 5*time.Second {
+			t.Fatal("the default lane did not send")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if time.Since(start) < 500*time.Millisecond && status(messages[1].ID) != model.MessagePending {
+		t.Fatalf("the stray was claimed at %v, before its own interval", time.Since(start))
+	}
+	for status(messages[1].ID) != model.MessageFailed {
+		if time.Since(start) > 10*time.Second {
+			t.Fatal("the stray was never picked up")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if elapsed := time.Since(start); elapsed < 550*time.Millisecond {
+		t.Fatalf("the stray was dealt with after %v, before its interval of 600ms", elapsed)
 	}
 }
 

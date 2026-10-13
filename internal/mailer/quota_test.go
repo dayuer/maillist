@@ -99,7 +99,8 @@ func TestNeverHavingReadAQuotaWarnsOnce(t *testing.T) {
 	}
 }
 
-// 其他渠道的配额读不到时，告警带上渠道名，不与 default 的告警共用冷却。
+// Another channel's unreadable quota alerts under its own name, so it does not share the default
+// channel's cooldown.
 func TestAChannelsUnreadableQuotaAlertsUnderItsOwnName(t *testing.T) {
 	ctx := context.Background()
 	db := newQuotaTestStore(t)

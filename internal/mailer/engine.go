@@ -39,6 +39,9 @@ type Config struct {
 	Limits         model.Limits
 	// PollInterval is how often Run looks for work.
 	PollInterval time.Duration
+	// StrayInterval is how often Run looks for messages on a channel with no lane; zero means the
+	// default (see strayInterval).
+	StrayInterval time.Duration
 	// SendConcurrency is how many sends may be in flight at once (SEND_CONCURRENCY). One makes the
 	// engine behave exactly as it did before this phase: a single file of messages.
 	SendConcurrency int
@@ -985,22 +988,29 @@ func (e *Engine) settle(ctx context.Context, campaignID string) error {
 //
 // Each lane polls on its own, and so do the strays: a channel that is throttled or slow keeps only
 // its own loop waiting, and another channel's mail goes out as soon as it is queued (multi-channel
-// design §6). The first loop to fail stops the others, and its error is Run's.
+// design §6). The strays poll far less often (strayInterval): they are rare, nothing about them is
+// urgent, and their claim is a write that scans the pending rows. The first loop to fail stops the
+// others, and its error is Run's.
 func (e *Engine) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	parts := make([]batchPart, 0, len(e.order)+1)
-	for _, l := range e.order {
-		parts = append(parts, func(ctx context.Context) (BatchResult, error) { return e.sendLane(ctx, l) })
+	type loop struct {
+		part     batchPart
+		interval time.Duration
 	}
-	parts = append(parts, e.sendStrayBatch)
-	errs := make(chan error, len(parts))
+	loops := make([]loop, 0, len(e.order)+1)
+	for _, l := range e.order {
+		loops = append(loops, loop{func(ctx context.Context) (BatchResult, error) { return e.sendLane(ctx, l) },
+			e.cfg.PollInterval})
+	}
+	loops = append(loops, loop{e.sendStrayBatch, e.strayInterval()})
+	errs := make(chan error, len(loops))
 	var wg sync.WaitGroup
-	for _, part := range parts {
+	for _, each := range loops {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := e.poll(ctx, part); err != nil {
+			if err := e.poll(ctx, each.part, each.interval); err != nil {
 				errs <- err
 				cancel()
 			}
@@ -1011,10 +1021,28 @@ func (e *Engine) Run(ctx context.Context) error {
 	return <-errs
 }
 
-// poll runs one part of the batch until ctx is cancelled: on every tick, as many times as it finds
-// work.
-func (e *Engine) poll(ctx context.Context, part batchPart) error {
-	ticker := time.NewTicker(e.cfg.PollInterval)
+// minStrayInterval is the shortest default interval between two stray claims.
+const minStrayInterval = 10 * time.Second
+
+// strayInterval is how often Run looks for strays: Config.StrayInterval, or by default forty poll
+// intervals and never less than minStrayInterval.
+//
+// The stray claim matches no index until step 2c's migration adds one on messages.channel, so on a
+// deployment whose every message is on a lane it scans the whole pending queue to find nothing, and
+// holds the one write connection while it does. Done every PollInterval, that halved the default
+// lane's claims at 200,000 pending (#80 review). A stray waits at most this long; a CLI drain
+// (SendBatch) still looks for them on every batch.
+func (e *Engine) strayInterval() time.Duration {
+	if e.cfg.StrayInterval > 0 {
+		return e.cfg.StrayInterval
+	}
+	return max(40*e.cfg.PollInterval, minStrayInterval)
+}
+
+// poll runs one part of the batch until ctx is cancelled: on every tick of interval, as many times as
+// it finds work.
+func (e *Engine) poll(ctx context.Context, part batchPart, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -1437,7 +1465,12 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 	// A test goes out through the channel its message is on: the default one until step 2c routes.
 	l, ok := e.laneFor(message.Channel)
 	if !ok {
-		return TestResult{}, fmt.Errorf("no channel named %s is loaded", message.Channel)
+		err := fmt.Errorf("no channel named %s is loaded", message.Channel)
+		// The message is already claimed; left so, the next start would recover it as unknown.
+		if markErr := e.store.MarkMessageFailed(ctx, message.ID, err.Error()); markErr != nil {
+			e.log.Error("mark failed", "message", message.ID, "error", markErr)
+		}
+		return TestResult{}, err
 	}
 	sent, err := e.deliver(ctx, l, message, loaded, &subject)
 	if err != nil {

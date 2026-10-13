@@ -56,7 +56,17 @@ func (e *Engine) sendStrays(ctx context.Context, strays []model.Message) (BatchR
 	for i, message := range strays {
 		channel := messageChannel(message)
 		if _, read := reasons[channel]; !read {
-			reason, found, err := e.channelUnavailable(ctx, channel)
+			// On the detached context, like the rest of this bookkeeping: these messages are already
+			// claimed, and a shutdown landing on this read must not turn into Run's error.
+			var (
+				reason string
+				found  bool
+			)
+			err := e.writeBack(ctx, func(readCtx context.Context) error {
+				var err error
+				reason, found, err = e.channelUnavailable(readCtx, channel)
+				return err
+			})
 			if err != nil {
 				e.releaseAll(ctx, strays[i:])
 				return result, err
@@ -123,12 +133,14 @@ func (e *Engine) channelUnavailable(ctx context.Context, channel string) (reason
 	}
 	switch problem := e.cfg.ChannelProblems[channel]; {
 	case !row.Enabled:
-		return fmt.Sprintf("channel %s is disabled: enable it, then resume the campaign", channel), true, nil
+		// Lanes are built when the process starts, so enabling is not enough on its own.
+		return fmt.Sprintf("channel %s is disabled: enable it, restart serve, then resume the campaign",
+			channel), true, nil
 	case problem != nil:
-		return fmt.Sprintf("channel %s could not be loaded (%v): fix it, restart, then resume the "+
-			"campaign", channel, problem), true, nil
+		return fmt.Sprintf("channel %s could not be loaded (%v): fix it, restart serve, then resume "+
+			"the campaign", channel, problem), true, nil
 	default:
-		return fmt.Sprintf("channel %s is not loaded in this process: restart it, then resume the "+
+		return fmt.Sprintf("channel %s is not loaded in this process: restart serve, then resume the "+
 			"campaign", channel), true, nil
 	}
 }
