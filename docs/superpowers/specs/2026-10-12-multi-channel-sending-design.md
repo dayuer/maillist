@@ -246,13 +246,15 @@ Resend 与 SendGrid 的具体错误码、字段名和签名算法，在实现时
 
 ## 7. 数据库
 
-迁移分三个文件，随交付步骤落地（第 1 步执行时由一个文件拆分而来，见计划"与设计的偏离"）：
+迁移随交付步骤分文件落地（第 2 步再按子步 2a–2d 拆分，见 `docs/superpowers/plans/2026-10-13-multi-channel-step2.md`）（第 1 步执行时由一个文件拆分而来，见计划"与设计的偏离"）：
 
 | 文件 | 步骤 | 内容 |
 |---|---|---|
 | `0005_message_channel.sql` | 1（已实现） | `messages.channel`；`messages`、`events` 的 `ses_message_id` 改名 `provider_message_id`；唯一部分索引 `messages_channel_provider_message_id ON messages(channel, provider_message_id) WHERE provider_message_id <> ''` |
-| `0006_channels_routes.sql` | 2 | `channels`、`routes`、`channel_fallbacks`；`send_ledger` 重建 |
-| `0007_webhook_events.sql` | 3 | `webhook_events` |
+| `0006_channels.sql` | 2a | `channels` |
+| `0007_routes_ledger.sql` | 2c | `routes`；`send_ledger` 重建（主键加 `channel`） |
+| `0008_channel_state.sql` | 2d | `channel_fallbacks`；`channels.down_reason`、`channels.down_until` |
+| `0009_webhook_events.sql` | 3 | `webhook_events` |
 
 0005 是第一个改列名（非纯增量）的迁移：新版二进制打开数据库即迁移，迁移后旧版 `serve` 与回滚到旧版都会因找不到 `ses_message_id` 而失败。升级顺序必须是：停 `serve` → `nibwire db backup` → 换二进制 → 启动。
 
