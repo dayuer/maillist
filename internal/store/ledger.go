@@ -236,8 +236,9 @@ func (db *DB) ReservedByChannel(ctx context.Context, day, credentialID string) (
 	return out, nil
 }
 
-// chargeOf is a step's charge: how many of its messages each channel carries.
-func chargeOf(messages []model.Message) Charge {
+// ChargeOf is a step's charge: how many of its messages each channel carries. It is what a step of
+// messages is reserved for, and what the engine names a short channel from.
+func ChargeOf(messages []model.Message) Charge {
 	charge := Charge{}
 	for _, message := range messages {
 		charge[channelOf(message)]++

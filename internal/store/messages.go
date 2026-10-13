@@ -202,7 +202,7 @@ func (db *DB) ReserveAndInsert(ctx context.Context, day, credentialID string, li
 	// The charge is what the messages are: one reservation per channel they go through. Deriving it
 	// from them rather than taking it as an argument is what keeps a caller from paying for fewer
 	// messages than it writes.
-	charge := chargeOf(messages)
+	charge := ChargeOf(messages)
 	first := messages[:min(InsertChunkSize, len(messages))]
 	var paid Charge
 	err = db.Write(ctx, func(tx *sql.Tx) error {

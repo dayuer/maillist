@@ -17,6 +17,7 @@ import (
 	"nibwire/internal/core/model"
 	"nibwire/internal/core/providers"
 	"nibwire/internal/core/ratectl"
+	"nibwire/internal/core/route"
 	"nibwire/internal/core/rules"
 	"nibwire/internal/core/sign"
 	"nibwire/internal/core/slug"
@@ -131,30 +132,38 @@ func (e *Engine) SendingRate() SendingRate {
 // would leave the campaign looking half sent with no record of why, and the operator is the one who
 // gets to decide to split a send: that is what --limit is for.
 //
-// It reads the default channel's account: every message is queued on that channel until step 2c
-// routes them, and 2c makes this check per channel.
-func (e *Engine) sesQuotaRefusal(n int) string {
-	control := e.defaultLane().control
-	if control == nil {
-		return ""
+// It is asked per channel, of the account behind the channel the mail would go out through: one
+// account's allowance running out must not stop another channel's mail.
+func (e *Engine) sesQuotaRefusal(charge store.Charge) string {
+	for _, channel := range charge.Channels() {
+		n := charge[channel]
+		l, ok := e.laneFor(channel)
+		if !ok || l.control == nil {
+			continue
+		}
+		// An allowance nobody has read is not an allowance of zero. ratectl answers 0 there, and
+		// refusing every send on that number would turn "the quota could not be read" into "the
+		// deployment cannot send at all" — the opposite of what D8-2 chose: one alert and one email
+		// per second, slowly, which is what the rate floor is for.
+		if _, known := l.control.Quota(); !known {
+			continue
+		}
+		remaining := l.control.Remaining24h()
+		if n <= remaining {
+			continue
+		}
+		account := "the SES account"
+		if channel != model.DefaultChannel {
+			account = "the SES account behind channel " + channel
+		}
+		if remaining <= 0 {
+			return fmt.Sprintf("%s has no sends left in its 24-hour window and this step is %d: the "+
+				"window opens as the previous day's sends age out", account, n)
+		}
+		return fmt.Sprintf("%s has %d sends left in its 24-hour window and this step is %d: send it "+
+			"in steps of at most %d, or wait for the window to reset", account, remaining, n, remaining)
 	}
-	// An allowance nobody has read is not an allowance of zero. ratectl answers 0 there, and refusing
-	// every send on that number would turn "the quota could not be read" into "the deployment cannot
-	// send at all" — the opposite of what D8-2 chose: one alert and one email per second, slowly,
-	// which is what the rate floor is for.
-	if _, known := control.Quota(); !known {
-		return ""
-	}
-	remaining := control.Remaining24h()
-	if n <= remaining {
-		return ""
-	}
-	if remaining <= 0 {
-		return fmt.Sprintf("the SES account has no sends left in its 24-hour window and this step is "+
-			"%d: the window opens as the previous day's sends age out", n)
-	}
-	return fmt.Sprintf("the SES account has %d sends left in its 24-hour window and this step is %d: "+
-		"send it in steps of at most %d, or wait for the window to reset", remaining, n, remaining)
+	return ""
 }
 
 // QueueResult is what Queue and QueueStep report back.
@@ -1117,11 +1126,14 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		//
 		// What the resume spends is what is still queued, not the whole list: asking for the rest of a
 		// campaign that has fifty messages left would refuse a resume that fits.
-		unfinished, err := e.store.CountUnfinishedCampaignMessages(ctx, campaignID)
+		// What is still queued, per channel — what this resume spends, and what the account's
+		// allowance and the day's budgets are asked about. Its total is the "unfinished" count this
+		// used to read separately.
+		unfinishedCharge, err := e.store.ChargeOfCampaign(ctx, campaignID)
 		if err != nil {
 			return QueueResult{}, err
 		}
-		if refusal := e.sesQuotaRefusal(unfinished); refusal != "" {
+		if refusal := e.sesQuotaRefusal(unfinishedCharge); refusal != "" {
 			return QueueResult{Reason: refusal}, nil
 		}
 		// And if the campaign was reserved on an earlier day, today's ledger has never seen these
@@ -1139,18 +1151,13 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 			if err != nil {
 				return QueueResult{}, err
 			}
-			unfinishedCharge, err := e.store.ChargeOfCampaign(ctx, campaignID)
-			if err != nil {
-				return QueueResult{}, err
-			}
-			fits, err := e.store.ReserveForResume(ctx, day, pool, campaignID, unfinishedCharge,
-				store.Limits{Global: e.cfg.Limits.MaxSendsPerDay, Credential: credentialMax})
+			limits := e.dayLimits(credentialMax)
+			fits, err := e.store.ReserveForResume(ctx, day, pool, campaignID, unfinishedCharge, limits)
 			if err != nil {
 				return QueueResult{}, err
 			}
 			if !fits {
-				return QueueResult{Reason: e.budgetReason(ctx, day, pool, unfinished,
-					e.cfg.Limits.MaxSendsPerDay, credentialMax)}, nil
+				return QueueResult{Reason: e.budgetReason(ctx, day, pool, unfinishedCharge, limits)}, nil
 			}
 		}
 	} else {
@@ -1178,9 +1185,19 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		if err != nil {
 			return QueueResult{}, err
 		}
-		messages, err := e.stepMessages(ctx, campaign, newsletter, audience, previous)
+		pick, err := e.pickerFor(ctx)
 		if err != nil {
 			return QueueResult{}, err
+		}
+		messages, err := e.stepMessages(ctx, campaign, newsletter, audience, previous, pick)
+		if err != nil {
+			return QueueResult{}, err
+		}
+		stepCharge := store.ChargeOf(messages)
+		// A rule that sends part of this issue to a channel this deployment cannot send through is
+		// refused whole, before anything is written or charged, and says which channel.
+		if refusal := e.channelRefusal(stepCharge); refusal != "" {
+			return QueueResult{Reason: refusal}, nil
 		}
 
 		// D15: the whole step is reserved up front, so two campaigns cannot overshoot the day
@@ -1197,20 +1214,19 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		}
 		// Checked before the day is charged: a step the account cannot send must not spend the
 		// deployment's own budget either, or a refused send would keep the next one from going out.
-		if refusal := e.sesQuotaRefusal(len(messages)); refusal != "" {
+		if refusal := e.sesQuotaRefusal(stepCharge); refusal != "" {
 			return QueueResult{Reason: refusal}, nil
 		}
 		// The reservation and every message of the step are written together, so there is nothing left
 		// to write here and nothing to refund if the process dies: either the step is in and paid for,
 		// or it is not there at all (audit M5, phase 9 #38).
-		fits, _, err := e.store.ReserveAndInsert(ctx, day, pool,
-			store.Limits{Global: e.cfg.Limits.MaxSendsPerDay, Credential: credentialMax}, messages)
+		limits := e.dayLimits(credentialMax)
+		fits, _, err := e.store.ReserveAndInsert(ctx, day, pool, limits, messages)
 		if err != nil {
 			return QueueResult{}, err
 		}
 		if !fits {
-			return QueueResult{Reason: e.budgetReason(ctx, day, pool, len(messages), e.cfg.Limits.MaxSendsPerDay,
-				credentialMax)}, nil
+			return QueueResult{Reason: e.budgetReason(ctx, day, pool, stepCharge, limits)}, nil
 		}
 		if recipients, lastChance, err = e.store.CountCampaignMessages(ctx, campaignID); err != nil {
 			return QueueResult{}, err
@@ -1274,10 +1290,10 @@ func (e *Engine) assignArchiveSlug(ctx context.Context, campaign *model.Campaign
 // step from writing the same message twice. The contacts the split puts to sleep are marked dormant
 // here, and counted so the campaign's report says how many left the list quietly.
 func (e *Engine) stepMessages(ctx context.Context, campaign model.Campaign, newsletter model.Newsletter,
-	audience []model.Contact, previous map[string]model.MessageKind) ([]model.Message, error) {
+	audience []model.Contact, previous map[string]model.MessageKind, pick picker) ([]model.Message, error) {
 	settings := cleanup.SettingsOf(newsletter)
 	if !settings.Enabled {
-		return toMessages(campaign, audience), nil
+		return toMessages(campaign, audience, pick), nil
 	}
 	split := cleanup.SplitAudience(audience, cleanup.SplitInput{
 		Settings: settings, Limit: campaign.AudienceLimit, Previous: previous, Now: time.Now().UTC(),
@@ -1300,13 +1316,14 @@ func (e *Engine) stepMessages(ctx context.Context, campaign model.Campaign, news
 			}
 		}
 	}
-	messages := toMessages(campaign, split.Issue)
+	messages := toMessages(campaign, split.Issue, pick)
 	for _, contact := range split.LastChance {
 		messages = append(messages, model.Message{
 			ID: ids.New(), Kind: model.KindLastChance,
 			CampaignID: campaign.ID, NewsletterID: campaign.NewsletterID,
 			ContactID: contact.ID, Email: contact.Email,
 			Provider: providers.Mailbox(contact.Email),
+			Channel:  pick.pick(contact.ID, contact.Email),
 			Status:   model.MessagePending, CreatedAt: time.Now().UTC(),
 		})
 	}
@@ -1365,22 +1382,29 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 	}
 	// The fresh ones are the ones this step has not reached, so there is no "already got it" to
 	// consult: the split judges each of them on their own.
-	messages, err := e.stepMessages(ctx, campaign, newsletter, fresh, nil)
+	pick, err := e.pickerFor(ctx)
 	if err != nil {
 		return QueueResult{}, err
 	}
-	if refusal := e.sesQuotaRefusal(len(messages)); refusal != "" {
+	messages, err := e.stepMessages(ctx, campaign, newsletter, fresh, nil, pick)
+	if err != nil {
+		return QueueResult{}, err
+	}
+	stepCharge := store.ChargeOf(messages)
+	if refusal := e.channelRefusal(stepCharge); refusal != "" {
+		return QueueResult{Reason: refusal}, nil
+	}
+	if refusal := e.sesQuotaRefusal(stepCharge); refusal != "" {
 		return QueueResult{Reason: refusal}, nil
 	}
 	// As above: the whole step and its reservation are one write.
-	fits, _, err := e.store.ReserveAndInsert(ctx, day, pool,
-		store.Limits{Global: e.cfg.Limits.MaxSendsPerDay, Credential: credentialMax}, messages)
+	limits := e.dayLimits(credentialMax)
+	fits, _, err := e.store.ReserveAndInsert(ctx, day, pool, limits, messages)
 	if err != nil {
 		return QueueResult{}, err
 	}
 	if !fits {
-		return QueueResult{Reason: e.budgetReason(ctx, day, pool, len(messages), e.cfg.Limits.MaxSendsPerDay,
-			credentialMax)}, nil
+		return QueueResult{Reason: e.budgetReason(ctx, day, pool, stepCharge, limits)}, nil
 	}
 	recipients, lastChance, err := e.store.CountCampaignMessages(ctx, campaignID)
 	if err != nil {
@@ -1433,10 +1457,17 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 		return TestResult{}, errors.New(problem)
 	}
 
+	// A test has no contact, so the rules are matched on the address being tested — the same stand-in
+	// they use for a confirmation (#76).
+	pick, err := e.pickerFor(ctx)
+	if err != nil {
+		return TestResult{}, err
+	}
 	message := model.Message{
 		ID: ids.New(), Kind: model.KindTest, CampaignID: campaignID,
 		NewsletterID: newsletter.ID, ContactID: rules.TestContactID, Email: email,
 		Provider: providers.Mailbox(email),
+		Channel:  e.oneOffChannel(pick, rules.TestContactID, email),
 		Status:   model.MessagePending, CreatedAt: time.Now().UTC(),
 	}
 	if _, err := e.store.InsertMessages(ctx, []model.Message{message}); err != nil {
@@ -1517,6 +1548,86 @@ func (e *Engine) resolveCharge(ctx context.Context, charge Charge) (pool string,
 	return credential.ID, credential.DailyBudget, nil
 }
 
+// dayLimits are what a reservation is checked against: the deployment's own day total, the
+// credential's, and each channel's own max_per_day (0 for a channel that has none, the default
+// channel included — its account's 24-hour quota is the ceiling there, and it is checked as a quota).
+func (e *Engine) dayLimits(credentialMax int) store.Limits {
+	channels := map[string]int{}
+	for name, limit := range e.cfg.ChannelLimits {
+		if limit.MaxPerDay > 0 {
+			channels[name] = limit.MaxPerDay
+		}
+	}
+	return store.Limits{Global: e.cfg.Limits.MaxSendsPerDay, Credential: credentialMax, Channels: channels}
+}
+
+// picker decides which channel a message goes out through, from the routing rules as they stand.
+type picker struct {
+	rules []route.Rule
+}
+
+// pickerFor reads the rules once for a whole step: a campaign of a hundred thousand messages must not
+// ask the database a hundred thousand times for something that cannot change underneath it.
+func (e *Engine) pickerFor(ctx context.Context) (picker, error) {
+	rows, err := e.store.Routes(ctx)
+	if err != nil {
+		return picker{}, err
+	}
+	rules := make([]route.Rule, 0, len(rows))
+	for _, row := range rows {
+		rules = append(rules, route.Rule{ID: row.ID, Match: row.Match, Targets: row.Targets})
+	}
+	return picker{rules: rules}, nil
+}
+
+// pick is the channel a message to this address goes through: the first rule that matches, or the
+// default channel when none does — a deployment with no rules sends exactly as it did before there
+// were any.
+func (p picker) pick(contactID, email string) string {
+	return route.Pick(p.rules, contactID, email)
+}
+
+// cannotSendThrough is why this process cannot send through a channel, or "" when it can. A channel
+// that is disabled, or that could not be built, has no lane: nothing would ever claim its mail, so a
+// message recorded on it would sit there.
+func (e *Engine) cannotSendThrough(channel string) string {
+	if _, ok := e.laneFor(channel); ok {
+		return ""
+	}
+	if problem := e.cfg.ChannelProblems[channel]; problem != nil {
+		return fmt.Sprintf("channel %s could not be loaded (%v)", channel, problem)
+	}
+	return fmt.Sprintf("channel %s is not loaded in this process", channel)
+}
+
+// channelRefusal is why a step cannot be queued as it stands: the rules sent part of it to a channel
+// this deployment cannot send through. The step is refused whole rather than quietly sent another
+// way — which channel mail leaves through is the operator's decision, and 2d's fallback chain is what
+// reassigns it once a channel is known to be down.
+func (e *Engine) channelRefusal(charge store.Charge) string {
+	for _, channel := range charge.Channels() {
+		if reason := e.cannotSendThrough(channel); reason != "" {
+			return reason + ": fix it, or change the rule that sends there, then queue again"
+		}
+	}
+	return ""
+}
+
+// oneOffChannel is the channel for a message that is not part of a campaign: a confirmation, a
+// welcome, a test. It follows the rules too — there is no second set of rules for single messages —
+// except that it falls back to the default channel when the rule sends it to a channel this process
+// cannot use: a subscriber waiting for a confirmation that will never come is worse than one sent the
+// old way, and a one-off has no campaign to pause and no operator watching it (#76).
+func (e *Engine) oneOffChannel(p picker, contactID, email string) string {
+	channel := p.pick(contactID, email)
+	if reason := e.cannotSendThrough(channel); reason != "" {
+		e.log.Warn("a one-off message falls back to the default channel",
+			"channel", channel, "to", email, "reason", reason)
+		return model.DefaultChannel
+	}
+	return channel
+}
+
 // budgetReason says which ceiling a step ran into, and how much room is left under it.
 //
 // Both are checked before anything is written, and the global one first, so on the refusal path the
@@ -1524,24 +1635,39 @@ func (e *Engine) resolveCharge(ctx context.Context, charge Charge) (pool string,
 // daily_budget" are different answers to whoever reads the job's last_error, and guessing wrong sends
 // them looking at the wrong number — but the number they need to act on is the room that is left, not
 // the ceiling's name. That is what tells them to wait for tomorrow or to send a smaller step.
-func (e *Engine) budgetReason(ctx context.Context, day, pool string, messages, globalMax,
-	credentialMax int) string {
-	if globalMax > 0 {
-		if reserved, err := e.store.Reserved(ctx, day, ""); err == nil && reserved+messages > globalMax {
-			return fmt.Sprintf("the daily send budget is spent: %d of MAX_SENDS_PER_DAY are already "+
-				"reserved, so there is room for %d more today and this step is %d",
-				reserved, max(globalMax-reserved, 0), messages)
+func (e *Engine) budgetReason(ctx context.Context, day, pool string, charge store.Charge,
+	limits store.Limits) string {
+	// A channel's own ceiling is looked at first: it is the one an operator can do something about,
+	// by raising that channel's --max-per-day or by moving the rule off it.
+	if byChannel, err := e.store.ReservedByChannel(ctx, day, pool); err == nil {
+		for _, channel := range charge.Channels() {
+			channelMax := limits.Channels[channel]
+			if channelMax <= 0 || byChannel[channel]+charge[channel] <= channelMax {
+				continue
+			}
+			return fmt.Sprintf("channel %s sends at most %d a day and %d of it is reserved, so there "+
+				"is room for %d more and this step needs %d",
+				channel, channelMax, byChannel[channel],
+				max(channelMax-byChannel[channel], 0), charge[channel])
 		}
 	}
-	if credentialMax > 0 {
+	messages := charge.Total()
+	if limits.Global > 0 {
+		if reserved, err := e.store.Reserved(ctx, day, ""); err == nil && reserved+messages > limits.Global {
+			return fmt.Sprintf("the daily send budget is spent: %d of MAX_SENDS_PER_DAY are already "+
+				"reserved, so there is room for %d more today and this step is %d",
+				reserved, max(limits.Global-reserved, 0), messages)
+		}
+	}
+	if limits.Credential > 0 {
 		spent, err := e.store.Reserved(ctx, day, pool)
 		if err == nil {
 			return fmt.Sprintf("this credential's daily_budget is %d and %d of it is already reserved "+
 				"today, so there is room for %d more and this step is %d",
-				credentialMax, spent, max(credentialMax-spent, 0), messages)
+				limits.Credential, spent, max(limits.Credential-spent, 0), messages)
 		}
 		return fmt.Sprintf("this credential's daily_budget of %d is smaller than this step of %d",
-			credentialMax, messages)
+			limits.Credential, messages)
 	}
 	return fmt.Sprintf("the daily send budget is spent: %d messages would go over MAX_SENDS_PER_DAY", messages)
 }
@@ -1753,9 +1879,17 @@ func (e *Engine) queueSignup(ctx context.Context, newsletter model.Newsletter, c
 	// the sending domain's reputation, and one newsletter's flood doesn't hold up another's. The cap
 	// is applied by the insert itself: two signups arriving together must not both read a count below
 	// it and both write (the phase 1-3 audit's ST-I6).
+	// A confirmation or a welcome follows the same rules the campaign mail does; the provider was
+	// missing here until 2c-2, which `campaign report` grouped as "other" for every signup.
+	pick, err := e.pickerFor(ctx)
+	if err != nil {
+		return SignupResult{}, err
+	}
 	message := model.Message{
 		ID: ids.New(), Kind: kind, NewsletterID: newsletter.ID, ContactID: contact.ID,
-		Email: contact.Email, Status: model.MessagePending, CreatedAt: time.Now().UTC(),
+		Email: contact.Email, Provider: providers.Mailbox(contact.Email),
+		Channel: e.oneOffChannel(pick, contact.ID, contact.Email),
+		Status:  model.MessagePending, CreatedAt: time.Now().UTC(),
 	}
 	inserted, err := e.store.InsertSignupMessage(ctx, message, newsletter.ID,
 		[]model.MessageKind{model.KindWelcome, model.KindConfirmation}, window,
@@ -1783,8 +1917,10 @@ func (e *Engine) queueSignup(ctx context.Context, newsletter model.Newsletter, c
 // errSendingOff is upstream's wording, which rules.SendErrorAction also recognises.
 var errSendingOff = errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
 
-// toMessages turns an audience into pending campaign messages.
-func toMessages(campaign model.Campaign, contacts []model.Contact) []model.Message {
+// toMessages turns an audience into pending campaign messages. Each one's channel is decided here,
+// once, by the rules as they stand: `provider_message_id` freezes it afterwards, so a message that
+// has been sent cannot be moved to another channel (design §4.2).
+func toMessages(campaign model.Campaign, contacts []model.Contact, pick picker) []model.Message {
 	now := time.Now().UTC()
 	messages := make([]model.Message, 0, len(contacts))
 	for _, contact := range contacts {
@@ -1798,6 +1934,7 @@ func toMessages(campaign model.Campaign, contacts []model.Contact) []model.Messa
 			// The provider is recorded now, so `campaign report` can group without re-deriving it
 			// from the address for every row (lib/sending.js toMessages).
 			Provider:  providers.Mailbox(contact.Email),
+			Channel:   pick.pick(contact.ID, contact.Email),
 			Status:    model.MessagePending,
 			CreatedAt: now,
 		})

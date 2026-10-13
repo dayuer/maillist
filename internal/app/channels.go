@@ -37,7 +37,7 @@ func loadChannels(ctx context.Context, cfg config.Config, db *store.DB,
 			continue
 		}
 		built = append(built, channel)
-		limits[row.Name] = mailer.ChannelLimit{MaxPerSecond: row.MaxPerSecond}
+		limits[row.Name] = mailer.ChannelLimit{MaxPerSecond: row.MaxPerSecond, MaxPerDay: row.MaxPerDay}
 	}
 	registry, err := mailer.NewRegistry(defaultChannel, built...)
 	if err != nil {

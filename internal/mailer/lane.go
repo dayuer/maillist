@@ -46,10 +46,13 @@ func (l *lane) onSuccess() {
 	FollowControl(l.control, l.bucket, now)
 }
 
-// ChannelLimit is a configured channel's own ceiling: channels.max_per_second, 0 for none. The
-// default channel's is SEND_RATE_PER_SECOND, which is already in Config.RateControl.
+// ChannelLimit is a configured channel's own ceilings: channels.max_per_second and
+// channels.max_per_day, 0 for none. The default channel's rate is SEND_RATE_PER_SECOND, which is
+// already in Config.RateControl, and it has no max_per_day: the account's own 24-hour allowance is
+// the ceiling there, and that is checked as a quota rather than as a budget.
 type ChannelLimit struct {
 	MaxPerSecond int
+	MaxPerDay    int
 }
 
 // Lane is one lane as the app sees it: what serve needs to keep the lane's rate in step with its

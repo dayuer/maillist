@@ -136,7 +136,7 @@ func TestRefundIsPerChannel(t *testing.T) {
 
 // The charge of a step is the channels its messages go through; an unset channel is the default one.
 func TestChargeOfCountsMessagesByChannel(t *testing.T) {
-	charge := chargeOf([]model.Message{
+	charge := ChargeOf([]model.Message{
 		{Channel: "aws2"}, {Channel: "aws2"}, {Channel: "back"}, {},
 	})
 	want := Charge{"aws2": 2, "back": 1, model.DefaultChannel: 1}
