@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"nibwire/internal/core/model"
 	"nibwire/internal/creds"
 	"nibwire/internal/mailer"
 	"nibwire/internal/store"
@@ -162,7 +163,8 @@ func TestTheGlobalBudgetIsRefusedToo(t *testing.T) {
 	f.deps.Config.Limits.MaxSendsPerDay = 1
 	session := f.connect(t)
 
-	if _, err := f.store.Reserve(context.Background(), store.Day(time.Now()), "", 1, 1, 0); err != nil {
+	if _, err := f.store.Reserve(context.Background(), store.Day(time.Now()), "",
+		store.Charge{model.DefaultChannel: 1}, store.Limits{Global: 1}); err != nil {
 		t.Fatal(err)
 	}
 	message := callError(t, session, "send_campaign", map[string]any{"campaign": "Issue 12"})

@@ -286,7 +286,7 @@ func testChannel(ctx context.Context, sess *session, credential store.Credential
 		Text: "This is a test of the " + channel.Name() + " channel.",
 	}, map[string]string{"kind": string(model.KindTest)})
 	if err != nil {
-		if refundErr := sess.deps.Store.Refund(ctx, store.Day(time.Now()), credential.ID, 1); refundErr != nil {
+		if refundErr := sess.deps.Store.Refund(ctx, store.Day(time.Now()), credential.ID, oneThroughDefault()); refundErr != nil {
 			sess.deps.Log.Error("refund the channel test", "credential", credential.ID, "error", refundErr)
 		}
 		return testChannelOut{}, fmt.Errorf("%s refused it (%s): %w", channel.Name(), channel.Classify(err), err)

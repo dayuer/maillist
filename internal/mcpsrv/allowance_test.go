@@ -98,7 +98,8 @@ func TestResumingIsNotRefusedByABudgetTheCampaignAlreadyPaid(t *testing.T) {
 func (f *fixture) reserveToday(t *testing.T, campaign model.Campaign, _ model.Newsletter, messages int) {
 	t.Helper()
 	fits, err := f.store.ReserveForResume(context.Background(), store.Day(time.Now()), "",
-		campaign.ID, messages, f.deps.Config.Limits.MaxSendsPerDay, 0)
+		campaign.ID, store.Charge{model.DefaultChannel: messages},
+		store.Limits{Global: f.deps.Config.Limits.MaxSendsPerDay})
 	if err != nil || !fits {
 		t.Fatalf("could not reserve today for the campaign: %v", err)
 	}
@@ -116,8 +117,9 @@ func TestResumingOnALaterDayChargesTodayAndRefusesWhenTheDayIsFull(t *testing.T)
 	f.seedQueuedMessages(t, draft, newsletter, 3)
 	// Reserved yesterday: the messages are charged to a day that is not today.
 	yesterday := store.Day(time.Now().AddDate(0, 0, -1))
-	if fits, err := f.store.ReserveForResume(ctx, yesterday, "", draft.ID, 3,
-		f.deps.Config.Limits.MaxSendsPerDay, 0); err != nil || !fits {
+	if fits, err := f.store.ReserveForResume(ctx, yesterday, "", draft.ID,
+		store.Charge{model.DefaultChannel: 3},
+		store.Limits{Global: f.deps.Config.Limits.MaxSendsPerDay}); err != nil || !fits {
 		t.Fatalf("could not put the reservation on yesterday: %v", err)
 	}
 	if moved, err := f.store.SetCampaignStatus(ctx, draft.ID,
@@ -131,8 +133,10 @@ func TestResumingOnALaterDayChargesTodayAndRefusesWhenTheDayIsFull(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fits, err := f.store.Reserve(ctx, store.Day(time.Now()), credential.ID, 1,
-		f.deps.Config.Limits.MaxSendsPerDay, credential.DailyBudget); err != nil || !fits {
+	if fits, err := f.store.Reserve(ctx, store.Day(time.Now()), credential.ID,
+		store.Charge{model.DefaultChannel: 1},
+		store.Limits{Global: f.deps.Config.Limits.MaxSendsPerDay,
+			Credential: credential.DailyBudget}); err != nil || !fits {
 		t.Fatalf("could not fill today: %v", err)
 	}
 	message := callError(t, session, "resume_campaign", map[string]any{"campaign": draft.ID})
@@ -146,7 +150,8 @@ func TestResumingOnALaterDayChargesTodayAndRefusesWhenTheDayIsFull(t *testing.T)
 	}
 
 	// Make room and the same resume charges today for what is left.
-	if err := f.store.Refund(ctx, store.Day(time.Now()), credential.ID, 1); err != nil {
+	if err := f.store.Refund(ctx, store.Day(time.Now()), credential.ID,
+		store.Charge{model.DefaultChannel: 1}); err != nil {
 		t.Fatal(err)
 	}
 	out := call[resumeCampaignOut](t, session, "resume_campaign", map[string]any{"campaign": draft.ID})

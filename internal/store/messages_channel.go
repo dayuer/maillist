@@ -40,5 +40,9 @@ func (db *DB) ClaimMessagesOutside(ctx context.Context, channels []string, n int
 		selection += " AND channel NOT IN (" + strings.Join(placeholders, ",") + ")"
 	}
 	args = append(args, n)
-	return db.claim(ctx, selection+" ORDER BY created_at, id LIMIT ?", args...)
+	// channel, then created_at, id: the order the claim index is in. Ordering by age alone would
+	// make SQLite gather every waiting message and sort it, because "not one of these channels" is
+	// not a range it can walk; this way the walk stays a walk. Nothing depends on which of the
+	// strays comes first — they are all about to be failed, or to pause their campaign.
+	return db.claim(ctx, selection+" ORDER BY channel, created_at, id LIMIT ?", args...)
 }

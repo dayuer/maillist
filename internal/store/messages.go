@@ -58,12 +58,12 @@ func markReservedDayTx(ctx context.Context, tx *sql.Tx, day string, messages []m
 // managed deployment splits an account's quota with. Nothing is written to the messages table: they
 // exist. fits=false means today cannot take it, and the whole step is refused rather than partly
 // sent (the caller says how much of the day is left).
-func (db *DB) ReserveForResume(ctx context.Context, day, credentialID, campaignID string, n, globalMax,
-	credentialMax int) (bool, error) {
+func (db *DB) ReserveForResume(ctx context.Context, day, credentialID, campaignID string, charge Charge,
+	limits Limits) (bool, error) {
 	fits := false
 	err := db.Write(ctx, func(tx *sql.Tx) error {
 		fits = false
-		ok, err := reserveTx(ctx, tx, day, credentialID, n, globalMax, credentialMax)
+		ok, err := reserveTx(ctx, tx, day, credentialID, charge, limits)
 		if err != nil || !ok {
 			return err
 		}
@@ -77,6 +77,35 @@ func (db *DB) ReserveForResume(ctx context.Context, day, credentialID, campaignI
 	return fits, err
 }
 
+// ChargeOfCampaign is what a campaign's unfinished messages would cost today, per channel. It is the
+// charge a cross-day resume reserves: the audience was decided when the campaign was queued, and
+// this is how much of it still has to go out, and through what.
+func (db *DB) ChargeOfCampaign(ctx context.Context, campaignID string) (Charge, error) {
+	rows, err := db.sql.QueryContext(ctx, `SELECT channel, count(*) FROM messages
+        WHERE campaign_id = ? AND kind IN (?, ?) AND status IN (?, ?) GROUP BY channel`,
+		campaignID, string(model.KindCampaign), string(model.KindLastChance),
+		string(model.MessagePending), string(model.MessageClaimed))
+	if err != nil {
+		return nil, fmt.Errorf("count unfinished campaign messages: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := Charge{}
+	for rows.Next() {
+		var (
+			channel string
+			n       int
+		)
+		if err := rows.Scan(&channel, &n); err != nil {
+			return nil, fmt.Errorf("count unfinished campaign messages: %w", err)
+		}
+		out[channel] += n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count unfinished campaign messages: %w", err)
+	}
+	return out, nil
+}
+
 // InsertMessages adds messages in chunks, ignoring rows that already exist (one email per contact
 // per campaign). It returns how many rows were actually inserted.
 func (db *DB) InsertMessages(ctx context.Context, messages []model.Message) (int, error) {
@@ -84,11 +113,8 @@ func (db *DB) InsertMessages(ctx context.Context, messages []model.Message) (int
 	for start := 0; start < len(messages); start += InsertChunkSize {
 		end := min(start+InsertChunkSize, len(messages))
 		chunk := messages[start:end]
-		err := db.Write(ctx, func(tx *sql.Tx) error {
-			count, err := insertMessagesTx(ctx, tx, chunk)
-			inserted += count
-			return err
-		})
+		written, err := db.insertChunk(ctx, chunk)
+		inserted += written.Total()
 		if err != nil {
 			return inserted, fmt.Errorf("insert messages %d-%d: %w", start, end, err)
 		}
@@ -96,10 +122,23 @@ func (db *DB) InsertMessages(ctx context.Context, messages []model.Message) (int
 	return inserted, nil
 }
 
-// insertMessagesTx is one chunk of InsertMessages inside a caller's transaction.
-func insertMessagesTx(ctx context.Context, tx *sql.Tx, chunk []model.Message) (int, error) {
+// insertChunk writes one chunk in a transaction of its own and reports what it wrote.
+func (db *DB) insertChunk(ctx context.Context, chunk []model.Message) (Charge, error) {
+	var written Charge
+	err := db.Write(ctx, func(tx *sql.Tx) error {
+		count, err := insertMessagesTx(ctx, tx, chunk)
+		written = count
+		return err
+	})
+	return written, err
+}
+
+// insertMessagesTx is one chunk of InsertMessages inside a caller's transaction. It returns the rows
+// that were actually new, per channel: what the day is charged for is what will be sent, and a row
+// that already existed is neither.
+func insertMessagesTx(ctx context.Context, tx *sql.Tx, chunk []model.Message) (Charge, error) {
 	if len(chunk) == 0 {
-		return 0, nil
+		return Charge{}, nil
 	}
 	var builder strings.Builder
 	builder.WriteString(`INSERT OR IGNORE INTO messages (` + messageColumns + `) VALUES `)
@@ -116,15 +155,25 @@ func insertMessagesTx(ctx context.Context, tx *sql.Tx, chunk []model.Message) (i
 			formatTimePtr(m.OpenedAt), formatTimePtr(m.ClickedAt), formatTimePtr(m.BouncedAt),
 			formatTimePtr(m.ComplainedAt), formatTime(m.CreatedAt), channelOf(m))
 	}
-	result, err := tx.ExecContext(ctx, builder.String(), args...)
+	// RETURNING is what says which rows these were. A count alone cannot: a step mixes channels, and
+	// paying for a row that already existed would spend an allowance on mail that is not sent.
+	rows, err := tx.QueryContext(ctx, builder.String()+" RETURNING channel", args...)
 	if err != nil {
-		return 0, err
+		return Charge{}, err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return 0, err
+	defer func() { _ = rows.Close() }()
+	written := Charge{}
+	for rows.Next() {
+		var channel string
+		if err := rows.Scan(&channel); err != nil {
+			return Charge{}, err
+		}
+		written[channel]++
 	}
-	return int(affected), nil
+	if err := rows.Err(); err != nil {
+		return Charge{}, err
+	}
+	return written, nil
 }
 
 // ReserveAndInsert reserves the day's budget and writes the first chunk of messages in one
@@ -145,15 +194,20 @@ func insertMessagesTx(ctx context.Context, tx *sql.Tx, chunk []model.Message) (i
 // write, and the day is charged for exactly what was new by the time it returns. What a *crash* can
 // leave behind is the whole step reserved with only part of it written: over-reserved, which is the
 // direction a budget may be wrong in.
-func (db *DB) ReserveAndInsert(ctx context.Context, day, credentialID string, n, globalMax, credentialMax int,
+func (db *DB) ReserveAndInsert(ctx context.Context, day, credentialID string, limits Limits,
 	messages []model.Message) (fits bool, inserted int, err error) {
-	if n <= 0 || len(messages) == 0 {
+	if len(messages) == 0 {
 		return true, 0, nil
 	}
+	// The charge is what the messages are: one reservation per channel they go through. Deriving it
+	// from them rather than taking it as an argument is what keeps a caller from paying for fewer
+	// messages than it writes.
+	charge := chargeOf(messages)
 	first := messages[:min(InsertChunkSize, len(messages))]
+	var paid Charge
 	err = db.Write(ctx, func(tx *sql.Tx) error {
-		fits, inserted = false, 0
-		ok, err := reserveTx(ctx, tx, day, credentialID, n, globalMax, credentialMax)
+		fits, inserted, paid = false, 0, Charge{}
+		ok, err := reserveTx(ctx, tx, day, credentialID, charge, limits)
 		if err != nil || !ok {
 			return err
 		}
@@ -167,11 +221,11 @@ func (db *DB) ReserveAndInsert(ctx context.Context, day, credentialID string, n,
 		// A process that dies partway through therefore leaves the day charged for more than exists,
 		// never for less: a reservation is a promise to send, and the failure a spend can be in is
 		// spending too much of it. Everything below corrects downwards when it can.
-		count, err := insertMessagesTx(ctx, tx, first)
+		written, err := insertMessagesTx(ctx, tx, first)
 		if err != nil {
 			return err
 		}
-		inserted = count
+		paid, inserted = written, written.Total()
 		if err := markReservedDayTx(ctx, tx, day, first); err != nil {
 			return err
 		}
@@ -181,31 +235,32 @@ func (db *DB) ReserveAndInsert(ctx context.Context, day, credentialID string, n,
 	if err != nil || !fits {
 		return fits, inserted, err
 	}
+	if over := paid.beyond(charge); len(over) > 0 {
+		return fits, inserted, fmt.Errorf("charged for fewer messages than were written on %s",
+			strings.Join(over, ", "))
+	}
 
 	// The rest, one transaction per chunk.
 	for start := len(first); start < len(messages); start += InsertChunkSize {
 		chunk := messages[start:min(start+InsertChunkSize, len(messages))]
-		count, err := db.InsertMessages(ctx, chunk)
-		inserted += count
+		written, err := db.insertChunk(ctx, chunk)
+		paid = paid.plus(written)
+		inserted += written.Total()
 		if err != nil {
 			// The messages after this point do not exist, so the day must not stay charged for them.
 			// Best effort: the ledger can be read again, a promised send cannot be un-promised by
 			// guessing.
-			if n > inserted {
-				if refundErr := db.Refund(ctx, day, credentialID, n-inserted); refundErr != nil {
-					return fits, inserted, errors.Join(err, refundErr)
-				}
+			if refundErr := db.Refund(ctx, day, credentialID, charge.minus(paid)); refundErr != nil {
+				return fits, inserted, errors.Join(err, refundErr)
 			}
 			return fits, inserted, err
 		}
 	}
 	// Rows that already existed were not charged for: the reservation was for the whole step, and this
-	// corrects it down to what was actually new (a job retried after inserting must not be charged
-	// twice).
-	if n > inserted {
-		if err := db.Refund(ctx, day, credentialID, n-inserted); err != nil {
-			return fits, inserted, err
-		}
+	// corrects it down to what was actually new, channel by channel (a job retried after inserting
+	// must not be charged twice).
+	if err := db.Refund(ctx, day, credentialID, charge.minus(paid)); err != nil {
+		return fits, inserted, err
 	}
 	return fits, inserted, nil
 }

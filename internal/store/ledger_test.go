@@ -20,7 +20,7 @@ func TestReserveIsAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[slot], errs[slot] = db.Reserve(ctx, day, "", 6000, 10000, 0)
+			results[slot], errs[slot] = db.Reserve(ctx, day, "", throughDefault(6000), Limits{Global: 10000})
 		}()
 	}
 	wg.Wait()
@@ -48,14 +48,14 @@ func TestReserveIsAtomic(t *testing.T) {
 func TestReserveHonoursTheCredentialBudget(t *testing.T) {
 	db := openTemp(t)
 	ctx := context.Background()
-	if ok, err := db.Reserve(ctx, "2026-10-11", "cred-1", 50, 10000, 100); err != nil || !ok {
+	if ok, err := db.Reserve(ctx, "2026-10-11", "cred-1", throughDefault(50), Limits{Global: 10000, Credential: 100}); err != nil || !ok {
 		t.Fatalf("first reserve = %v %v", ok, err)
 	}
-	if ok, err := db.Reserve(ctx, "2026-10-11", "cred-1", 60, 10000, 100); err != nil || ok {
+	if ok, err := db.Reserve(ctx, "2026-10-11", "cred-1", throughDefault(60), Limits{Global: 10000, Credential: 100}); err != nil || ok {
 		t.Fatalf("second reserve = %v %v, want false", ok, err)
 	}
 	// The global pool is separate: another credential still fits.
-	if ok, err := db.Reserve(ctx, "2026-10-11", "cred-2", 60, 10000, 100); err != nil || !ok {
+	if ok, err := db.Reserve(ctx, "2026-10-11", "cred-2", throughDefault(60), Limits{Global: 10000, Credential: 100}); err != nil || !ok {
 		t.Fatalf("other credential = %v %v", ok, err)
 	}
 	// A refused reservation writes nothing.
@@ -68,10 +68,10 @@ func TestReserveHonoursTheCredentialBudget(t *testing.T) {
 func TestReserveResetsAcrossDays(t *testing.T) {
 	db := openTemp(t)
 	ctx := context.Background()
-	if ok, _ := db.Reserve(ctx, "2026-10-11", "", 9000, 10000, 0); !ok {
+	if ok, _ := db.Reserve(ctx, "2026-10-11", "", throughDefault(9000), Limits{Global: 10000}); !ok {
 		t.Fatal("first day")
 	}
-	if ok, _ := db.Reserve(ctx, "2026-10-12", "", 9000, 10000, 0); !ok {
+	if ok, _ := db.Reserve(ctx, "2026-10-12", "", throughDefault(9000), Limits{Global: 10000}); !ok {
 		t.Fatal("next day must start empty")
 	}
 }
@@ -80,10 +80,10 @@ func TestReserveResetsAcrossDays(t *testing.T) {
 func TestReserveRefusesTheWholeBatch(t *testing.T) {
 	db := openTemp(t)
 	ctx := context.Background()
-	if ok, _ := db.Reserve(ctx, "2026-10-11", "", 9999, 10000, 0); !ok {
+	if ok, _ := db.Reserve(ctx, "2026-10-11", "", throughDefault(9999), Limits{Global: 10000}); !ok {
 		t.Fatal("seeding reservation")
 	}
-	if ok, err := db.Reserve(ctx, "2026-10-11", "", 2, 10000, 0); err != nil || ok {
+	if ok, err := db.Reserve(ctx, "2026-10-11", "", throughDefault(2), Limits{Global: 10000}); err != nil || ok {
 		t.Fatalf("a 2-message batch over the line = %v %v, want false", ok, err)
 	}
 	if reserved, err := db.Reserved(ctx, "2026-10-11", ""); err != nil || reserved != 9999 {
@@ -94,7 +94,7 @@ func TestReserveRefusesTheWholeBatch(t *testing.T) {
 // A zero-message reservation is free and never blocks.
 func TestReserveZeroNeedsNothing(t *testing.T) {
 	db := openTemp(t)
-	if ok, err := db.Reserve(context.Background(), "2026-10-11", "", 0, 0, 0); err != nil || !ok {
+	if ok, err := db.Reserve(context.Background(), "2026-10-11", "", throughDefault(0), Limits{}); err != nil || !ok {
 		t.Fatalf("zero = %v %v", ok, err)
 	}
 }

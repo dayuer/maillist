@@ -1139,8 +1139,12 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 			if err != nil {
 				return QueueResult{}, err
 			}
-			fits, err := e.store.ReserveForResume(ctx, day, pool, campaignID, unfinished,
-				e.cfg.Limits.MaxSendsPerDay, credentialMax)
+			unfinishedCharge, err := e.store.ChargeOfCampaign(ctx, campaignID)
+			if err != nil {
+				return QueueResult{}, err
+			}
+			fits, err := e.store.ReserveForResume(ctx, day, pool, campaignID, unfinishedCharge,
+				store.Limits{Global: e.cfg.Limits.MaxSendsPerDay, Credential: credentialMax})
 			if err != nil {
 				return QueueResult{}, err
 			}
@@ -1199,8 +1203,8 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		// The reservation and every message of the step are written together, so there is nothing left
 		// to write here and nothing to refund if the process dies: either the step is in and paid for,
 		// or it is not there at all (audit M5, phase 9 #38).
-		fits, _, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
-			e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
+		fits, _, err := e.store.ReserveAndInsert(ctx, day, pool,
+			store.Limits{Global: e.cfg.Limits.MaxSendsPerDay, Credential: credentialMax}, messages)
 		if err != nil {
 			return QueueResult{}, err
 		}
@@ -1369,8 +1373,8 @@ func (e *Engine) QueueStep(ctx context.Context, campaignID string, additional in
 		return QueueResult{Reason: refusal}, nil
 	}
 	// As above: the whole step and its reservation are one write.
-	fits, _, err := e.store.ReserveAndInsert(ctx, day, pool, len(messages),
-		e.cfg.Limits.MaxSendsPerDay, credentialMax, messages)
+	fits, _, err := e.store.ReserveAndInsert(ctx, day, pool,
+		store.Limits{Global: e.cfg.Limits.MaxSendsPerDay, Credential: credentialMax}, messages)
 	if err != nil {
 		return QueueResult{}, err
 	}
