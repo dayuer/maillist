@@ -3367,6 +3367,7 @@ PR 描述写明：`Fixes #79`；改动（`core/route`、`0007_routes.sql`、stor
 6. **发送前检查的"所用渠道"**由规则套在真实受众上算出（`ChannelsForAudience` → `route.Counts`）；受众为空时退回问 default。fallback 链要等 2d 第二段。
 7. **单条 default 规则的部分唯一索引**（2c-1 复审的建议）：现在仍只有 `CreateRoute` 一条写路径，不另加索引；2d 第二段若出现改道写路径再补。
 8. **`--to` 去掉首尾空格**（2c-1 复审第 3 条）：与 `--split` 一致。
+9. **没有做：`SendingRate` 按渠道。** 引擎内部每个渠道确实各有一套 `ratectl.Controller`（2b），没有按渠道报的是**报告面**：`nibwire quota` 的 account/sending/24h remaining、`campaign check`（CLI 与 MCP `check_campaign`）的预计用时、以及 `checkAllowance` 的发送前预检，都还只读 default 渠道。这三处要一起改成"每个渠道一行/一个数"，包括预计用时要按这封 issue 的渠道分布算，属于独立的一步；2c-2 不做，也**没有**把它当成已完成。多渠道路由已经生效，所以：`nibwire quota` 现在只说 default 渠道的速率，别的渠道的速率要从 `channel list` 的 `max-per-second` 与各自的账户看。
 
 ### Task 0：issue 与分支
 

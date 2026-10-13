@@ -1125,10 +1125,9 @@ func (e *Engine) Queue(ctx context.Context, campaignID string, charge Charge) (Q
 		// spent one would only produce a batch of throttles.
 		//
 		// What the resume spends is what is still queued, not the whole list: asking for the rest of a
-		// campaign that has fifty messages left would refuse a resume that fits.
-		// What is still queued, per channel — what this resume spends, and what the account's
-		// allowance and the day's budgets are asked about. Its total is the "unfinished" count this
-		// used to read separately.
+		// campaign that has fifty messages left would refuse a resume that fits. Per channel, because
+		// that is what the account's allowance and the day's budgets are asked about now — and its
+		// total is the "unfinished" count this used to read separately.
 		unfinishedCharge, err := e.store.ChargeOfCampaign(ctx, campaignID)
 		if err != nil {
 			return QueueResult{}, err
