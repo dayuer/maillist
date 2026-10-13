@@ -33,7 +33,8 @@ type App struct {
 	// that reads them does not change.
 	Channel mailer.Channel
 	// Channels is every channel this deployment can send through: Channel (the default) and the
-	// configured ones. Until routing exists every message still goes through Channel.
+	// configured ones. The engine sends each message through the channel it is queued on; until
+	// routing exists (step 2c) that is always Channel.
 	Channels *mailer.Registry
 	// ChannelProblems are the enabled channels that could not be built, by name. They are left out
 	// of Channels; serve refuses to start while there are any (CheckChannels).
@@ -67,7 +68,7 @@ func (a *App) ReadQuota(ctx context.Context) (ratectl.Quota, error) {
 		// and a quota is a fact about a moment: the moment is now.
 		quota.ReadAt = time.Now().UTC()
 	}
-	a.Mailer.SetQuota(quota, quota.ReadAt)
+	a.Mailer.SetQuota(model.DefaultChannel, quota, quota.ReadAt)
 	return quota, nil
 }
 
@@ -107,19 +108,20 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		return nil, err
 	}
 	channel := mailer.NewChannel(model.DefaultChannel, mailer.ChannelTypeSES, sender, quota, identities, mailer.ClassifySES)
-	channels, channelProblems, err := loadChannels(ctx, cfg, db, channel)
+	channels, channelLimits, channelProblems, err := loadChannels(ctx, cfg, db, channel)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	// The rate follows the account (D17): the controller decides it, the bucket enforces it, and
-	// SEND_RATE_PER_SECOND can only lower what the account gave.
+	// SEND_RATE_PER_SECOND can only lower what the account gave. This is the default channel's; the
+	// engine gives every other channel one of its own, capped by its max_per_second (design §6).
 	control := ratectl.New(ratectl.Config{
 		Headroom: cfg.Limits.SendRateHeadroom,
 		Cap:      cfg.Limits.SendRatePerSecond,
 		Floor:    1,
 	})
-	engine := mailer.NewEngine(db, channel, signer, mailer.Config{
+	engine := mailer.NewEngine(db, channels, signer, mailer.Config{
 		AppURL:          cfg.AppURL,
 		ArchiveHosts:    cfg.ArchiveHosts,
 		SendingOn:       cfg.SendingOn,
@@ -129,6 +131,11 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		PollInterval:    250 * time.Millisecond,
 		RateControl:     control,
 		Alerts:          notifier,
+		// The configured channels have no SEND_CONCURRENCY of their own (design §6): each starts
+		// where the default does out of the box.
+		ChannelLimits:      channelLimits,
+		ChannelConcurrency: config.DefaultSendConcurrency,
+		ChannelProblems:    channelProblems,
 	}, log)
 	handler := events.New(db, log).WithAlerts(notifier)
 
@@ -152,7 +159,7 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Identities:      identities,
 		Quota:           quota,
 		Poller: &mailer.QuotaPoller{
-			Reader: quota, Control: control, Bucket: engine.Bucket(), Alerts: notifier, Log: log,
+			Reader: quota, Control: control, Bucket: engine.Lanes()[0].Bucket, Alerts: notifier, Log: log,
 		},
 		HTTP: http,
 		Log:  log,

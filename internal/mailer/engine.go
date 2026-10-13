@@ -51,6 +51,15 @@ type Config struct {
 	// Alerts tells the operator what went wrong. It is optional: the CLI builds an engine with no
 	// server behind it, and there is nobody to alert there.
 	Alerts *alerts.Notifier
+	// ChannelLimits are the configured channels' own ceilings, by name (channels.max_per_second). The
+	// default channel's are SendRatePerSec and RateControl above.
+	ChannelLimits map[string]ChannelLimit
+	// ChannelConcurrency is how many sends each configured channel may have in flight at once; the
+	// default channel's is SendConcurrency. Zero means SendConcurrency.
+	ChannelConcurrency int
+	// ChannelProblems are the enabled channels that could not be built, by name (App.ChannelProblems).
+	// A campaign message on one of them is held and its campaign paused, with the problem as reason.
+	ChannelProblems map[string]error
 }
 
 // BatchResult is what one batch did (upstream sendMessageBatch's result).
@@ -98,13 +107,15 @@ func (e *Engine) SendingRate() SendingRate {
 	if e == nil {
 		return SendingRate{}
 	}
-	if e.control == nil {
-		return SendingRate{PerSecond: e.bucket.Rate()}
+	// The default channel's, until step 2c reports a rate per channel.
+	l := e.defaultLane()
+	if l.control == nil {
+		return SendingRate{PerSecond: l.bucket.Rate()}
 	}
-	_, known := e.control.Quota()
+	_, known := l.control.Quota()
 	return SendingRate{
-		PerSecond:    e.control.Rate(time.Now().UTC()),
-		Remaining24h: e.control.Remaining24h(),
+		PerSecond:    l.control.Rate(time.Now().UTC()),
+		Remaining24h: l.control.Remaining24h(),
 		Known:        known,
 	}
 }
@@ -116,18 +127,22 @@ func (e *Engine) SendingRate() SendingRate {
 // messages, no charge against the day, and the campaign stays where it is. Sending the part that fits
 // would leave the campaign looking half sent with no record of why, and the operator is the one who
 // gets to decide to split a send: that is what --limit is for.
+//
+// It reads the default channel's account: every message is queued on that channel until step 2c
+// routes them, and 2c makes this check per channel.
 func (e *Engine) sesQuotaRefusal(n int) string {
-	if e.control == nil {
+	control := e.defaultLane().control
+	if control == nil {
 		return ""
 	}
 	// An allowance nobody has read is not an allowance of zero. ratectl answers 0 there, and refusing
 	// every send on that number would turn "the quota could not be read" into "the deployment cannot
 	// send at all" — the opposite of what D8-2 chose: one alert and one email per second, slowly,
 	// which is what the rate floor is for.
-	if _, known := e.control.Quota(); !known {
+	if _, known := control.Quota(); !known {
 		return ""
 	}
-	remaining := e.control.Remaining24h()
+	remaining := control.Remaining24h()
 	if n <= remaining {
 		return ""
 	}
@@ -173,23 +188,21 @@ type Charge struct {
 // system is the charge with no credential behind it.
 func (c Charge) system() bool { return c.CredentialID == "" }
 
-// Engine sends queued messages through a Sender.
+// Engine sends queued messages, each through the channel it was queued on.
 type Engine struct {
-	store  *store.DB
-	sender Sender
-	// classify reads a failed send. It is the channel's own reading when the sender is a Channel
-	// (or any Classifier), and SES's otherwise — which is what every sender was before channels.
-	classify func(error) rules.ErrorAction
-	signer   *sign.Signer
-	bucket   *Bucket
-	control  *ratectl.Controller
-	cfg      Config
-	log      *slog.Logger
+	store *store.DB
+	// lanes are the channels' lanes by name; order is the same lanes, the default channel's first.
+	lanes  map[string]*lane
+	order  []*lane
+	signer *sign.Signer
+	cfg    Config
+	log    *slog.Logger
 }
 
-// NewEngine builds an engine. The bucket is shared by every caller, so the rate is a process-wide
-// cap rather than a per-batch one.
-func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log *slog.Logger) *Engine {
+// NewEngine builds an engine that sends through channels, which must not be nil. Each channel gets a
+// lane — a bucket, and a controller when the engine follows quotas — shared by every caller, so each
+// rate is a process-wide cap on that channel rather than a per-batch one.
+func NewEngine(db *store.DB, channels *Registry, signer *sign.Signer, cfg Config, log *slog.Logger) *Engine {
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 250 * time.Millisecond
 	}
@@ -201,37 +214,21 @@ func NewEngine(db *store.DB, sender Sender, signer *sign.Signer, cfg Config, log
 	if log == nil {
 		log = slog.Default()
 	}
-	classify := ClassifySES
-	if classifier, ok := sender.(Classifier); ok {
-		classify = classifier.Classify
-	}
-	return &Engine{
-		store: db, sender: sender, classify: classify, signer: signer, control: cfg.RateControl,
-		bucket: NewBucket(float64(cfg.SendRatePerSec)), cfg: cfg, log: log,
+	lanes, order := newLanes(channels, cfg)
+	return &Engine{store: db, lanes: lanes, order: order, signer: signer, cfg: cfg, log: log}
+}
+
+// Close stops every lane's rate limiter.
+func (e *Engine) Close() {
+	for _, l := range e.order {
+		l.bucket.Close()
 	}
 }
 
-// Close stops the rate limiter.
-func (e *Engine) Close() { e.bucket.Close() }
-
-// Bucket is the rate limiter. It is what the quota poller moves when the account's numbers change:
-// the controller decides the rate and the bucket enforces it (D8-1).
-func (e *Engine) Bucket() *Bucket { return e.bucket }
-
-// SetQuota applies a reading from SES to the rate.
-//
-// It is what the poller does on each tick, and what a command does once before it drains its own
-// queue: a CLI process has no poller, and a rate it never read is one email a second (D8-2).
-func (e *Engine) SetQuota(quota ratectl.Quota, now time.Time) {
-	if e.control == nil {
-		return
-	}
-	e.control.SetQuota(quota, now)
-	FollowControl(e.control, e.bucket, now)
-}
-
-// SendBatch sends one batch. With no ids it claims up to rules.SendBatchSize messages itself, which
-// is what Run uses; with ids it sends exactly those (the CLI's path).
+// SendBatch sends one batch. With no ids every lane claims its own channel's messages,
+// rules.SendBatchSize at a time, until its channel has none left (the CLI's drain); with ids it sends
+// exactly those, each through its own channel's lane (welcome and confirmation emails). The lanes run
+// side by side and their results are added up.
 func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResult, error) {
 	result := BatchResult{}
 	// A cancelled context means "stop", never "failed": nothing is claimed, nothing is lost, and the
@@ -247,25 +244,131 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		return result, errors.New("Sending is off (SENDING_ENABLED is not true)") //nolint:staticcheck // ST1005: upstream wording
 	}
 
-	var messages []model.Message
 	if len(messageIDs) == 0 {
-		claimed, err := e.store.ClaimMessages(ctx, rules.SendBatchSize)
-		if err != nil {
-			return result, err
-		}
-		messages = claimed
-	} else {
-		claimed, err := e.store.ClaimMessagesByID(ctx, messageIDs)
-		if err != nil {
-			return result, err
-		}
-		messages = claimed
-		result.Skipped = len(messageIDs) - len(claimed)
+		return e.sendAll(ctx)
 	}
-	if len(messages) == 0 {
-		return result, nil
+	claimed, err := e.store.ClaimMessagesByID(ctx, messageIDs)
+	if err != nil {
+		return result, err
 	}
+	// Each message goes out through its own channel's lane. One on a channel this engine has no
+	// lane for is a stray: it is failed, or held with its campaign paused (sendStrays).
+	byChannel := map[string][]model.Message{}
+	for _, message := range claimed {
+		byChannel[messageChannel(message)] = append(byChannel[messageChannel(message)], message)
+	}
+	var parts []batchPart
+	for _, l := range e.order {
+		mine := byChannel[l.name()]
+		delete(byChannel, l.name())
+		if len(mine) > 0 {
+			parts = append(parts, func(ctx context.Context) (BatchResult, error) {
+				return e.runLane(ctx, l, mine, nil)
+			})
+		}
+	}
+	var strays []model.Message
+	for _, message := range claimed {
+		if _, stray := byChannel[messageChannel(message)]; stray {
+			strays = append(strays, message)
+		}
+	}
+	if len(strays) > 0 {
+		parts = append(parts, func(ctx context.Context) (BatchResult, error) {
+			return e.sendStrays(ctx, strays)
+		})
+	}
+	result, err = together(ctx, parts)
+	result.Skipped += len(messageIDs) - len(claimed)
+	return result, err
+}
 
+// batchPart is one lane's share of a batch, or the strays'.
+type batchPart func(context.Context) (BatchResult, error)
+
+// together runs every part at once and adds up what they did. The parts are independent — one
+// channel's lane neither waits for nor stops another's — so each finishes on its own, and the first
+// error (in lane order) is the batch's.
+func together(ctx context.Context, parts []batchPart) (BatchResult, error) {
+	if len(parts) == 1 {
+		return parts[0](ctx)
+	}
+	results := make([]BatchResult, len(parts))
+	errs := make([]error, len(parts))
+	var wg sync.WaitGroup
+	for i, part := range parts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = part(ctx)
+		}()
+	}
+	wg.Wait()
+	total := BatchResult{}
+	var firstErr error
+	for i := range parts {
+		total.add(results[i])
+		if firstErr == nil {
+			firstErr = errs[i]
+		}
+	}
+	return total, firstErr
+}
+
+// add counts another part's work into r.
+func (r *BatchResult) add(other BatchResult) {
+	r.Sent += other.Sent
+	r.Failed += other.Failed
+	r.Suppressed += other.Suppressed
+	r.Skipped += other.Skipped
+	r.Retry = r.Retry || other.Retry
+}
+
+// sendAll is a batch with no ids: every lane claims and sends its own channel's messages, at once,
+// and the strays are dealt with alongside.
+func (e *Engine) sendAll(ctx context.Context) (BatchResult, error) {
+	parts := make([]batchPart, 0, len(e.order)+1)
+	for _, l := range e.order {
+		parts = append(parts, func(ctx context.Context) (BatchResult, error) { return e.sendLane(ctx, l) })
+	}
+	parts = append(parts, e.sendStrayBatch)
+	return together(ctx, parts)
+}
+
+// sendLane claims and sends one lane's messages until its channel has none left or the lane has to
+// stop.
+func (e *Engine) sendLane(ctx context.Context, l *lane) (BatchResult, error) {
+	claim := func(ctx context.Context) ([]model.Message, error) {
+		return e.store.ClaimChannelMessages(ctx, l.name(), rules.SendBatchSize)
+	}
+	first, err := claim(ctx)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		// A shutdown that landed before the first claim: nothing was claimed, and a stop is not a
+		// failure.
+		return BatchResult{Retry: true}, nil
+	case err != nil:
+		return BatchResult{}, err
+	case len(first) == 0:
+		return BatchResult{}, nil
+	}
+	return e.runLane(ctx, l, first, claim)
+}
+
+// messageChannel is the channel a message goes out through; empty is the default channel, as it is
+// when a message is written.
+func messageChannel(message model.Message) string {
+	if message.Channel == "" {
+		return model.DefaultChannel
+	}
+	return message.Channel
+}
+
+// runLane sends messages, all of them on l's channel, through l: its bucket, its workers and its
+// channel. claimMore is where the next chunk comes from, or nil when messages is all there is.
+func (e *Engine) runLane(ctx context.Context, l *lane, messages []model.Message,
+	claimMore func(context.Context) ([]model.Message, error)) (BatchResult, error) {
+	result := BatchResult{}
 	suppressed, err := e.store.SuppressedEmails(ctx)
 	if err != nil {
 		return result, err
@@ -301,22 +404,16 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		return result, err
 	}
 
-	// claimMore is where the next chunk comes from, or nil when there is nothing more to ask for: the
-	// explicit-ids path has been given exactly what it is to send, and a queue that came back empty
-	// has nothing left.
+	// claimMore is nil when there is nothing more to ask for: the explicit-ids path has been given
+	// exactly what it is to send, and a queue that came back empty has nothing left.
 	//
 	// Claiming on demand rather than in waves is what keeps the pool busy. A batch that claimed fifty
 	// messages, sent them and only then claimed the next fifty would stand idle for one request
 	// latency at every boundary — at 80 ms a send and 450 a second, that is a fifth of the account's
 	// rate thrown away, and it gets worse the faster the account is.
-	var claimMore func(context.Context) ([]model.Message, error)
-	if len(messageIDs) == 0 {
-		claimMore = func(ctx context.Context) ([]model.Message, error) {
-			return e.store.ClaimMessages(ctx, rules.SendBatchSize)
-		}
-	}
 
-	// The batch is a dispatcher and a pool of workers.
+	// The lane's batch is a dispatcher and a pool of workers, both its own: a lane that is throttled
+	// or waiting on a slow rate holds only its own workers.
 	//
 	// The dispatcher is this goroutine: it hands one message at a time to a worker, collects what comes
 	// back, and decides whether to hand out any more. Every decision that can stop a batch — the
@@ -328,10 +425,7 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 	// unknown on the next start, which means silently dropping a send (D14). What a worker is holding
 	// is not released — it finishes, because deliver only reports a cancellation from before the
 	// request was made (see deliver).
-	concurrency := e.cfg.SendConcurrency
-	if concurrency < 1 {
-		concurrency = 1
-	}
+	concurrency := e.laneConcurrency(l)
 	if concurrency > len(messages) {
 		concurrency = len(messages)
 	}
@@ -343,7 +437,7 @@ func (e *Engine) SendBatch(ctx context.Context, messageIDs []string) (BatchResul
 		go func() {
 			defer workers.Done()
 			for message := range jobs {
-				outcomes <- e.sendOne(ctx, message, suppressedSet)
+				outcomes <- e.sendOne(ctx, l, message, suppressedSet)
 			}
 		}()
 	}
@@ -483,7 +577,7 @@ type sendOutcome struct {
 // It runs on a worker goroutine, so it may not touch anything the dispatcher owns. Everything it does
 // is either its own memory, a store write, or the sender — all of which are already safe for
 // concurrent use.
-func (e *Engine) sendOne(ctx context.Context, message model.Message,
+func (e *Engine) sendOne(ctx context.Context, l *lane, message model.Message,
 	suppressed map[string]bool) sendOutcome {
 	// Anything that leaves this message claimed when the worker returns is a message the next start
 	// recovers as unknown — a silently dropped send (D14). So every failure from here on releases it,
@@ -524,7 +618,7 @@ func (e *Engine) sendOne(ctx context.Context, message model.Message,
 		return sendOutcome{suppressed: 1}
 	}
 
-	delivery, err := e.deliver(ctx, message, loaded, nil)
+	delivery, err := e.deliver(ctx, l, message, loaded, nil)
 	if err != nil {
 		// A cancelled context means we are stopping, not that the message is bad: it never reached
 		// SES, so it goes back to the queue instead of being marked failed.
@@ -536,13 +630,13 @@ func (e *Engine) sendOne(ctx context.Context, message model.Message,
 			e.releaseAll(ctx, []model.Message{message})
 			return sendOutcome{retry: true, stop: true}
 		}
-		outcome, stop := e.handleSendError(ctx, message, loaded, err)
+		outcome, stop := e.handleSendError(ctx, l, message, loaded, err)
 		return sendOutcome{
 			failed: outcome.failed, retry: outcome.retry, stop: stop, campaignID: message.CampaignID,
 		}
 	}
-	// SES took it: that is the event the rate creeps back up on (D8-1).
-	e.onSuccess()
+	// The channel took it: that is the event its rate creeps back up on (D8-1).
+	l.onSuccess()
 	if err := e.recordSent(ctx, message, loaded, delivery); err != nil {
 		// The message went out and its record did not. Releasing it would send it twice, so it stays
 		// claimed: the next start recovers it as unknown, which is "we do not know" and never "send it
@@ -550,30 +644,6 @@ func (e *Engine) sendOne(ctx context.Context, message model.Message,
 		return sendOutcome{err: err, stop: true, campaignID: message.CampaignID}
 	}
 	return sendOutcome{sent: true, campaignID: message.CampaignID}
-}
-
-// onThrottle is SES saying "too fast": the rate halves, and the bucket — the only thing that enforces
-// a rate — is told at once. Reporting a lower rate than we were sending at is the whole point of
-// hearing the throttle.
-func (e *Engine) onThrottle() {
-	if e.control == nil {
-		return
-	}
-	now := time.Now().UTC()
-	e.control.OnThrottle(now)
-	FollowControl(e.control, e.bucket, now)
-}
-
-// onSuccess is a send SES accepted. Enough of those and the rate creeps back toward the account's
-// limit — one step per IncreaseEvery, and never past it — which is what keeps a backoff from being
-// permanent.
-func (e *Engine) onSuccess() {
-	if e.control == nil {
-		return
-	}
-	now := time.Now().UTC()
-	e.control.OnSuccess(now)
-	FollowControl(e.control, e.bucket, now)
 }
 
 // releaseMessage, markSuppressed and the counters run on the detached context: they are the
@@ -625,14 +695,17 @@ type errorOutcome struct {
 	retry  bool
 }
 
-// handleSendError classifies a failed send through the channel's own reading (ClassifySES for SES).
-// Only campaign messages are classified: a message outside a campaign (welcome, confirmation, test)
-// always fails, since there is no campaign to pause.
-func (e *Engine) handleSendError(ctx context.Context, message model.Message, loaded store.MessageContext,
-	cause error) (outcome errorOutcome, stop bool) {
+// handleSendError classifies a failed send through the reading of the channel that refused it
+// (ClassifySES for SES). Only what the channel's Send returned is classified (a sendError): an error
+// the engine raised itself — rendering, signing, the rate limiter — fails the message, because the
+// channel's rules know nothing about it. And only campaign messages are classified: a message outside
+// a campaign (welcome, confirmation, test) always fails, since there is no campaign to pause.
+func (e *Engine) handleSendError(ctx context.Context, l *lane, message model.Message,
+	loaded store.MessageContext, cause error) (outcome errorOutcome, stop bool) {
 	action := rules.ErrorFail
-	if message.CampaignID != "" {
-		action = e.classify(cause)
+	var refused *sendError
+	if message.CampaignID != "" && errors.As(cause, &refused) {
+		action = l.channel.Classify(refused.err)
 	}
 	// Every write below runs on the detached context. We know what became of this message, so the
 	// record of it must not be lost to a shutdown that arrived while it was being written: a message
@@ -671,7 +744,7 @@ func (e *Engine) handleSendError(ctx context.Context, message model.Message, loa
 		write("release", func(writeCtx context.Context) error {
 			return e.store.ReleaseMessage(writeCtx, message.ID)
 		})
-		e.onThrottle()
+		l.onThrottle()
 		return errorOutcome{retry: true}, true
 	case rules.ErrorQuota:
 		// The day's allowance is spent, so no amount of waiting will send this. The message is not a
@@ -701,8 +774,10 @@ type delivery struct {
 	sentAt            time.Time
 }
 
-// deliver renders and sends one message. content overrides the campaign body for test sends.
-func (e *Engine) deliver(ctx context.Context, message model.Message, loaded store.MessageContext,
+// deliver renders one message and sends it through l, which is its channel's lane. content
+// overrides the campaign body for test sends. What the channel's Send returned comes back as a
+// sendError; every other error is the engine's own.
+func (e *Engine) deliver(ctx context.Context, l *lane, message model.Message, loaded store.MessageContext,
 	contentOverride *model.Campaign) (delivery, error) {
 	content, err := e.contentFor(message, loaded, contentOverride)
 	if err != nil {
@@ -750,7 +825,7 @@ func (e *Engine) deliver(ctx context.Context, message model.Message, loaded stor
 		tags["campaign_id"] = message.CampaignID
 	}
 
-	if err := e.bucket.Take(ctx); err != nil {
+	if err := l.bucket.Take(ctx); err != nil {
 		return delivery{}, err
 	}
 	// The send itself runs on a context detached from the batch's, with its own deadline.
@@ -762,9 +837,9 @@ func (e *Engine) deliver(ctx context.Context, message model.Message, loaded stor
 	// RecoverClaimed turns that into unknown, which is "we do not know" and never "send it again".
 	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sendTimeout)
 	defer cancel()
-	providerMessageID, err := e.sender.Send(sendCtx, email, tags)
+	providerMessageID, err := l.channel.Send(sendCtx, email, tags)
 	if err != nil {
-		return delivery{}, err
+		return delivery{}, &sendError{err: err}
 	}
 	return delivery{providerMessageID: providerMessageID, sentAt: now}, nil
 }
@@ -907,7 +982,38 @@ func (e *Engine) settle(ctx context.Context, campaignID string) error {
 // Run sends batches until ctx is cancelled. It never starts a batch after cancellation, and a batch
 // already in flight finishes its writes, so a graceful shutdown cannot leave a message sent in SES
 // but still claimed here without a status (design §3.1).
+//
+// Each lane polls on its own, and so do the strays: a channel that is throttled or slow keeps only
+// its own loop waiting, and another channel's mail goes out as soon as it is queued (multi-channel
+// design §6). The first loop to fail stops the others, and its error is Run's.
 func (e *Engine) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	parts := make([]batchPart, 0, len(e.order)+1)
+	for _, l := range e.order {
+		parts = append(parts, func(ctx context.Context) (BatchResult, error) { return e.sendLane(ctx, l) })
+	}
+	parts = append(parts, e.sendStrayBatch)
+	errs := make(chan error, len(parts))
+	var wg sync.WaitGroup
+	for _, part := range parts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := e.poll(ctx, part); err != nil {
+				errs <- err
+				cancel()
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	return <-errs
+}
+
+// poll runs one part of the batch until ctx is cancelled: on every tick, as many times as it finds
+// work.
+func (e *Engine) poll(ctx context.Context, part batchPart) error {
 	ticker := time.NewTicker(e.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -930,8 +1036,9 @@ func (e *Engine) Run(ctx context.Context) error {
 		if !e.cfg.SendingOn {
 			continue
 		}
-		for {
-			result, err := e.SendBatch(ctx, nil)
+		// SendBatch refused a cancelled context on the way in; a part does not, so the loop asks.
+		for ctx.Err() == nil {
+			result, err := part(ctx)
 			if err != nil {
 				return err
 			}
@@ -1327,7 +1434,12 @@ func (e *Engine) Test(ctx context.Context, campaignID, to string) (TestResult, e
 
 	subject := campaign
 	subject.Subject = "[Test] " + campaign.Subject
-	sent, err := e.deliver(ctx, message, loaded, &subject)
+	// A test goes out through the channel its message is on: the default one until step 2c routes.
+	l, ok := e.laneFor(message.Channel)
+	if !ok {
+		return TestResult{}, fmt.Errorf("no channel named %s is loaded", message.Channel)
+	}
+	sent, err := e.deliver(ctx, l, message, loaded, &subject)
 	if err != nil {
 		if markErr := e.store.MarkMessageFailed(ctx, message.ID, err.Error()); markErr != nil {
 			e.log.Error("mark failed", "message", message.ID, "error", markErr)

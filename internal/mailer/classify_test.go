@@ -19,7 +19,8 @@ func TestTheEngineFollowsTheChannelsOwnErrorReading(t *testing.T) {
 	ctx := context.Background()
 	cfg := f.engine.cfg
 	cfg.SendConcurrency = 1
-	engine := NewEngine(f.db, pausingSender{f.fake}, f.signer, cfg, f.engine.log)
+	engine := NewEngine(f.db, defaultOnly(t, pausingSender{f.fake}, pausingSender{}.Classify), f.signer, cfg,
+		f.engine.log)
 	t.Cleanup(engine.Close)
 
 	if _, err := engine.Queue(ctx, f.campaign.ID, Charge{}); err != nil {

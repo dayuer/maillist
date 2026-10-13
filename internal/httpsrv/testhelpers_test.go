@@ -69,7 +69,12 @@ func newTestServerWith(t *testing.T, tweak func(*config.Config)) *testServer {
 
 	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
 	fake := mailer.NewFake()
-	engine := mailer.NewEngine(db, fake, signer, mailer.Config{
+	channels, err := mailer.NewRegistry(mailer.NewChannel(model.DefaultChannel, mailer.ChannelTypeSES, fake,
+		mailer.StaticQuota{}, mailer.StaticIdentity{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := mailer.NewEngine(db, channels, signer, mailer.Config{
 		AppURL: cfg.AppURL, SendingOn: cfg.SendingOn,
 		SendRatePerSec: 1000, Limits: cfg.Limits, PollInterval: 10 * time.Millisecond,
 	}, testLogger(t))

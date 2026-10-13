@@ -16,14 +16,16 @@ import (
 // loadChannels builds every enabled configured channel next to the default one. A channel this
 // deployment cannot build is left out and reported in problems rather than failing: every command
 // opens the app, and the one that fixes a broken channel must still run. serve refuses to start while
-// there is a problem (App.CheckChannels).
+// there is a problem (App.CheckChannels). limits are the built channels' own ceilings, which the
+// engine caps each channel's rate with.
 func loadChannels(ctx context.Context, cfg config.Config, db *store.DB,
-	defaultChannel mailer.Channel) (*mailer.Registry, map[string]error, error) {
+	defaultChannel mailer.Channel) (*mailer.Registry, map[string]mailer.ChannelLimit, map[string]error, error) {
 	rows, err := db.Channels(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read channels: %w", err)
+		return nil, nil, nil, fmt.Errorf("read channels: %w", err)
 	}
 	problems := map[string]error{}
+	limits := map[string]mailer.ChannelLimit{}
 	built := make([]mailer.Channel, 0, len(rows))
 	for _, row := range rows {
 		if !row.Enabled {
@@ -35,12 +37,13 @@ func loadChannels(ctx context.Context, cfg config.Config, db *store.DB,
 			continue
 		}
 		built = append(built, channel)
+		limits[row.Name] = mailer.ChannelLimit{MaxPerSecond: row.MaxPerSecond}
 	}
 	registry, err := mailer.NewRegistry(defaultChannel, built...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return registry, problems, nil
+	return registry, limits, problems, nil
 }
 
 // SpecOf is the part of a stored channel that channelspec checks.
