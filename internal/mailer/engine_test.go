@@ -109,11 +109,24 @@ func newFixtureConfigured(t *testing.T, contacts int, configure func(*Config),
 		configure(&cfg)
 	}
 	logs := newLogCapture(t)
-	engine := NewEngine(db, fake, signer, cfg, slog.New(slog.NewTextHandler(logs, nil)))
+	engine := NewEngine(db, defaultOnly(t, fake, nil), signer, cfg, slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(engine.Close)
 
 	return &fixture{db: db, engine: engine, fake: fake, signer: signer, logs: logs,
 		newsletter: newsletter, campaign: campaign, contacts: audience}
+}
+
+// defaultOnly is a registry with one channel, the default, sending through sender and reading its
+// errors with classify (nil: SES's rules). It is how a test that is not about channels builds an
+// engine.
+func defaultOnly(t testing.TB, sender Sender, classify func(error) rules.ErrorAction) *Registry {
+	t.Helper()
+	registry, err := NewRegistry(NewChannel(model.DefaultChannel, ChannelTypeSES, sender, StaticQuota{},
+		StaticIdentity{}, classify))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry
 }
 
 // logCapture is a logger that writes what the engine said into the test's own output, and keeps a
@@ -359,7 +372,7 @@ func TestRecoverClaimedNeverResends(t *testing.T) {
 		t.Fatalf("recovered = %d, want 3", recovered)
 	}
 	// A fresh engine over the same file sends nothing more.
-	engine := NewEngine(f.db, f.fake, f.signer, f.engine.cfg, nil)
+	engine := NewEngine(f.db, defaultOnly(t, f.fake, nil), f.signer, f.engine.cfg, nil)
 	defer engine.Close()
 	result, err = engine.SendBatch(ctx, nil)
 	if err != nil {

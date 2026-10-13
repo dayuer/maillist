@@ -127,7 +127,12 @@ func newWorldAt(t *testing.T, server *httptest.Server, fake *mailer.Fake, contac
 	control := ratectl.New(controllerConfig)
 	control.SetQuota(quota, time.Now().UTC())
 
-	engine := mailer.NewEngine(db, sender, signer, mailer.Config{
+	channels, err := mailer.NewRegistry(mailer.NewChannel(model.DefaultChannel, mailer.ChannelTypeSES, sender,
+		reader, mailer.StaticIdentity{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := mailer.NewEngine(db, channels, signer, mailer.Config{
 		AppURL: "https://mail.example.com", SendingOn: true,
 		SendRatePerSec: int(control.Rate(time.Now().UTC())),
 		Limits: model.Limits{

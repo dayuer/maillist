@@ -60,7 +60,7 @@ nibwire channel enable <name>
 
 | 类型 | 参数 |
 |---|---|
-| `ses` | `--region`（必填）、`--configuration-set`、`--tenant`、`--endpoint` |
+| `ses` | `--region` 或 `--endpoint`（至少其一）、`--configuration-set`、`--tenant` |
 | `resend` | 无 |
 | `sendgrid` | 无 |
 

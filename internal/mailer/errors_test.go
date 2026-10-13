@@ -131,7 +131,7 @@ func TestAThrottleHalvesTheRateAndTheBucketFollows(t *testing.T) {
 	if got := control.Rate(time.Now()); got != 225 {
 		t.Fatalf("rate after a throttle = %v, want 225", got)
 	}
-	if got := f.engine.bucket.Rate(); got != 225 {
+	if got := f.engine.defaultLane().bucket.Rate(); got != 225 {
 		t.Fatalf("bucket rate = %v, want 225: the controller may decide the rate, but the bucket is "+
 			"what enforces it", got)
 	}

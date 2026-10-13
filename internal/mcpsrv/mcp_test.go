@@ -83,7 +83,12 @@ func newFixtureFull(t *testing.T, scopes []creds.Scope, budget int) *fixture {
 	// account's allowance are not refused by it. The tests that do say something set their own.
 	control := ratectl.New(ratectl.Config{Headroom: 0.9})
 	control.SetQuota(ratectl.Quota{MaxSendRate: 1000, Max24HourSend: -1}, time.Now().UTC())
-	engine := mailer.NewEngine(db, fake, signer, mailer.Config{
+	channels, err := mailer.NewRegistry(mailer.NewChannel(model.DefaultChannel, mailer.ChannelTypeSES, fake,
+		mailer.StaticQuota{}, mailer.StaticIdentity{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := mailer.NewEngine(db, channels, signer, mailer.Config{
 		AppURL: "https://mail.example.com", SendingOn: true, SendRatePerSec: 1000,
 		Limits: limits, PollInterval: 10 * time.Millisecond, RateControl: control,
 	}, slog.Default())
