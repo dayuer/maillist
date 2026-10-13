@@ -37,7 +37,8 @@ func stateQueriesFor(name string) stateQueries {
 	if name == model.DefaultChannel {
 		return stateQueries{
 			mark: `UPDATE default_channel_state SET
-                down_since = CASE WHEN down_reason = '' THEN ? ELSE down_since END,
+                down_since = CASE WHEN down_reason = '' OR (down_until IS NOT NULL AND down_until <= ?)
+                    THEN ? ELSE down_since END,
                 down_reason = ?, down_until = ?
             WHERE only = 1`,
 			reason: "SELECT down_reason FROM default_channel_state WHERE only = 1",
@@ -48,7 +49,8 @@ func stateQueriesFor(name string) stateQueries {
 	}
 	return stateQueries{
 		mark: `UPDATE channels SET
-                down_since = CASE WHEN down_reason = '' THEN ? ELSE down_since END,
+                down_since = CASE WHEN down_reason = '' OR (down_until IS NOT NULL AND down_until <= ?)
+                    THEN ? ELSE down_since END,
                 down_reason = ?, down_until = ?
             WHERE name = ?`,
 		reason: "SELECT down_reason FROM channels WHERE name = ?",
@@ -60,7 +62,9 @@ func stateQueriesFor(name string) stateQueries {
 }
 
 // MarkChannelDown records that a channel is out of service. Marking a channel that is already down
-// updates the reason and until and keeps when it first went down.
+// updates the reason and until and keeps when it first went down. A state whose down_until has
+// passed is a channel that came back, so marking it again starts a new episode with a new since.
+// (TimeLayout is fixed-width, so comparing the TEXT columns compares the times.)
 func (db *DB) MarkChannelDown(ctx context.Context, name, reason string, until *time.Time) error {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -70,7 +74,7 @@ func (db *DB) MarkChannelDown(ctx context.Context, name, reason string, until *t
 	now := formatTime(time.Now().UTC())
 	return db.Write(ctx, func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, queries.mark,
-			append([]any{now, reason, formatTimePtr(until)}, queries.args...)...)
+			append([]any{now, now, reason, formatTimePtr(until)}, queries.args...)...)
 		if err != nil {
 			return err
 		}

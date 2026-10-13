@@ -88,6 +88,38 @@ func TestMarkingAgainKeepsWhenItWentDown(t *testing.T) {
 	}
 }
 
+// 不可用状态过期后再次标记：那是新的一次故障，down_since 重新记。配置的渠道与 default 都一样。
+func TestMarkingAfterExpiryStartsANewEpisode(t *testing.T) {
+	ctx := context.Background()
+	db := openTemp(t)
+	createTestChannel(t, db, "aws2")
+
+	for _, name := range []string{"aws2", model.DefaultChannel} {
+		expired := time.Now().UTC().Add(-time.Second)
+		if err := db.MarkChannelDown(ctx, name, "daily quota used up", &expired); err != nil {
+			t.Fatal(err)
+		}
+		first, err := db.ChannelDown(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first.DownAt(time.Now()) {
+			t.Fatalf("%s: an expired state is down: %+v", name, first)
+		}
+		time.Sleep(5 * time.Millisecond)
+		if err := db.MarkChannelDown(ctx, name, "account paused", nil); err != nil {
+			t.Fatal(err)
+		}
+		second, err := db.ChannelDown(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if second.Reason != "account paused" || second.Since == nil || !second.Since.After(*first.Since) {
+			t.Fatalf("%s: re-marking after expiry kept the old since: first %+v, second %+v", name, first, second)
+		}
+	}
+}
+
 func TestClearingSaysWhetherTheChannelWasDown(t *testing.T) {
 	ctx := context.Background()
 	db := openTemp(t)
