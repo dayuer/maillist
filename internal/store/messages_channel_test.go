@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"nibwire/internal/core/model"
 )
 
 // claimedEmails is the claimed messages' addresses, sorted, so a test can compare sets.
@@ -12,6 +14,62 @@ func claimedEmails(t *testing.T, claimed []string) string {
 	t.Helper()
 	sort.Strings(claimed)
 	return strings.Join(claimed, ",")
+}
+
+// 领取查询必须走 messages_claim_channel（迁移 0008），而不是每次把全部待发行排一遍序：20 万待发时，
+// 旧计划把领取卡在约 180/s（#76 复审的第二条要求）。
+//
+// Both claims filter on status and want the oldest waiting rows in created_at, id order: one for a
+// channel, one for everything outside a set of them. messages_claimable(status, kind, id) serves
+// neither order, so this index is what keeps a claim a walk instead of a sort.
+func TestTheClaimQueriesUseTheChannelIndex(t *testing.T) {
+	db := openTemp(t)
+	for name, claim := range map[string]struct {
+		sql  string
+		args []any
+	}{
+		"one channel": {
+			sql: "SELECT id FROM messages WHERE status = ? AND " + claimableCampaign +
+				" AND channel = ? ORDER BY created_at, id LIMIT ?",
+			args: append(append([]any{string(model.MessagePending)}, claimableArgs()...), "aws2", 100),
+		},
+		"every channel but these": {
+			sql: "SELECT id FROM messages WHERE status = ? AND " + claimableCampaign +
+				" AND channel NOT IN (?,?) ORDER BY channel, created_at, id LIMIT ?",
+			args: append(append([]any{string(model.MessagePending)}, claimableArgs()...), "aws2", "back", 100),
+		},
+	} {
+		plan := explainQuery(t, db, claim.sql, claim.args...)
+		if !strings.Contains(plan, "messages_claim_channel") {
+			t.Errorf("%s does not use messages_claim_channel:\n%s", name, plan)
+		}
+		if strings.Contains(plan, "TEMP B-TREE") {
+			t.Errorf("%s sorts the waiting set before it walks it:\n%s", name, plan)
+		}
+	}
+}
+
+// explainQuery is the plan SQLite would run for a query, one line per step.
+func explainQuery(t *testing.T, db *DB, query string, args ...any) string {
+	t.Helper()
+	rows, err := db.sql.Query("EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var lines []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Each channel's lane claims only its own messages, so a channel that is slow or throttled never

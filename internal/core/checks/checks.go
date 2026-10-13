@@ -33,16 +33,18 @@ type Rendered struct {
 	HasContent bool
 }
 
-// Input is everything the checklist looks at. DomainVerified is whether SES has verified the
-// sending domain; Audience is how many contacts the campaign would reach.
+// Input is everything the checklist looks at. UnverifiedChannels are the channels this campaign's
+// mail would go out through that have not verified the sending domain — one channel's account being
+// verified says nothing about another's, so the question is asked per channel (design §4.6);
+// Audience is how many contacts the campaign would reach.
 type Input struct {
-	Campaign       model.Campaign
-	Newsletter     model.Newsletter
-	Rendered       Rendered
-	SendingOn      bool
-	DomainVerified bool
-	Audience       int
-	Limits         model.Limits
+	Campaign           model.Campaign
+	Newsletter         model.Newsletter
+	Rendered           Rendered
+	SendingOn          bool
+	UnverifiedChannels []string
+	Audience           int
+	Limits             model.Limits
 }
 
 // Run returns the checklist in a fixed order, whether or not each row passes.
@@ -70,10 +72,26 @@ func Run(in Input) []Check {
 			ID: "address", OK: strings.TrimSpace(in.Newsletter.PostalAddress) != "",
 			Blocking: true, Message: "Add a postal address to the newsletter",
 		},
-		{ID: "domain", OK: in.DomainVerified, Blocking: true, Message: "Verify the sending domain in SES"},
+		{
+			ID: "domain", OK: len(in.UnverifiedChannels) == 0, Blocking: true,
+			Message: unverifiedDomainMessage(in.UnverifiedChannels),
+		},
 		{ID: "test", OK: in.Campaign.TestSentAt != nil},
 		{ID: "sending", OK: in.SendingOn, Blocking: true, Message: "Sending is off"},
 	}
+}
+
+// unverifiedDomainMessage says where the domain has to be verified. The default channel is the SES
+// account the SES_* settings describe, so a failure there keeps the wording it has always had;
+// another channel has an account of its own, and is named.
+func unverifiedDomainMessage(unverified []string) string {
+	if len(unverified) == 0 {
+		return ""
+	}
+	if len(unverified) == 1 && unverified[0] == model.DefaultChannel {
+		return "Verify the sending domain in SES"
+	}
+	return "Verify the sending domain in " + strings.Join(unverified, ", ")
 }
 
 // Blocked returns the first failing blocking check.

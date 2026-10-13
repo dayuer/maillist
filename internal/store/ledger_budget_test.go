@@ -21,7 +21,7 @@ func TestReserveAndInsertWritesNothingWhenTheBudgetIsSpent(t *testing.T) {
 	day := Day(time.Now().UTC())
 
 	messages := campaignMessages(t, db, campaign, 3)
-	fits, inserted, err := db.ReserveAndInsert(ctx, day, "", 3, 2, 0, messages)
+	fits, inserted, err := db.ReserveAndInsert(ctx, day, "", Limits{Global: 2}, messages)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestReserveAndInsertChargesOnlyForWhatItWrote(t *testing.T) {
 	day := Day(time.Now().UTC())
 
 	messages := campaignMessages(t, db, campaign, 3)
-	fits, inserted, err := db.ReserveAndInsert(ctx, day, "", 3, 100, 0, messages)
+	fits, inserted, err := db.ReserveAndInsert(ctx, day, "", Limits{Global: 100}, messages)
 	if err != nil || !fits || inserted != 3 {
 		t.Fatalf("first pass: fits = %v, inserted = %d, %v", fits, inserted, err)
 	}
@@ -63,7 +63,7 @@ func TestReserveAndInsertChargesOnlyForWhatItWrote(t *testing.T) {
 	// The same rows again — a job retried after inserting and before finishing. New ids, same
 	// (campaign, contact) pairs, so the unique index turns them away and nothing is charged.
 	retry := campaignMessagesFor(t, db, campaign, messages)
-	fits, inserted, err = db.ReserveAndInsert(ctx, day, "", 3, 100, 0, retry)
+	fits, inserted, err = db.ReserveAndInsert(ctx, day, "", Limits{Global: 100}, retry)
 	if err != nil || !fits {
 		t.Fatalf("retry: fits = %v %v", fits, err)
 	}
@@ -90,7 +90,7 @@ func TestAStepWritesEveryChunkAndIsChargedExactlyOnce(t *testing.T) {
 
 	const messages = 2500 // more than two chunks of InsertChunkSize
 	step := campaignMessages(t, db, campaign, messages)
-	fits, inserted, err := db.ReserveAndInsert(ctx, day, "", len(step), 100_000, 0, step)
+	fits, inserted, err := db.ReserveAndInsert(ctx, day, "", Limits{Global: 100_000}, step)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestAStepWritesEveryChunkAndIsChargedExactlyOnce(t *testing.T) {
 
 	// The same step again — new ids, the same addresses — writes nothing and charges nothing: the
 	// charge follows the rows, not the attempt.
-	fits, inserted, err = db.ReserveAndInsert(ctx, day, "", messages, 100_000, 0,
+	fits, inserted, err = db.ReserveAndInsert(ctx, day, "", Limits{Global: 100_000},
 		campaignMessagesFor(t, db, campaign, step))
 	if err != nil || !fits || inserted != 0 {
 		t.Fatalf("second pass: fits = %v, inserted = %d, %v", fits, inserted, err)
@@ -171,7 +171,7 @@ func TestAStepBeingWrittenDoesNotBlockASingleRow(t *testing.T) {
 		defer close(done)
 		// The error is not the subject: the rows either go in or the count below says they did not,
 		// and a t.Fatal from this goroutine would be from the wrong one.
-		_, _, _ = db.ReserveAndInsert(ctx, Day(time.Now().UTC()), "", len(step), 1_000_000, 0, step)
+		_, _, _ = db.ReserveAndInsert(ctx, Day(time.Now().UTC()), "", Limits{Global: 1_000_000}, step)
 	}()
 
 	// Wait until the step is being written. Its first chunk is committed with the reservation, so
@@ -220,17 +220,17 @@ func TestRefund(t *testing.T) {
 	ctx := context.Background()
 	day := Day(time.Now().UTC())
 
-	if fits, err := db.Reserve(ctx, day, "", 10, 100, 0); err != nil || !fits {
+	if fits, err := db.Reserve(ctx, day, "", throughDefault(10), Limits{Global: 100}); err != nil || !fits {
 		t.Fatalf("reserve = %v %v", fits, err)
 	}
-	if err := db.Refund(ctx, day, "", 4); err != nil {
+	if err := db.Refund(ctx, day, "", throughDefault(4)); err != nil {
 		t.Fatal(err)
 	}
 	if reserved, err := db.Reserved(ctx, day, ""); err != nil || reserved != 6 {
 		t.Fatalf("reserved = %d %v, want 6", reserved, err)
 	}
 	// A double refund cannot drive the pool negative.
-	if err := db.Refund(ctx, day, "", 100); err != nil {
+	if err := db.Refund(ctx, day, "", throughDefault(100)); err != nil {
 		t.Fatal(err)
 	}
 	if reserved, err := db.Reserved(ctx, day, ""); err != nil || reserved != 0 {

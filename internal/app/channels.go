@@ -8,10 +8,27 @@ import (
 
 	"nibwire/internal/config"
 	"nibwire/internal/core/channelspec"
+	"nibwire/internal/core/model"
 	"nibwire/internal/core/ratectl"
 	"nibwire/internal/mailer"
+	"nibwire/internal/presend"
 	"nibwire/internal/store"
 )
+
+// IdentitiesOf is the object that answers whether a domain is verified for sending through a channel:
+// the channel itself. The default channel's is the SES account the SES_* settings describe, and every
+// other channel has an account of its own, with its own list of verified domains. A channel this
+// process cannot send through has none, which the pre-send checklist reports as unverified.
+func (a *App) IdentitiesOf(channel string) (presend.Identities, bool) {
+	if channel == model.DefaultChannel {
+		return a.Channel, true
+	}
+	configured, ok := a.Channels.Get(channel)
+	if !ok {
+		return nil, false
+	}
+	return configured, true
+}
 
 // loadChannels builds every enabled configured channel next to the default one. A channel this
 // deployment cannot build is left out and reported in problems rather than failing: every command
@@ -37,7 +54,7 @@ func loadChannels(ctx context.Context, cfg config.Config, db *store.DB,
 			continue
 		}
 		built = append(built, channel)
-		limits[row.Name] = mailer.ChannelLimit{MaxPerSecond: row.MaxPerSecond}
+		limits[row.Name] = mailer.ChannelLimit{MaxPerSecond: row.MaxPerSecond, MaxPerDay: row.MaxPerDay}
 	}
 	registry, err := mailer.NewRegistry(defaultChannel, built...)
 	if err != nil {

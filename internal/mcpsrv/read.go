@@ -550,11 +550,27 @@ func preSendChecks(ctx context.Context, deps Deps, campaign model.Campaign) ([]c
 	if err != nil {
 		return nil, 0, err
 	}
-	report, err := presend.Assemble(ctx, deps.Identities, deps.Store, deps.Config, campaign, newsletter)
+	report, err := presend.Assemble(ctx, channelIdentities{deps}, deps.Store, deps.Config, campaign, newsletter)
 	if err != nil {
 		return nil, 0, err
 	}
 	return report.Checks, report.Audience, nil
+}
+
+// channelIdentities is the pre-send checklist's view of the channels, built from what a session
+// already has: the default channel's reader (which is the SES account the SES_* settings describe and
+// is not in the registry), and every configured channel's own.
+type channelIdentities struct{ deps Deps }
+
+func (c channelIdentities) IdentitiesOf(channel string) (presend.Identities, bool) {
+	if channel == model.DefaultChannel {
+		return c.deps.Identities, true
+	}
+	configured, ok := c.deps.Channels.Get(channel)
+	if !ok {
+		return nil, false
+	}
+	return configured, true
 }
 
 func knownContactStatus(status model.ContactStatus) bool {

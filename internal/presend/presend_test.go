@@ -23,6 +23,17 @@ func (a countingAudience) CountActiveContacts(context.Context, string) (int, err
 	return a.count, a.err
 }
 
+// ChannelsForAudience puts the whole audience on the default channel: these tests are about the
+// checklist, and this is what a deployment with no routing rules has.
+func (a countingAudience) ChannelsForAudience(context.Context, string, int) (map[string]int, error) {
+	return map[string]int{model.DefaultChannel: a.count}, a.err
+}
+
+// oneChannel is the checklist's view of a deployment whose only channel is that reader.
+type oneChannel struct{ identities Identities }
+
+func (c oneChannel) IdentitiesOf(string) (Identities, bool) { return c.identities, true }
+
 func sendingConfig() config.Config {
 	return config.Config{
 		SendingOn: true,
@@ -68,7 +79,7 @@ func (r *recordingIdentities) VerifiedDomain(_ context.Context, domain string) (
 // 一次装配同时给出清单与受众数，且这条装配给出的清单是"可以发"：两条检查（unsubscribe 与 content）
 // 的数据不再由 checks 自己去渲染，所以这条测试是它们与真正渲染结果之间唯一的一次对接。
 func TestAssembleAnswersAReadyCampaignWithEveryRowPassing(t *testing.T) {
-	report, err := Assemble(context.Background(), identityReader("example.net"),
+	report, err := Assemble(context.Background(), oneChannel{identityReader("example.net")},
 		countingAudience{count: 42}, sendingConfig(), readyCampaign(), readyNewsletter())
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +100,7 @@ func TestAssembleAnswersAReadyCampaignWithEveryRowPassing(t *testing.T) {
 // 模板变量必须真的出现在渲染结果里：装配把 render.UnsubscribePlaceholder 交给清单，清单再在 HTML 里
 // 找它。把渲染换成"渲染了但没放 unsubscribe"的形状，这条就会红——那正是清单会悄悄放行的方向。
 func TestAssemblePassesTheUnsubscribeLinkItActuallyRendered(t *testing.T) {
-	report, err := Assemble(context.Background(), identityReader("example.net"),
+	report, err := Assemble(context.Background(), oneChannel{identityReader("example.net")},
 		countingAudience{count: 1}, sendingConfig(), readyCampaign(), readyNewsletter())
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +121,7 @@ func TestAssemblePassesTheUnsubscribeLinkItActuallyRendered(t *testing.T) {
 
 // 域名没验证就拦：SES 会收下调用然后把信丢掉，看起来是发出去了，其实没有。
 func TestAssembleBlocksOnADomainTheNewsletterDoesNotSendFrom(t *testing.T) {
-	report, err := Assemble(context.Background(), identityReader("other.example"),
+	report, err := Assemble(context.Background(), oneChannel{identityReader("other.example")},
 		countingAudience{count: 1}, sendingConfig(), readyCampaign(), readyNewsletter())
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +136,7 @@ func TestAssembleBlocksOnADomainTheNewsletterDoesNotSendFrom(t *testing.T) {
 func TestAssembleBlocksOnAnEmptyBody(t *testing.T) {
 	campaign := readyCampaign()
 	campaign.Body = "<p></p>"
-	report, err := Assemble(context.Background(), identityReader("example.net"),
+	report, err := Assemble(context.Background(), oneChannel{identityReader("example.net")},
 		countingAudience{count: 1}, sendingConfig(), campaign, readyNewsletter())
 	if err != nil {
 		t.Fatal(err)
@@ -139,16 +150,16 @@ func TestAssembleBlocksOnAnEmptyBody(t *testing.T) {
 // 装配只问一个域名：newsletter 的发信域名，取出来是去掉大小写的裸域名。少问或多问都会让租户密钥
 // 收不窄（#57）。
 func TestAssembleAsksAboutTheFromDomainAndNothingElse(t *testing.T) {
-	identities := identityReader("example.net")
+	reader := identityReader("example.net")
 	newsletter := readyNewsletter()
 	newsletter.FromEmail = "Jane@Example.NET"
 
-	if _, err := Assemble(context.Background(), identities, countingAudience{count: 1},
+	if _, err := Assemble(context.Background(), oneChannel{reader}, countingAudience{count: 1},
 		sendingConfig(), readyCampaign(), newsletter); err != nil {
 		t.Fatal(err)
 	}
-	if len(identities.asked) != 1 || identities.asked[0] != "example.net" {
-		t.Fatalf("asked about %v, want exactly the from domain %q", identities.asked, "example.net")
+	if len(reader.asked) != 1 || reader.asked[0] != "example.net" {
+		t.Fatalf("asked about %v, want exactly the from domain %q", reader.asked, "example.net")
 	}
 }
 
@@ -156,7 +167,7 @@ func TestAssembleAsksAboutTheFromDomainAndNothingElse(t *testing.T) {
 // 一份结论。
 func TestAssembleFailsWhenTheIdentitiesCannotBeRead(t *testing.T) {
 	_, err := Assemble(context.Background(),
-		&recordingIdentities{err: errors.New("SES is unreachable")},
+		oneChannel{&recordingIdentities{err: errors.New("SES is unreachable")}},
 		countingAudience{count: 1}, sendingConfig(), readyCampaign(), readyNewsletter())
 	if err == nil || !strings.Contains(err.Error(), "SES is unreachable") {
 		t.Fatalf("err = %v", err)
@@ -165,7 +176,7 @@ func TestAssembleFailsWhenTheIdentitiesCannotBeRead(t *testing.T) {
 
 // 受众数读不出来时也失败：清单里的 size 是拿白名单比大小，受众数是操作员据以发信的数，不能缺。
 func TestAssembleFailsWhenTheAudienceCannotBeCounted(t *testing.T) {
-	_, err := Assemble(context.Background(), identityReader("example.net"),
+	_, err := Assemble(context.Background(), oneChannel{identityReader("example.net")},
 		countingAudience{err: errors.New("no such newsletter")}, sendingConfig(),
 		readyCampaign(), readyNewsletter())
 	if err == nil || !strings.Contains(err.Error(), "no such newsletter") {

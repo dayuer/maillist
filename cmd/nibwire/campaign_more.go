@@ -508,7 +508,7 @@ func runCampaignResume(cmd *cobra.Command, args []string) error {
 // "this goes to N" — and not a check of its own.
 func runChecks(ctx context.Context, a *app.App, campaign model.Campaign,
 	newsletter model.Newsletter) ([]checks.Check, int, error) {
-	report, err := presend.Assemble(ctx, a.Identities, a.Store, a.Config, campaign, newsletter)
+	report, err := presend.Assemble(ctx, a, a.Store, a.Config, campaign, newsletter)
 	if err != nil {
 		return nil, 0, err
 	}

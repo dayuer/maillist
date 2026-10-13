@@ -3010,7 +3010,7 @@ PR 描述第一行 `[impl] …`、第二行 `<!-- agent: impl-local -->`，写 `
 | `internal/store/routes_test.go` | 新建 | 读写与顺序测试 |
 | `cmd/nibwire/route.go` | 新建 | `route` 命令组 |
 | `cmd/nibwire/root.go` | 改 | 注册 `newRouteCmd()` |
-| `cmd/nibwire/cli_test.go` | 改 | 注册 `routeid`：把 id 从 `route list --json` 里取出来给脚本用 |
+| `cmd/nibwire/cli_test.go` | 改 | 注册 `routeid`：读数据库，把某条规则的 id 放进环境变量给脚本用 |
 | `cmd/nibwire/testdata/script/routes.txtar` | 新建 | 命令端到端 |
 | `docs/superpowers/plans/2026-10-13-multi-channel-step2.md` | 改 | 本节；子步表与迁移编号 |
 | `docs/superpowers/specs/2026-10-12-multi-channel-sending-design.md` | 改 | 第 7 节迁移表 |
@@ -3333,27 +3333,102 @@ PR 描述写明：`Fixes #79`；改动（`core/route`、`0007_routes.sql`、stor
 
 ---
 
-## 2c-2：入队分配与按渠道额度（概要）
+## 2c-2：入队分配与按渠道额度
 
-**目标**：入队时按规则给每封邮件定渠道；额度按渠道预留。
+**目标**：入队时按规则给每封邮件定渠道；额度按渠道预留；`route test` 把这件事说给运维听；发送前检查按"这封 issue 要走的每个渠道"问域名。依赖 2c-1（规则）与 2b（每渠道一条 lane）。
 
-**迁移 0008**
+### 文件
 
-`send_ledger` 主键加入 `channel`（重建并拷贝，旧行记为 default），见设计第 7 节。
+| 文件 | 动作 | 职责 |
+|---|---|---|
+| `internal/store/migrations/0008_send_ledger_channel.sql` | 新建 | `send_ledger` 主键加 `channel`（重建并拷贝）；`messages_claim_channel` 索引 |
+| `internal/store/db_test.go` | 改 | 迁移计数 8→9 |
+| `internal/store/ledger.go` | 改 | `Charge`、`Limits` 与按渠道的预留/退还/查询 |
+| `internal/store/messages.go` | 改 | `ReserveAndInsert` 从消息推出 charge、按渠道退款；`ChargeOfCampaign` |
+| `internal/store/routes.go` | 改 | `RoutesAsRules`、`ChannelsForAudience` |
+| `internal/store/messages_channel.go` | 改 | 承接 `MessageByProviderID`、`AdoptProviderMessageID`、`MarkMessageSent` |
+| `internal/core/route/route.go` | 改 | `PickRule`、`Rule.Channel`、`Counts` |
+| `internal/core/checks/checks.go` | 改 | `Input.UnverifiedChannels`；`domain` 一行的消息按渠道说 |
+| `internal/presend/presend.go` | 改 | `ChannelIdentities`；`Audience` 加 `ChannelsForAudience` |
+| `internal/mailer/engine.go` | 改 | 入队定渠道、按渠道的上限与拒绝理由、单封信的回退 |
+| `internal/mailer/lane.go` | 改 | `ChannelLimit.MaxPerDay` |
+| `internal/app/channels.go` | 改 | 填 `MaxPerDay`；`IdentitiesOf` |
+| `internal/mcpsrv/read.go` | 改 | `check_campaign` 的渠道视图 |
+| `cmd/nibwire/route.go` | 改 | `route test --newsletter` |
+| `cmd/nibwire/testdata/script/routes.txtar` | 改 | `route test` 与停用/未验证的两条分支 |
 
-**任务**
+### 决策（设计与上一版概要留给实现的部分）
 
-1. 迁移 0008 与 `send_ledger` 重建；`reserveTx`/`refundTx`/`Reserved`/`ReserveAndInsert`/`ReserveForResume` 加 `channel` 维度：按渠道分组预留，任一渠道不足则整体失败且不留半截预留；全局 `MAX_SENDS_PER_DAY` 与按凭据上限仍按 `day` 汇总所有渠道。
-2. `Engine.Queue`/`QueueStep`/续发/`Test`/`queueSignup`：用 `route.Pick`（2c-1）给每封邮件定 `Channel`（顺带给 `queueSignup` 补上 `Provider`）；`budgetReason` 指明是哪个渠道不足；`sesQuotaRefusal` 按渠道。
-3. `messages_channel.go`：把 `MessageByProviderID`、`AdoptProviderMessageID`、`MarkMessageSent` 移入；约束"`provider_message_id` 非空后渠道不可改"写成存储层不变量（UPDATE 带 `provider_message_id = ''` 条件）。
-4. `route test --newsletter <slug>`：按真实受众输出每条规则、每个渠道的人数，并列出缺验证或额度不足的渠道。
-5. 发送前检查：`core/checks` 的 `domain` 检查改为"所用渠道都已验证该发件域名"，消息列出缺验证的渠道；`TestRunReturnsTenChecksInOrder` 的 ID 与顺序不变，只改消息文本与输入（`Input` 加 `UnverifiedChannels []string`）。
+1. **一次预留就是一组数**：`store.Charge`（渠道 → 封数）取代裸的 `n`；`store.Limits` 是三层上限（部署总量、凭据总量、每渠道 `max_per_day`）。任一渠道不足则整次拒绝，先查完再写，一个渠道都不留（设计 §4.3）。部署与凭据的上限仍按 `day` 汇总所有渠道。
+2. **charge 由消息本身推出**（`store.ChargeOf`），`ReserveAndInsert` 不再收一个可能对不上的 `n`；"写进去的才计费"用 `INSERT ... RETURNING channel` 精确到渠道，退款按渠道各退各的。
+3. **领取索引**：`messages_claim_channel(status, channel, created_at, id)`。渠道内那条按 `created_at, id` 走它；**渠道外那条改成 `ORDER BY channel, created_at, id`** —— "不属于这几个渠道"不是索引能走的范围，按时间排会退化成把全部待发行排序。审查里那句"两种领取查询都走该索引且无临时排序"，只有改过顺序才成立；`messages_channel_test.go` 的 EXPLAIN 测试钉住两种计划。
+4. **规则指到发不出去的渠道**：campaign **整步拒绝**并说出渠道（不静默改道，改道是 2d 的事）；确认信、欢迎信、测试信这类**单封信退回 default**，并记一条 warn —— 等一封永远不会来的确认信，比按老办法发出去更糟（#76 的硬性要求）。
+5. **`route test` 只说数据库能回答的**：每条规则拿走多少人、比例分流每条渠道多少人（0 也打）、以及渠道停用/不存在/构建失败、域名没在该渠道验证、渠道自己的 `max_per_day` 放不下。SES 账户的 24 小时额度仍归 `nibwire quota`——那是问服务商。
+6. **发送前检查的"所用渠道"**由规则套在真实受众上算出（`ChannelsForAudience` → `route.Counts`）；受众为空时退回问 default。fallback 链要等 2d 第二段。
+7. **单条 default 规则的部分唯一索引**（2c-1 复审的建议）：现在仍只有 `CreateRoute` 一条写路径，不另加索引；2d 第二段若出现改道写路径再补。
+8. **`--to` 去掉首尾空格**（2c-1 复审第 3 条）：与 `--split` 一致。
+9. **没有做：`SendingRate` 按渠道。** 引擎内部每个渠道确实各有一套 `ratectl.Controller`（2b），没有按渠道报的是**报告面**：`nibwire quota` 的 account/sending/24h remaining、`campaign check`（CLI 与 MCP `check_campaign`）的预计用时、以及 `checkAllowance` 的发送前预检，都还只读 default 渠道。这三处要一起改成"每个渠道一行/一个数"，包括预计用时要按这封 issue 的渠道分布算，属于独立的一步；2c-2 不做，也**没有**把它当成已完成。多渠道路由已经生效，所以：`nibwire quota` 现在只说 default 渠道的速率，别的渠道的速率要从 `channel list` 的 `max-per-second` 与各自的账户看。
 
-**停用渠道的运行时含义**：入队时若某封邮件命中的规则指向已停用的渠道（单一目标，或比例分流中被选中的目标），入队整体失败并指明规则与渠道，不静默改道；改道是 2d 故障切换的职责。
+### Task 0：issue 与分支
+
+- [ ] **Step 1：认领**：`gh issue edit 76 --remove-label status:blocked --add-label status:claimed`，评论 `CLAIM`。
+- [ ] **Step 2：分支**：`git worktree add .claude/worktrees/impl-channel-budget -b impl/channel-budget origin/main`。
+
+### Task 1：迁移 0008 与按渠道的账本
+
+**Files:** `internal/store/migrations/0008_send_ledger_channel.sql`、`internal/store/db_test.go`、`internal/store/ledger.go`、`internal/store/ledger_channel_test.go`
+
+- [ ] **Step 1：写失败的测试**：`ledger_channel_test.go` —— 每个渠道各花各的、一个渠道不足则整次不预留、部署与凭据的上限把渠道加起来、退款按渠道、`ChargeOf` 与 `ChargeOfCampaign`。
+- [ ] **Step 2：跑，确认失败**：`go test ./internal/store -run 'Channel' -count=1`（`undefined: Charge`）。
+- [ ] **Step 3：迁移**：`send_ledger` 重建（旧行记 default）+ `messages_claim_channel` 索引；`db_test.go` 计数 9。
+- [ ] **Step 4：账本**：`Charge`（`Total`/`Channels`/`plus`/`minus`/`beyond`）、`Limits`、`Reserve`/`reserveTx`/`Refund`/`refundTx`/`Reserved`/`ReservedByChannel`。
+- [ ] **Step 5：消息侧**：`insertMessagesTx` 返回按渠道的写入数（`RETURNING channel`）、`insertChunk`、`ReserveAndInsert`、`ReserveForResume`、`ChargeOfCampaign`。
+- [ ] **Step 6：跑，确认通过**：`go test ./internal/store -count=1`。
+- [ ] **Step 7：提交**：`feat(store): reserve the day's budget per channel`。
+
+### Task 2：引擎按渠道入队
+
+**Files:** `internal/mailer/engine.go`、`internal/mailer/lane.go`、`internal/app/channels.go`、`internal/mailer/engine_routes_test.go`
+
+- [ ] **Step 1：写测试**：规则决定 `messages.channel`；比例分流按渠道预留；规则指向没有 lane 的渠道则整步拒绝并说出渠道；渠道自己的 `max_per_day` 不够时理由点名；确认信在渠道不可用时退回 default；测试信按收件地址定渠道。
+- [ ] **Step 2：实现**：`picker`/`pickerFor`/`cannotSendThrough`/`channelRefusal`/`oneOffChannel`/`dayLimits`；`toMessages`、`stepMessages`、last-chance、`Test`、`queueSignup` 都定渠道（并给 `queueSignup` 补 `Provider`）；`sesQuotaRefusal(charge)` 按渠道；`budgetReason(charge, limits)` 先点渠道名。
+- [ ] **Step 3：跑**：`go test -count=1 ./internal/mailer/`（现有测试不改断言即通过）。
+- [ ] **Step 4：提交**：`feat(mailer): assign a channel when a message is queued`。
+
+### Task 3：发送前检查按渠道
+
+**Files:** `internal/core/checks/checks.go`、`internal/presend/presend.go`、`internal/app/channels.go`、`internal/mcpsrv/read.go`、`cmd/nibwire/campaign_more.go`
+
+- [ ] **Step 1：写测试**：`checks` 的 domain 消息按渠道（default 保留旧措辞）；presend 问每个用到的渠道。
+- [ ] **Step 2：实现**：`Input.UnverifiedChannels`；`presend.ChannelIdentities` 与 `Audience.ChannelsForAudience`；`App.IdentitiesOf`、`mcpsrv.channelIdentities`。
+- [ ] **Step 3：跑**：`go test -count=1 ./internal/core/checks/ ./internal/presend/ ./internal/app/`。
+- [ ] **Step 4：提交**：并入 Task 4 的提交。
+
+### Task 4：`route test`
+
+**Files:** `cmd/nibwire/route.go`、`cmd/nibwire/testdata/script/routes.txtar`、`internal/core/route/route.go`
+
+- [ ] **Step 1：写脚本**：`routes.txtar` 增加 `route test` 一段（受众、逐规则人数、比例分流的每渠道人数、停用渠道、未验证域名、未知 slug、`--json`）。
+- [ ] **Step 2：跑，确认失败**：`go test ./cmd/nibwire -run 'TestScripts/routes' -count=1`（unknown command "test"）。
+- [ ] **Step 3：实现**：`route test --newsletter`；`route.PickRule`/`Rule.Channel`/`Counts`。
+- [ ] **Step 4：跑，确认通过**：`go test -count=1 ./cmd/nibwire/`。
+- [ ] **Step 5：提交**：`feat: the pre-send check reads the channels, and route test reports them`。
+
+### Task 5：验证与 PR
+
+- [ ] **Step 1：全量验证**
+
+```bash
+make lint
+make test
+COMPOSE_PROJECT_NAME=nib1a scripts/compose-smoke.sh
+```
+
+- [ ] **Step 2：推送并开 PR**：`Fixes #76`；写清 0008 的升级顺序与回滚后果、与计划的偏离、测试证据。
 
 **升级**：0008 重建 `send_ledger` 后主键变为 `(day, credential_id, channel)`，旧版二进制的 `ON CONFLICT(day, credential_id)` 会失败。升级顺序与 0005 相同：停 `serve` → `nibwire db backup` → 换二进制 → 启动；回滚需要恢复备份。PR 描述必须写明。
 
-**验收**：设计第 8 节"路由""额度"两行；现有预算与配额测试通过（无规则时全部归 default，行为不变）。
+**验收**：设计第 8 节"路由""额度"两行；无规则时行为与之前完全相同（现有预算与配额测试不改断言即通过）。
 
 ---
 

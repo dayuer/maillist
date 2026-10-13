@@ -66,7 +66,9 @@ func TestQueueRefusesWhenTheDayHasNoRoom(t *testing.T) {
 
 	// The fixture's own budget is generous; spend it first.
 	day := store.Day(time.Now().UTC())
-	if fits, err := f.db.Reserve(ctx, day, "", f.engine.cfg.Limits.MaxSendsPerDay, 0, 0); err != nil || !fits {
+	if fits, err := f.db.Reserve(ctx, day, "",
+		store.Charge{model.DefaultChannel: f.engine.cfg.Limits.MaxSendsPerDay},
+		store.Limits{Global: f.engine.cfg.Limits.MaxSendsPerDay}); err != nil || !fits {
 		t.Fatalf("spending the day = %v %v", fits, err)
 	}
 

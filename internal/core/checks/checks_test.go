@@ -31,12 +31,12 @@ func renderedFor(body string) Rendered {
 // tests/render-email.test.mjs "presend checks block on missing essentials and sending off".
 func TestPresendChecksBlockOnMissingEssentialsAndSendingOff(t *testing.T) {
 	cs := Run(Input{
-		Campaign:       model.Campaign{Subject: "", PreviewText: "", Body: ""},
-		Newsletter:     model.Newsletter{},
-		Rendered:       renderedFor(""),
-		SendingOn:      false,
-		DomainVerified: false,
-		Limits:         model.Limits{MaxEmailBytes: 100_000},
+		Campaign:           model.Campaign{Subject: "", PreviewText: "", Body: ""},
+		Newsletter:         model.Newsletter{},
+		Rendered:           renderedFor(""),
+		SendingOn:          false,
+		UnverifiedChannels: []string{model.DefaultChannel},
+		Limits:             model.Limits{MaxEmailBytes: 100_000},
 	})
 	var blocking []string
 	for _, c := range cs {
@@ -50,6 +50,35 @@ func TestPresendChecksBlockOnMissingEssentialsAndSendingOff(t *testing.T) {
 	}
 }
 
+// The domain row names the channels that have not verified the sending domain: "the SES account"
+// keeps its old wording, and a channel of its own is named.
+func TestTheDomainCheckNamesEveryUnverifiedChannel(t *testing.T) {
+	campaign := model.Campaign{Subject: "Hello", PreviewText: "Hi", Body: "Text"}
+	for name, unverified := range map[string]struct {
+		channels []string
+		want     string
+	}{
+		"the default channel": {[]string{model.DefaultChannel}, "Verify the sending domain in SES"},
+		"one channel":         {[]string{"aws2"}, "Verify the sending domain in aws2"},
+		"two channels":        {[]string{"aws2", "back"}, "Verify the sending domain in aws2, back"},
+	} {
+		cs := Run(Input{
+			Campaign: campaign, Newsletter: readyNewsletter, Rendered: renderedFor("Text"),
+			SendingOn: true, UnverifiedChannels: unverified.channels,
+			Limits: model.Limits{MaxEmailBytes: 100_000},
+		})
+		var domain Check
+		for _, c := range cs {
+			if c.ID == "domain" {
+				domain = c
+			}
+		}
+		if domain.OK || domain.Message != unverified.want {
+			t.Errorf("%s: domain = %+v, want %q", name, domain, unverified.want)
+		}
+	}
+}
+
 // tests/render-email.test.mjs "presend checks pass when everything is ready".
 func TestPresendChecksPassWhenEverythingIsReady(t *testing.T) {
 	campaign := model.Campaign{
@@ -57,12 +86,11 @@ func TestPresendChecksPassWhenEverythingIsReady(t *testing.T) {
 		TestSentAt: func() *time.Time { v := time.Now(); return &v }(),
 	}
 	cs := Run(Input{
-		Campaign:       campaign,
-		Newsletter:     readyNewsletter,
-		Rendered:       renderedFor(campaign.Body),
-		SendingOn:      true,
-		DomainVerified: true,
-		Limits:         model.Limits{MaxEmailBytes: 100_000},
+		Campaign:   campaign,
+		Newsletter: readyNewsletter,
+		Rendered:   renderedFor(campaign.Body),
+		SendingOn:  true,
+		Limits:     model.Limits{MaxEmailBytes: 100_000},
 	})
 	if _, blocked := Blocked(cs); blocked {
 		t.Fatalf("unexpected block in %+v", cs)
@@ -97,12 +125,11 @@ func TestRunReturnsTenChecksInOrder(t *testing.T) {
 
 func TestBlockedReturnsTheFirstBlockingFailure(t *testing.T) {
 	cs := Run(Input{
-		Campaign:       model.Campaign{Subject: "Hello", Body: "Text", PreviewText: "Hi"},
-		Newsletter:     readyNewsletter,
-		Rendered:       renderedFor("Text"),
-		SendingOn:      false,
-		DomainVerified: true,
-		Limits:         model.Limits{MaxEmailBytes: 100_000},
+		Campaign:   model.Campaign{Subject: "Hello", Body: "Text", PreviewText: "Hi"},
+		Newsletter: readyNewsletter,
+		Rendered:   renderedFor("Text"),
+		SendingOn:  false,
+		Limits:     model.Limits{MaxEmailBytes: 100_000},
 	})
 	c, blocked := Blocked(cs)
 	if !blocked || c.ID != "sending" {

@@ -129,6 +129,17 @@ func ParseSplit(text string) ([]Target, error) {
 	return targets, nil
 }
 
+// Counts is where an audience would go: how many of its messages each channel would carry. It is
+// Pick applied to everyone, and it exists so that what the pre-send check verifies and what
+// `route test` reports is the same answer the queue would produce, rather than a second opinion.
+func Counts(rules []Rule, contacts []model.Contact) map[string]int {
+	counts := map[string]int{}
+	for _, contact := range contacts {
+		counts[Pick(rules, contact.ID, contact.Email)]++
+	}
+	return counts
+}
+
 // Validate reports whether rules can be used as they stand: each one matches something, sends
 // somewhere and can be hashed, and the single default rule — when there is one — is last.
 func Validate(rules []Rule) error {
@@ -170,13 +181,23 @@ func Validate(rules []Rule) error {
 // contactID may be empty for one-off mail, a test message or a confirmation: there the address
 // stands in for it, so the same recipient lands in the same share of a split every time.
 func Pick(rules []Rule, contactID, email string) string {
-	for _, rule := range rules {
-		if !rule.Match.matches(email) {
-			continue
-		}
-		return rule.pick(splitKey(contactID, email))
+	rule, ok := PickRule(rules, contactID, email)
+	if !ok {
+		return model.DefaultChannel
 	}
-	return model.DefaultChannel
+	return rule.pick(splitKey(contactID, email))
+}
+
+// PickRule is Pick with the rule that decided it, and false when no rule did — the message goes to
+// the default channel, which is where a deployment with no rules sends everything. `route test`
+// reports per rule, and that is what it asks this for.
+func PickRule(rules []Rule, contactID, email string) (Rule, bool) {
+	for _, rule := range rules {
+		if rule.Match.matches(email) {
+			return rule, true
+		}
+	}
+	return Rule{}, false
 }
 
 // pick sends a one-target rule straight to its channel; several targets are split by weight, so
@@ -207,6 +228,12 @@ func (r Rule) pick(key string) string {
 		remaining -= uint64(target.Weight)
 	}
 	return channel
+}
+
+// Channel is the channel this rule sends a message through: what Pick returns once the rule has
+// matched, without asking the other rules again.
+func (r Rule) Channel(contactID, email string) string {
+	return r.pick(splitKey(contactID, email))
 }
 
 // matches reports whether a message to this address is the rule's business.

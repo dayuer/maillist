@@ -57,7 +57,7 @@ func runChildReservingAStep(path string) int {
 		})
 	}
 	fmt.Println("writing")
-	if _, _, err := db.ReserveAndInsert(ctx, Day(now), "", len(messages), 100_000, 0,
+	if _, _, err := db.ReserveAndInsert(ctx, Day(now), "", Limits{Global: 100_000},
 		messages); err != nil {
 		fmt.Fprintln(os.Stderr, "child reserve:", err)
 		return 1

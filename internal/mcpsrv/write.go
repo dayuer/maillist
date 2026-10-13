@@ -330,7 +330,7 @@ func sendTest(ctx context.Context, sess *session, credential store.Credential, i
 	if err != nil {
 		// Nothing was sent, so the day must not stay charged for it — the engine refunds a step the
 		// same way when messages it had reserved could not be written.
-		if refundErr := sess.deps.Store.Refund(ctx, store.Day(time.Now()), credential.ID, 1); refundErr != nil {
+		if refundErr := sess.deps.Store.Refund(ctx, store.Day(time.Now()), credential.ID, oneThroughDefault()); refundErr != nil {
 			sess.deps.Log.Error("refund the test send", "credential", credential.ID, "error", refundErr)
 		}
 		return sendTestOut{}, err
@@ -858,9 +858,15 @@ func (s *session) audienceSize(ctx context.Context, campaign model.Campaign) (in
 
 // chargeOne reserves one send against a credential's day, for the one tool that sends a single
 // message itself.
+// oneThroughDefault is the day's charge for the single message one of these tools sends itself: one
+// message, through the default channel. The refund after a send that failed gives back exactly this.
+func oneThroughDefault() store.Charge {
+	return store.Charge{model.DefaultChannel: 1}
+}
+
 func (s *session) chargeOne(ctx context.Context, credential store.Credential) error {
-	fits, err := s.deps.Store.Reserve(ctx, store.Day(time.Now()), credential.ID, 1,
-		s.deps.Config.Limits.MaxSendsPerDay, credential.DailyBudget)
+	fits, err := s.deps.Store.Reserve(ctx, store.Day(time.Now()), credential.ID, oneThroughDefault(),
+		store.Limits{Global: s.deps.Config.Limits.MaxSendsPerDay, Credential: credential.DailyBudget})
 	if err != nil {
 		return err
 	}
