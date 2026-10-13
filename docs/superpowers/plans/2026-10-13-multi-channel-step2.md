@@ -3371,3 +3371,107 @@ PR 描述写明：`Fixes #79`；改动（`core/route`、`0007_routes.sql`、stor
 5. 测试：`Fake` 按错误码失败触发改派；备用渠道未验证域名被跳过；额度不足只改派一部分；全部不可用则暂停；`ErrorThrottle`/`ErrorFail` 不改派；已发送（有 `provider_message_id`）的邮件从不改派；`ErrorQuota` 的渠道在次日自动恢复。
 
 **验收**：设计第 4.4 节与第 8 节"故障切换"一行全部通过；compose 冒烟增加一个第二渠道并验证分流与故障切换。
+
+---
+
+## 2d（第一段）：渠道状态、fallback 链与 MCP 渠道工具
+
+**目标**：把故障切换要读写的状态先落地 —— 渠道的不可用状态、每个渠道的 fallback 链、`route fallback` 与 `channel enable` 的恢复语义 —— 并开放 MCP 的渠道与路由工具。**本段不改变任何邮件的去向**：引擎遇到 `ErrorPause`/`ErrorQuota` 仍按现状暂停 campaign；标记不可用、改派、额度转移、`events.findMessage`/`AdoptProviderMessageID` 校验渠道与 `test_routes` 在 #76（2c-2）合并后的第二段。
+
+**与 2c-2 并行**：本段不碰 `internal/store/messages_channel.go`、`internal/store/ledger.go`、`internal/mailer/engine.go`/`lane.go`/`strays.go`，不建迁移 0008。`route fallback` 放在单独的 `cmd/nibwire/route_fallback.go`，`route.go` 只加一行注册和 `route list` 末尾的一次调用，减少与 `route test` 的冲突。两段都合并后迁移按 0008、0009 的顺序存在；先合并本段的部署会先应用 0009、后应用 0008 —— 两者互不相关（一个改 `channels`、一个重建 `send_ledger`），迁移器按文件名逐个补齐未应用的迁移，顺序无影响。
+
+### 决策
+
+1. **`default` 的不可用状态**：`default` 不是 `channels` 的一行（设计第 3.3 节），但它恰恰是最需要故障切换的渠道。因此 0009 另建一张只有一行的 `default_channel_state`，与 `channels` 的三列同名同义；store 的 `MarkChannelDown`/`ClearChannelDown`/`ChannelDown` 按名字分派，调用方看不到区别。
+2. **记录时间**：设计第 4.4 节要求"记录原因和时间"，第 7 节的表只有 `down_reason`、`down_until`。0009 多加 `down_since`（首次标记的时间；已不可用时再次标记只更新原因与恢复时间，不重置 `down_since`）。
+3. **"不可用"的判定**：`down_reason <> ''` 且（`down_until` 为空，或 `down_until` 晚于现在）。`down_until` 过期即视为恢复，不需要谁去清除；`ses` 渠道按配额轮询恢复的那条路径（第二段）调用 `ClearChannelDown`。判定写成 `store.ChannelDownState.DownAt(now)`，CLI、MCP 与第二段的引擎共用。
+4. **`channel enable` 清除不可用状态**：`SetChannelEnabled(name, true)` 在同一个 UPDATE 里清掉三列（设计第 4.4 节：`ErrorPause` 由运维 `channel enable` 恢复）。`channel enable default` 从"拒绝"改为"清除 default 的不可用状态"（default 的开关仍是 `SENDING_ENABLED`，`channel disable default` 照旧拒绝）。
+5. **`channel enable` 重新校验**（#78 复审）：启用时用 `channelspec.Validate` 校验；有问题照常启用、在 stderr 打印 `warning:` 与问题（启用本身是运维的明确意图，`serve` 启动时仍会拒绝构建失败的渠道）；两个密钥变量都没设时警告"将使用实例角色"，点名两个变量。
+6. **fallback 链**：`route fallback <channel> --to a,b` 整体替换该渠道的链，`--clear` 清空；两者必须且只能给一个。源与目标都可以是 `default`。拒绝：源或目标不存在、目标已停用（与 `route add` 一致）、目标是源自己、同一目标出现两次。校验是纯函数 `channelspec.ValidateFallbacks`。**链只走一跳**：改派只看源渠道自己的链（设计第 4.4 节"fallback 列表中第一个"），所以 a→b、b→a 不构成循环，不拒绝。
+7. **展示**：`route list` 在规则之后逐行打印 `fallback\t<channel>\t<a,b>\t<state>`（`state` 为 `ok` 或链上停用/消失的渠道）；`--json` 仍是规则数组，不改形状（fallback 由 `channel list/show --json` 的 `fallbacks` 字段给出）。`channel list` 的状态列在 `enabled`/`disabled`/`broken` 之外加 `down`；`channel show` 打印 `down`、`down since`、`down until` 与 `fallbacks`。
+8. **MCP**：`list_channels`、`get_channel`、`list_routes`（read）；`test_channel`（send，与 `send_test` 一样计入凭据的当日额度、失败退回）；`set_channel_enabled`（write，启用时清除不可用状态并返回校验警告；`default` 只能启用，即清除不可用状态）。`Deps` 加 `Channels *mailer.Registry` 与 `ChannelProblems map[string]error`，`serve` 与 `nibwire mcp` 传入。渠道与规则由运维配置、数量很小，`list_channels`/`list_routes` 与 `list_domains` 一样不分页。密钥只给变量名与 `set`/`missing`，从不给值。新增渠道、改规则、改 fallback 仍只走 CLI（设计第 3.4 节）。
+
+### 文件
+
+| 文件 | 动作 | 职责 |
+|---|---|---|
+| `internal/store/migrations/0009_channel_state.sql` | 新建 | `channel_fallbacks`；`channels.down_reason`/`down_since`/`down_until`；`default_channel_state` |
+| `internal/store/db_test.go` | 改 | 迁移计数 7→8（与 0008 都合并后为 9） |
+| `internal/store/channel_state.go` | 新建 | `ChannelDownState`、`MarkChannelDown`、`ClearChannelDown`、`ChannelDown`、`SetChannelFallbacks`、`ChannelFallbacks`、`AllChannelFallbacks` |
+| `internal/store/channel_state_test.go` | 新建 | 上述读写，含 default |
+| `internal/store/channels.go` | 改 | `ChannelRow.Down`；启用时清除不可用状态 |
+| `internal/core/channelspec/channelspec.go` | 改 | `SecretVars`、`ValidateFallbacks` |
+| `internal/core/channelspec/channelspec_test.go` | 改 | 两个函数的测试 |
+| `cmd/nibwire/route_fallback.go` | 新建 | `route fallback`；`route list` 的 fallback 行 |
+| `cmd/nibwire/route.go` | 改 | 注册 `newRouteFallbackCmd()`；`route list` 末尾打印 fallback |
+| `cmd/nibwire/channel.go` | 改 | `down` 状态、fallbacks、`enable` 清除与校验警告 |
+| `cmd/nibwire/cli_test.go` | 改 | 测试命令 `channeldown <name> <reason>`（引擎标记不可用要到第二段） |
+| `cmd/nibwire/testdata/script/route_fallback.txtar`、`channels.txtar` | 新建/改 | 命令端到端 |
+| `internal/mcpsrv/channels.go` | 新建 | 五个工具 |
+| `internal/mcpsrv/channels_test.go` | 新建 | 五个工具的测试 |
+| `internal/mcpsrv/tools.go`、`server.go`、`tools_test.go`、`mcp_test.go` | 改 | 登记、`Deps`、两张清单、夹具 |
+| `cmd/nibwire/serve.go`、`cmd/nibwire/mcp.go` | 改 | 传入 `Channels`、`ChannelProblems` |
+
+### Task 0：认领与分支
+
+```bash
+gh issue comment 77 --body "[impl] CLAIM ..."   # 注明：第一段，引擎故障切换在 #76 之后
+gh issue edit 77 --remove-label status:blocked --add-label status:claimed
+git fetch origin && git switch -c impl/failover-groundwork origin/main
+```
+
+本段计划单独提交（`docs(plan): 2d part 1 in detail`，`Refs #77`）。
+
+### Task 1：迁移 0009 与 store
+
+- [ ] **Step 1：写失败的测试** `internal/store/channel_state_test.go`：标记后 `DownAt(now)` 为真、`down_until` 过后为假；再次标记保留 `down_since`、更新原因；`ClearChannelDown` 返回之前是否不可用；`default` 走同一套接口；未知渠道 `ErrNotFound`；空原因被拒绝；`SetChannelEnabled(true)` 清除状态、`false` 不清除；fallback 整体替换、清空、`AllChannelFallbacks` 按渠道名分组且保持顺序。
+- [ ] **Step 2：确认失败**：`go test ./internal/store -run 'ChannelDown|Fallback|Migrate' -count=1` → `undefined: ChannelDownState`
+- [ ] **Step 3：迁移**
+
+```sql
+ALTER TABLE channels ADD COLUMN down_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE channels ADD COLUMN down_since  TEXT;
+ALTER TABLE channels ADD COLUMN down_until  TEXT;
+CREATE TABLE default_channel_state (
+    only        INTEGER PRIMARY KEY CHECK (only = 1),
+    down_reason TEXT NOT NULL DEFAULT '',
+    down_since  TEXT,
+    down_until  TEXT
+);
+INSERT INTO default_channel_state (only) VALUES (1);
+CREATE TABLE channel_fallbacks (
+    channel  TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    fallback TEXT NOT NULL,
+    PRIMARY KEY (channel, position)
+);
+```
+
+- [ ] **Step 4：store 代码**，**Step 5：确认通过**，**Step 6：提交** `feat(store): channel down state and fallback chains`
+
+### Task 2：`channelspec.SecretVars` 与 `ValidateFallbacks`
+
+纯函数与表驱动测试；提交 `feat(channelspec): secret variable names and fallback chain checks`。
+
+### Task 3：`route fallback`、`channel` 的状态与 `enable`
+
+先写 `route_fallback.txtar` 并扩展 `channels.txtar`（`channeldown` 标记后 `channel list` 显示 `down`、`channel show` 显示原因、`channel enable` 清除；`channel enable default` 清除 default 的状态；缺密钥时 `enable` 警告并点名变量），看它失败，再实现；提交 `feat(cli): route fallback, and channel enable clears a channel's down state`。
+
+### Task 4：MCP 工具
+
+`channels_test.go`：`list_channels` 列出 default 与登记的渠道、状态与 fallbacks，不含密钥值；`get_channel` 给出变量名与 set/missing，未知渠道报错；`list_routes` 给出规则、问题与 fallback 链；`test_channel` 走对应渠道的 Fake、计入凭据额度、未知或停用渠道报错并退回额度；`set_channel_enabled` 停用、启用并清除不可用状态、写审计、`default` 只能启用；只读凭据调用写工具被拒绝。更新 `tools_test.go` 的清单与 scope 表。提交 `feat(mcp): channel and route tools`。
+
+### Task 5：验证与 PR
+
+```bash
+make lint
+make test
+COMPOSE_PROJECT_NAME=impl2d scripts/compose-smoke.sh
+```
+
+PR 标题 `feat: channel state, fallbacks and MCP channel tools, multi-channel 2d (part 1)`，描述写 `Refs #77`（issue 留给第二段）、迁移 0009 是纯增量且与 0008 顺序无关、偏离（`down_since`、`default_channel_state`、`channel enable default`）、测试证据。
+
+### 与本节之前的 2d 概要的偏离
+
+- 概要任务 1 的"`channel enable` 清除不可用状态"在本段完成；概要任务 4 的 MCP 工具除 `test_routes`（依赖 2c-2 的 `route test`）外在本段完成。
+- 迁移多一列 `down_since` 与一张 `default_channel_state`（决策 1、2），并同步更新设计第 7 节。
