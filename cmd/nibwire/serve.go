@@ -96,20 +96,24 @@ func runServe(cmd *cobra.Command, _ []string) error {
 			}
 		}()
 
-		errs := make(chan error, 5)
-		var wg sync.WaitGroup
-		for name, run := range map[string]func() error{
-			// The rate follows the account's own numbers (D17), and this is what keeps them current:
-			// it reads once now and again every minute. A server is the process that needs this — it
-			// is the one that sends for hours — while a command asks once before it drains (app.ReadQuota).
-			"quota":     func() error { return a.Poller.Run(runCtx) },
+		components := map[string]func() error{
 			"sender":    func() error { return a.Mailer.Run(runCtx) },
 			"scheduler": func() error { return runner.Run(runCtx) },
 			"http":      func() error { return a.HTTP.Run(runCtx, addr, shutdownTimeout) },
 			"mcp": func() error {
 				return httpsrv.Serve(runCtx, mcpAddr, mcpServer.HTTPHandler(), shutdownTimeout)
 			},
-		} {
+		}
+		// The rate follows each account's own numbers (D17), and the pollers are what keep them
+		// current: one per channel, each reading once now and again every minute. A server is the
+		// process that needs this — it is the one that sends for hours — while a command asks once
+		// before it drains (app.ReadQuota).
+		for _, poller := range a.Pollers {
+			components["quota "+poller.Channel] = func() error { return poller.Run(runCtx) }
+		}
+		errs := make(chan error, len(components))
+		var wg sync.WaitGroup
+		for name, run := range components {
 			wg.Add(1)
 			go func(name string, run func() error) {
 				defer wg.Done()

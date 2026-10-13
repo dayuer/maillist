@@ -99,6 +99,36 @@ func TestNeverHavingReadAQuotaWarnsOnce(t *testing.T) {
 	}
 }
 
+// 其他渠道的配额读不到时，告警带上渠道名，不与 default 的告警共用冷却。
+func TestAChannelsUnreadableQuotaAlertsUnderItsOwnName(t *testing.T) {
+	ctx := context.Background()
+	db := newQuotaTestStore(t)
+	notifier := &alerts.Notifier{
+		Store: db, Sender: NewFake(), From: "alerts@example.net", To: "admin@example.net",
+		AppURL: "https://mail.example.com", SendingOn: true, Log: testLoggerForQuota(),
+	}
+	for _, channel := range []string{"", "aws2"} {
+		bucket := NewBucket(1)
+		t.Cleanup(bucket.Close)
+		poller := &QuotaPoller{
+			Channel: channel, Reader: &flakyQuota{broken: true},
+			Control: ratectl.New(ratectl.Config{Headroom: 0.9}), Bucket: bucket, Alerts: notifier,
+		}
+		poller.pollOnce(ctx, testLoggerForQuota())
+	}
+	rows, err := db.Alerts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for _, row := range rows {
+		keys[row.Key] = true
+	}
+	if len(rows) != 2 || !keys["ses-quota-unreadable"] || !keys["ses-quota-unreadable-aws2"] {
+		t.Fatalf("alert rows = %+v", rows)
+	}
+}
+
 // newQuotaTestStore is a migrated database in the test's own directory.
 func newQuotaTestStore(t *testing.T) *store.DB {
 	t.Helper()

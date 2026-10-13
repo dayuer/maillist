@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 
 	"nibwire/internal/alerts"
+	"nibwire/internal/core/model"
 	"nibwire/internal/core/ratectl"
 )
 
@@ -93,6 +94,9 @@ func (s StaticQuota) Quota(context.Context) (ratectl.Quota, error) { return s.Va
 // rate is one per second until it succeeds, and the operator is told once (the alert's cooldown keeps
 // it to once an hour while it stays broken).
 type QuotaPoller struct {
+	// Channel names the channel whose account this is, for the log and the alert. Empty, or the
+	// default channel, keeps the alert as it was before channels.
+	Channel  string
 	Reader   QuotaReader
 	Control  *ratectl.Controller
 	Bucket   *Bucket
@@ -126,14 +130,27 @@ func (p *QuotaPoller) Run(ctx context.Context) error {
 	}
 }
 
+// channel is the poller's channel, the default one when it was not named.
+func (p *QuotaPoller) channel() string {
+	if p.Channel == "" {
+		return model.DefaultChannel
+	}
+	return p.Channel
+}
+
 // pollOnce is one read. It never returns an error: the sender has a rate either way.
 func (p *QuotaPoller) pollOnce(ctx context.Context, log *slog.Logger) {
 	quota, err := p.Reader.Quota(ctx)
 	if err != nil {
-		log.Warn("could not read the SES sending quota", "error", err)
+		log.Warn("could not read the SES sending quota", "channel", p.channel(), "error", err)
 		if _, known := p.Control.Quota(); !known {
+			key, title := "ses-quota-unreadable", "SES quota could not be read"
+			if p.channel() != model.DefaultChannel {
+				key += "-" + p.channel()
+				title = "SES quota of channel " + p.channel() + " could not be read"
+			}
 			p.Alerts.Send(ctx, alerts.Alert{
-				Key: "ses-quota-unreadable", Title: "SES quota could not be read",
+				Key: key, Title: title,
 				Detail: "Sending at one email per second until it can be: " + err.Error() +
 					". Check the credentials and that the IAM policy allows ses:GetAccount.",
 			})
@@ -143,7 +160,7 @@ func (p *QuotaPoller) pollOnce(ctx context.Context, log *slog.Logger) {
 	now := time.Now().UTC()
 	p.Control.SetQuota(quota, now)
 	FollowControl(p.Control, p.Bucket, now)
-	log.Debug("read the SES sending quota",
+	log.Debug("read the SES sending quota", "channel", p.channel(),
 		"maxSendRate", quota.MaxSendRate, "remaining24h", p.Control.Remaining24h(),
 		"rate", p.Control.Rate(now))
 }

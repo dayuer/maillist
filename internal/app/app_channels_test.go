@@ -140,3 +140,36 @@ func TestNoConfiguredChannelsIsJustTheDefault(t *testing.T) {
 		t.Fatalf("All = %v", all)
 	}
 }
+
+// Every loaded channel has a lane with a poller of its own, and ReadQuota sets each lane's rate from
+// its own account, capped by the channel's max_per_second (multi-channel design §6).
+func TestEachChannelIsPolledAndCappedOnItsOwn(t *testing.T) {
+	cfg := testConfig(t, nil)
+	seed(t, cfg, store.ChannelRow{Name: "aws2", Type: "ses", SecretEnv: "AWS2",
+		Params: map[string]string{"region": "us-east-1"}, MaxPerSecond: 20, Enabled: true})
+	a, err := New(context.Background(), cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	if len(a.Pollers) != 2 || a.Pollers[0].Channel != model.DefaultChannel || a.Pollers[1].Channel != "aws2" {
+		t.Fatalf("pollers = %+v", a.Pollers)
+	}
+	if _, err := a.ReadQuota(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lanes := a.Mailer.Lanes()
+	if len(lanes) != 2 || lanes[1].Channel.Name() != "aws2" {
+		t.Fatalf("lanes = %+v", lanes)
+	}
+	if got := lanes[1].Bucket.Rate(); got != 20 {
+		t.Fatalf("aws2 rate = %v, want its max_per_second, 20", got)
+	}
+	if lanes[0].Control == lanes[1].Control || lanes[0].Bucket == lanes[1].Bucket {
+		t.Fatal("aws2 shares the default channel's controller or bucket")
+	}
+	if got := lanes[0].Bucket.Rate(); got <= 20 {
+		t.Fatalf("default rate = %v: the stand-in account is fast, and aws2's cap is not its own", got)
+	}
+}

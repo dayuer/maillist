@@ -45,31 +45,52 @@ type App struct {
 	// Identities answers "which sending domains does SES consider verified?" — the pre-send check
 	// and `nibwire domains` both read it.
 	Identities mailer.IdentityReader
-	// Quota reads the account's sending limits, and Poller keeps the send rate in step with them
-	// (D17). The server runs the poller; a command reads once instead, see ReadQuota.
-	Quota  mailer.QuotaReader
-	Poller *mailer.QuotaPoller
-	Log    *slog.Logger
+	// Quota reads the default account's sending limits. Pollers keep each channel's send rate in step
+	// with its own account (D17, multi-channel design §6), one per channel, the default's first. The
+	// server runs them; a command reads once instead, see ReadQuota.
+	Quota   mailer.QuotaReader
+	Pollers []*mailer.QuotaPoller
+	Log     *slog.Logger
 }
 
-// ReadQuota reads the account's quota now and applies it to the sending rate.
+// ReadQuota reads every channel's quota now and applies each to that channel's sending rate. It
+// returns the default channel's reading, and its error.
 //
 // A server polls; a command that is about to drain its own queue cannot wait a minute for the first
 // reading, and one it never read is one email a second. The error is returned rather than fatal: a
 // command that cannot read the account sends slowly and says so, which is the same trade the poller
-// makes.
+// makes. Another channel whose quota cannot be read is logged and sends at its floor, the same way.
 func (a *App) ReadQuota(ctx context.Context) (ratectl.Quota, error) {
-	quota, err := a.Quota.Quota(ctx)
-	if err != nil {
-		return ratectl.Quota{}, err
+	var (
+		defaultQuota ratectl.Quota
+		defaultErr   error
+	)
+	for _, lane := range a.Mailer.Lanes() {
+		name := lane.Channel.Name()
+		quota, err := lane.Channel.Quota(ctx)
+		if err != nil {
+			if name == model.DefaultChannel {
+				defaultErr = err
+			} else {
+				a.Log.Warn("could not read a channel's sending quota; it sends at one a second",
+					"channel", name, "error", err)
+			}
+			continue
+		}
+		if quota.ReadAt.IsZero() {
+			// A reader that is not SES — the stand-in the end-to-end tests use — has no time of its
+			// own, and a quota is a fact about a moment: the moment is now.
+			quota.ReadAt = time.Now().UTC()
+		}
+		a.Mailer.SetQuota(name, quota, quota.ReadAt)
+		if name == model.DefaultChannel {
+			defaultQuota = quota
+		}
 	}
-	if quota.ReadAt.IsZero() {
-		// A reader that is not SES — the stand-in the end-to-end tests use — has no time of its own,
-		// and a quota is a fact about a moment: the moment is now.
-		quota.ReadAt = time.Now().UTC()
+	if defaultErr != nil {
+		return ratectl.Quota{}, defaultErr
 	}
-	a.Mailer.SetQuota(model.DefaultChannel, quota, quota.ReadAt)
-	return quota, nil
+	return defaultQuota, nil
 }
 
 // New opens the database (creating and migrating it if needed) and builds the adapters on top.
@@ -137,6 +158,16 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		ChannelConcurrency: config.DefaultSendConcurrency,
 		ChannelProblems:    channelProblems,
 	}, log)
+	pollers := make([]*mailer.QuotaPoller, 0, len(channels.All()))
+	for _, lane := range engine.Lanes() {
+		if lane.Control == nil {
+			continue // nothing follows this lane's quota, so there is nothing to poll for
+		}
+		pollers = append(pollers, &mailer.QuotaPoller{
+			Channel: lane.Channel.Name(), Reader: lane.Channel, Control: lane.Control, Bucket: lane.Bucket,
+			Alerts: notifier, Log: log,
+		})
+	}
 	handler := events.New(db, log).WithAlerts(notifier)
 
 	// The reader surface tells the operator about a signup flood or a key filling the list, so it gets
@@ -158,11 +189,9 @@ func New(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, error)
 		Mailer:          engine,
 		Identities:      identities,
 		Quota:           quota,
-		Poller: &mailer.QuotaPoller{
-			Reader: quota, Control: control, Bucket: engine.Lanes()[0].Bucket, Alerts: notifier, Log: log,
-		},
-		HTTP: http,
-		Log:  log,
+		Pollers:         pollers,
+		HTTP:            http,
+		Log:             log,
 	}, nil
 }
 
