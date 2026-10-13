@@ -1969,11 +1969,30 @@ git commit -m "feat(store): keep routing rules in a routes table
 Refs #79"
 ```
 
-### Task 4：`route` 命令组
+### Task 4：`route` 命令组与 txtar
 
-**Files:** `cmd/nibwire/route.go`、`cmd/nibwire/root.go`
+**Files:** `cmd/nibwire/route.go`、`cmd/nibwire/root.go`、`cmd/nibwire/cli_test.go`、`cmd/nibwire/testdata/script/routes.txtar`
 
-- [ ] **Step 1：命令与实现**
+命令组的测试就是 txtar（与 2a 的 `channel` 一样），所以先写脚本、看它失败，再把命令写出来。
+
+- [ ] **Step 1：`routeid` 测试命令**
+
+脚本能断言输出，但不能把输出绑成变量；id 是随机生成的，而 `route remove`/`route move` 要它。因此在 `cli_test.go` 的 `Cmds` 里加一个 `routeid`：读 `route list --json` 写出的文件，把某条规则的 id 放进环境变量。
+
+```
+routeid routes.json DOMAIN_ID domain:example.org
+```
+
+- [ ] **Step 2：写脚本**
+
+`cmd/nibwire/testdata/script/routes.txtar`：没有规则时的输出；`--match`/`--default`、`--to`/`--split` 的互斥；各类参数把关；加入顺序与 `--default` 最后；`--default` 只能有一条；`move` 换顺序、`move` default 被拒绝；`remove` 与未知 id；渠道停用后 `route list` 标出、`route add` 拒绝；`default` 永远可用；`--json` 有 id 与权重；`audit list --action route.add`。
+
+- [ ] **Step 3：运行，确认失败**
+
+Run: `go test ./cmd/nibwire -run 'TestScripts/routes' -count=1`
+Expected: FAIL，`unknown command "route" for "nibwire"`
+
+- [ ] **Step 4：实现命令组**
 
 ```
 route add (--match <m> | --default) (--to <channel> | --split <a:80,b:20>)
@@ -1984,51 +2003,22 @@ route list
 
 `route add` 先解析（`route.ParseMatch` / `route.ParseSplit`），再在一个 `withApp` 里核对目标渠道（`default` 之外必须已登记且启用），最后一件事才是写库；`route list` 每行 `id\tmatch\ttargets\tstate`，`state` 为 `ok` 或该规则指向的问题（`no channel named x`、`channel x is disabled`）；没有规则时打印一行说明"一切走 default"。
 
-- [ ] **Step 2：跑一遍**
+- [ ] **Step 5：运行，确认通过**
 
-Run: `go build ./... && go test ./cmd/nibwire -run 'Route' -count=1`
-Expected: 现有测试仍通过
+Run: `go test ./cmd/nibwire -run 'TestScripts/routes' -count=1`
+Expected: PASS，随后 `go test -count=1 ./cmd/nibwire/` 也 PASS
 
-- [ ] **Step 3：提交**
+- [ ] **Step 6：提交**
 
 ```bash
-git add cmd/nibwire/route.go cmd/nibwire/root.go
-git commit -m "feat(cli): add, remove, move and list routing rules
+git add cmd/nibwire/route.go cmd/nibwire/root.go cmd/nibwire/cli_test.go \
+    cmd/nibwire/testdata/script/routes.txtar
+git commit -m "feat(cli): route add, remove, move and list
 
 Refs #79"
 ```
 
-### Task 5：txtar 端到端
-
-**Files:** `cmd/nibwire/cli_test.go`、`cmd/nibwire/testdata/script/routes.txtar`
-
-- [ ] **Step 1：`routeid` 测试命令**
-
-脚本能断言输出，但不能把输出绑成变量；id 是随机生成的，`route remove`/`route move` 又要它。因此在 `cli_test.go` 的 `Cmds` 里加一个 `routeid`：读 `route list --json` 写出的文件，把某条规则的 id 放进环境变量。
-
-```
-routeid routes.json DOMAIN_ID domain:example.org
-```
-
-- [ ] **Step 2：写脚本**
-
-`cmd/nibwire/testdata/script/routes.txtar`：没有规则时的输出；`--match`/`--default`、`--to`/`--split` 的互斥；各类参数把关；加入顺序与 `--default` 最后；`--default` 只能有一条；`move` 换顺序、`move` default 被拒绝；`remove` 与未知 id；渠道停用后 `route list` 标出、`route add` 拒绝；`default` 永远可用；`audit list --action route.add`。
-
-- [ ] **Step 3：跑脚本**
-
-Run: `go test ./cmd/nibwire -run 'Scripts/routes' -count=1`
-Expected: PASS
-
-- [ ] **Step 4：提交**
-
-```bash
-git add cmd/nibwire/cli_test.go cmd/nibwire/testdata/script/routes.txtar
-git commit -m "test(cli): routes.txtar covers add, list, move and remove
-
-Refs #79"
-```
-
-### Task 6：验证与 PR
+### Task 5：验证与 PR
 
 - [ ] **Step 1：全量验证**
 

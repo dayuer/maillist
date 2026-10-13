@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/rogpeppe/go-internal/testscript"
+
+	"nibwire/internal/store"
 )
 
 // TestMain registers this binary as "nibwire" so the scripts in testdata/script can run it, and
@@ -70,6 +73,32 @@ func TestScripts(t *testing.T) {
 		// two is exactly that they are large: one is a shape the parser cannot finish, the other is
 		// prose of the same size.
 		Cmds: map[string]func(*testscript.TestScript, bool, []string){
+			// routeid <variable> <match> reads the routes out of the database the script has been
+			// writing and exports the id of one of them, so that `route remove` and `route move`
+			// can be named. A script asserts on output; it cannot bind it to a name, and a route's
+			// id is generated, so this is what puts it in the environment.
+			"routeid": func(ts *testscript.TestScript, neg bool, args []string) {
+				if neg || len(args) != 2 {
+					ts.Fatalf("routeid takes a variable and a match")
+				}
+				ctx := context.Background()
+				db, err := store.Open(ctx, ts.Getenv("NIBWIRE_DB"))
+				if err != nil {
+					ts.Fatalf("open the database: %v", err)
+				}
+				defer func() { _ = db.Close() }()
+				rules, err := db.Routes(ctx)
+				if err != nil {
+					ts.Fatalf("read the routes: %v", err)
+				}
+				for _, rule := range rules {
+					if rule.Match.String() == args[1] {
+						ts.Setenv(args[0], rule.ID)
+						return
+					}
+				}
+				ts.Fatalf("no rule matching %q", args[1])
+			},
 			"writebodies": func(ts *testscript.TestScript, neg bool, args []string) {
 				if neg {
 					ts.Fatalf("writebodies takes no negation")
