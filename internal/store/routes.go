@@ -68,6 +68,36 @@ func (db *DB) CreateRoute(ctx context.Context, row RouteRow) error {
 	})
 }
 
+// RoutesAsRules is every rule as the pure decision takes it: what the engine, the pre-send check and
+// `route test` all feed to route.Pick, so none of them can disagree about where mail goes.
+func (db *DB) RoutesAsRules(ctx context.Context) ([]route.Rule, error) {
+	rows, err := db.Routes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]route.Rule, 0, len(rows))
+	for _, row := range rows {
+		rules = append(rules, route.Rule{ID: row.ID, Match: row.Match, Targets: row.Targets})
+	}
+	return rules, nil
+}
+
+// ChannelsForAudience is how many messages each channel would carry for a newsletter's live audience:
+// the routing rules applied to it. The pre-send checklist verifies the sending domain against these
+// channels, and `route test` reports them — reading the audience here rather than each caller reading
+// it keeps those two answers the same one (design §4.1, §4.6).
+func (db *DB) ChannelsForAudience(ctx context.Context, newsletterID string, limit int) (map[string]int, error) {
+	rules, err := db.RoutesAsRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	contacts, err := db.SelectAudience(ctx, newsletterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return route.Counts(rules, contacts), nil
+}
+
 // Route loads one rule by id.
 func (db *DB) Route(ctx context.Context, id string) (RouteRow, error) {
 	row, err := scanRoute(db.sql.QueryRowContext(ctx,

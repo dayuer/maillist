@@ -46,8 +46,8 @@ func checkOK(t *testing.T, subject, id string) bool {
 		Campaign:   model.Campaign{Subject: subject, PreviewText: "Hi", Body: "Text"},
 		Newsletter: model.Newsletter{PostalAddress: "1 Main St"},
 		Rendered:   renderedFor("Text"),
-		SendingOn:  true, DomainVerified: true,
-		Limits: model.Limits{MaxEmailBytes: 100_000},
+		SendingOn:  true,
+		Limits:     model.Limits{MaxEmailBytes: 100_000},
 	})
 	for _, check := range report {
 		if check.ID == id {

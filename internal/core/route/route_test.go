@@ -244,6 +244,45 @@ func TestSplitIgnoresOtherRules(t *testing.T) {
 	}
 }
 
+// PickRule is Pick with the rule that decided it, which is what `route test` counts by; and a rule's
+// own Channel is that answer once the rule has matched.
+func TestPickRuleNamesTheRuleThatDecidedIt(t *testing.T) {
+	first := Rule{ID: "r1", Match: Match{Domains: []string{"example.org"}}, Targets: single("aws2")}
+	second := Rule{ID: "r2", Match: Match{Default: true}, Targets: single("back")}
+	rules := []Rule{first, second}
+
+	if rule, ok := PickRule(rules, "c1", "someone@example.org"); !ok || rule.ID != "r1" {
+		t.Fatalf("PickRule = %+v %v, want r1", rule, ok)
+	}
+	if rule, ok := PickRule(rules, "c1", "someone@elsewhere.net"); !ok || rule.ID != "r2" {
+		t.Fatalf("PickRule = %+v %v, want r2", rule, ok)
+	}
+	if _, ok := PickRule(nil, "c1", "someone@example.org"); ok {
+		t.Fatal("PickRule found a rule where there are none")
+	}
+	if got := first.Channel("c1", "someone@example.org"); got != "aws2" {
+		t.Fatalf("Channel = %q, want aws2", got)
+	}
+}
+
+// Counts is where an audience goes, which is the number `route test` and the pre-send check both
+// show: one pass, the same decision per contact as Pick.
+func TestCountsAddsUpTheAudience(t *testing.T) {
+	rules := []Rule{
+		{ID: "org", Match: Match{Domains: []string{"example.org"}}, Targets: single("aws2")},
+		{ID: "rest", Match: Match{Default: true}, Targets: single("back")},
+	}
+	contacts := []model.Contact{
+		{ID: "c1", Email: "a@example.org"},
+		{ID: "c2", Email: "b@example.org"},
+		{ID: "c3", Email: "c@example.com"},
+	}
+	counts := Counts(rules, contacts)
+	if counts["aws2"] != 2 || counts["back"] != 1 || len(counts) != 2 {
+		t.Fatalf("Counts = %v, want aws2 2 and back 1", counts)
+	}
+}
+
 // Rules have to be usable as they stand: something to match, somewhere to go, an id to hash with,
 // and the one default rule — when there is one — last.
 func TestValidateKeepsTheDefaultRuleLast(t *testing.T) {

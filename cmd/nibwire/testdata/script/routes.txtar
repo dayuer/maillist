@@ -1,5 +1,5 @@
-# route add|remove|move|list：规则按顺序存进数据库，--default 永远最后，指向停用渠道的
-# 规则被标出。本期只存不生效：入队时分配渠道在 2c-2。
+# route add|remove|move|list|test：规则按顺序存进数据库，--default 永远最后，指向停用渠道的
+# 规则被标出。规则生效在入队时（2c-2）：一封信记在哪个渠道，就是按这些规则定的。
 
 nibwire init
 
@@ -103,6 +103,44 @@ stdout -count=4 'route\.add'
 stdout $OTHER_ID
 nibwire audit list --action route.remove
 stdout -count=1 'route\.remove'
+
+# route test：把真实受众过一遍规则，说出每条规则拿走多少人、每个渠道分到多少人。
+nibwire newsletter create --name 'Field notes' --slug field-notes --from-name 'Jane Doe' --from-email jane@example.net --postal-address '1 Main St, Paris' --archive-enabled
+nibwire contact add reader@example.com --newsletter field-notes
+nibwire contact add other@example.com --newsletter field-notes
+nibwire contact add third@example.org --newsletter field-notes
+
+nibwire route remove $DOMAIN_ID
+nibwire route remove $MAILBOX_ID
+nibwire route remove $DEFAULT_ID
+
+nibwire route add --match domain:example.org --split default:50,aws2:50
+nibwire route add --default --to aws2
+nibwire route test --newsletter field-notes
+stdout '^audience 3$'
+stdout 'domain:example.org\t-> default:50,aws2:50\t1 \(\w+ \d+, \w+ \d+\)'
+stdout '\tdefault\t-> aws2\t2'
+stdout '^\(no rule\)\t-> default\t0$'
+
+nibwire route test --newsletter field-notes --json
+stdout '"audience": 3'
+stdout '"unrouted": 0'
+stdout '"count": 2'
+
+! nibwire route test --newsletter missing
+stderr 'no newsletter with slug missing'
+
+# 停用的渠道会被指出来，而不是等到发信时才发现。
+nibwire channel disable aws2 --yes
+nibwire route test --newsletter field-notes
+stdout 'aws2 would not send: it is disabled'
+nibwire channel enable aws2
+
+# 域名没在这个渠道验证过，也说得出是哪个域名。
+nibwire newsletter create --name 'Other notes' --slug other-notes --from-name 'Jane Doe' --from-email jane@other.test --postal-address '1 Main St, Paris'
+nibwire contact add someone@other.test --newsletter other-notes
+nibwire route test --newsletter other-notes
+stdout 'aws2 has not verified other.test'
 
 # --to 和 --split 一样去掉首尾空格：手抄渠道名时多一个空格不算错。
 nibwire route add --match domain:space.org --to ' aws2'

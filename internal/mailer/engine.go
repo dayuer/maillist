@@ -1569,13 +1569,9 @@ type picker struct {
 // pickerFor reads the rules once for a whole step: a campaign of a hundred thousand messages must not
 // ask the database a hundred thousand times for something that cannot change underneath it.
 func (e *Engine) pickerFor(ctx context.Context) (picker, error) {
-	rows, err := e.store.Routes(ctx)
+	rules, err := e.store.RoutesAsRules(ctx)
 	if err != nil {
 		return picker{}, err
-	}
-	rules := make([]route.Rule, 0, len(rows))
-	for _, row := range rows {
-		rules = append(rules, route.Rule{ID: row.ID, Match: row.Match, Targets: row.Targets})
 	}
 	return picker{rules: rules}, nil
 }

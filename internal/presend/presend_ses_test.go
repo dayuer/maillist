@@ -29,6 +29,17 @@ type audience struct{ count int }
 
 func (a audience) CountActiveContacts(context.Context, string) (int, error) { return a.count, nil }
 
+// oneChannel is the checklist's view of a deployment whose only channel is that reader.
+type oneChannel struct{ identities presend.Identities }
+
+func (c oneChannel) IdentitiesOf(string) (presend.Identities, bool) { return c.identities, true }
+
+// ChannelsForAudience puts the whole audience on the default channel: these tests are about the
+// account being asked, not about routing.
+func (a audience) ChannelsForAudience(context.Context, string, int) (map[string]int, error) {
+	return map[string]int{model.DefaultChannel: a.count}, nil
+}
+
 // checkableCampaign is a campaign whose only open questions are the ones this file is about.
 func checkableCampaign(newsletter model.Newsletter) (model.Campaign, model.Newsletter) {
 	sent := time.Now().UTC()
@@ -71,7 +82,7 @@ func TestThePreSendCheckFindsADomainOnTheThirdPage(t *testing.T) {
 	campaign, newsletter := checkableCampaign(model.Newsletter{
 		ID: "nl_1", Name: "Jane Doe", PostalAddress: "1 Main St, Paris", FromEmail: "jane@example.net",
 	})
-	report, err := presend.Assemble(context.Background(), reader, audience{count: 1},
+	report, err := presend.Assemble(context.Background(), oneChannel{reader}, audience{count: 1},
 		sendingConfig(), campaign, newsletter)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +103,7 @@ func TestATenantAsksAboutOneDomainAndNeverEnumerates(t *testing.T) {
 	campaign, newsletter := checkableCampaign(model.Newsletter{
 		ID: "nl_1", Name: "Jane Doe", PostalAddress: "1 Main St, Paris", FromEmail: "jane@example.net",
 	})
-	report, err := presend.Assemble(context.Background(), reader, audience{count: 1},
+	report, err := presend.Assemble(context.Background(), oneChannel{reader}, audience{count: 1},
 		sendingConfig(), campaign, newsletter)
 	if err != nil {
 		t.Fatal(err)
